@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>io.flowscope</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>--disable-warning=ExperimentalWarning</string>
+    <string>/usr/local/lib/flowscope/dist/src/cli.js</string>
+    <string>start</string>
+  </array>
+  <key>WorkingDirectory</key><string>/usr/local/lib/flowscope</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FLOWSCOPE_DATA_DIR</key><string>/Library/Application Support/FlowScope</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/var/log/flowscope.log</string>
+  <key>StandardErrorPath</key><string>/var/log/flowscope.log</string>
+</dict>
+</plist>

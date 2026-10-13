@@ -1,0 +1,56 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+
+  clickhouse:
+    runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:25.8
+        ports: ["8123:8123"]
+        env:
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
+        options: >-
+          --health-cmd "wget -qO- http://localhost:8123/ping"
+          --health-interval 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm install --no-audit --no-fund
+      - run: node tools/build.mjs
+      - run: node --test --test-concurrency=1 dist/test/clickhouse.test.js
+        env:
+          FLOWSCOPE_TEST_CLICKHOUSE: http://127.0.0.1:8123
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t flowscope:ci .
+      - name: Start and wait for the health check
+        run: |
+          docker run -d --name fs -e FLOWSCOPE_ADMIN_PASSWORD='ci-password-12345' -p 8443:8443 flowscope:ci
+          for i in $(seq 1 40); do
+            s=$(docker inspect -f '{{.State.Health.Status}}' fs)
+            echo "health: $s"; [ "$s" = healthy ] && exit 0; sleep 3
+          done
+          docker logs fs; exit 1

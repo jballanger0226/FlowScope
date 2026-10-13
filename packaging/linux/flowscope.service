@@ -1,0 +1,33 @@
+[Unit]
+Description=FlowScope NetFlow/IPFIX collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flowscope
+Group=flowscope
+WorkingDirectory=/opt/flowscope
+EnvironmentFile=-/etc/flowscope/flowscope.env
+Environment=FLOWSCOPE_DATA_DIR=/var/lib/flowscope
+ExecStart=/usr/bin/env node --disable-warning=ExperimentalWarning /opt/flowscope/dist/src/cli.js start
+Restart=on-failure
+RestartSec=5
+StateDirectory=flowscope
+ConfigurationDirectory=flowscope
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+ReadWritePaths=/var/lib/flowscope
+
+[Install]
+WantedBy=multi-user.target

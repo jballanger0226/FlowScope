@@ -1,0 +1,8 @@
+node_modules
+dist
+data
+.git
+*.log
+test
+docs
+packaging

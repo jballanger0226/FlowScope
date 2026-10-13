@@ -1,0 +1,37 @@
+# docker compose up -d                       FlowScope with embedded SQLite storage
+# docker compose --profile clickhouse up -d  also starts ClickHouse (experimental backend, pick it under Storage)
+services:
+  flowscope:
+    build: .
+    image: flowscope:latest
+    restart: unless-stopped
+    ports:
+      - "8443:8443/tcp"     # web console
+      - "2055:2055/udp"     # NetFlow v5 / v9 / IPFIX
+      - "4739:4739/udp"     # IPFIX
+    volumes:
+      - flowscope-data:/data
+    environment:
+      # First start only: password for the "admin" account (12+ characters). If unset, one is generated and printed in the log.
+      FLOWSCOPE_ADMIN_PASSWORD: ${FLOWSCOPE_ADMIN_PASSWORD:-}
+      # FLOWSCOPE_TLS: "off"                 # serve plain HTTP on 8080 behind your own TLS proxy
+      # FLOWSCOPE_PUBLIC_URL: https://flows.example.com   # needed for SAML behind a proxy
+      FLOWSCOPE_CLICKHOUSE_URL: ${FLOWSCOPE_CLICKHOUSE_URL:-}
+
+  clickhouse:
+    profiles: ["clickhouse"]
+    image: clickhouse/clickhouse-server:25.8
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: flowscope
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    # Not published: only FlowScope needs it. Set FLOWSCOPE_CLICKHOUSE_URL=http://flowscope:<password>@clickhouse:8123/flowscope
+
+volumes:
+  flowscope-data:
+  clickhouse-data:
