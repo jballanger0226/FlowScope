@@ -76,7 +76,7 @@ export function spinner(text = 'Loading…'): VNode { return h('div', { class: '
 /* ------------------------------------------------------------------ line charts */
 
 export interface Series { name: string; color: string; points: { t: number; v: number }[] }
-export const PALETTE = ['#3FD0BC', '#F2B84B', '#7DB2FF', '#FF9DBA', '#8FE0A8', '#C9B6FF', '#FF8A8A', '#9CC4FF'];
+export const PALETTE = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)', 'var(--s6)', 'var(--s7)', 'var(--s8)'];
 
 /** A line chart drawn with SVG. Shaded bands mark time spans (events). */
 export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; fmtT: (t: number) => string; wide?: boolean }): VNode {
@@ -93,6 +93,6 @@ export function lineChart(o: { title: string; unit: (v: number) => string; serie
       grid.map((g, i) => h('g', { key: 'g' + i }, h('line', { x1: L, x2: W - R, y1: y(g), y2: y(g), class: 'gridline' }), h('text', { x: L - 6, y: y(g) + 4, class: 'axis', 'text-anchor': 'end' }, o.unit(g)))),
       (o.bands ?? []).map((b, i) => h('rect', { key: 'b' + i, x: x(Math.max(o.from, b.a)), y: T, width: Math.max(2, x(Math.min(o.to, b.b)) - x(Math.max(o.from, b.a))), height: H - T - B, class: 'band' })),
       o.threshold !== undefined ? h('line', { x1: L, x2: W - R, y1: y(o.threshold), y2: y(o.threshold), class: 'thr' }) : null,
-      o.series.map((s, i) => s.points.length ? h('polyline', { key: 's' + i, fill: 'none', stroke: s.color, 'stroke-width': 1.8, 'stroke-linejoin': 'round', points: s.points.map(p => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ') }) : null),
+      o.series.map((s, i) => s.points.length ? h('polyline', { key: 's' + i, fill: 'none', style: `stroke:${s.color}`, 'stroke-width': 1.8, 'stroke-linejoin': 'round', points: s.points.map(p => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ') }) : null),
       xt.map((t, i) => h('text', { key: 'x' + i, x: x(t), y: H - 6, class: 'axis', 'text-anchor': i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle' }, o.fmtT(t)))));
 }

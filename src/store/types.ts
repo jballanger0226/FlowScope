@@ -20,6 +20,8 @@ export type Cond =
   | { kind: 'outif'; ips: string[]; ifIndex: number }
   | { kind: 'qos'; mode: 'changed' | 'unchanged' }
   | { kind: 'dscp'; values: number[] }
+  /** Streams whose TTL ran out before reaching the destination (mode 'expired'), or the ones that did not (mode 'ok'). Needs raw data. */
+  | { kind: 'ttl'; mode: 'expired' | 'ok' }
   | { kind: 'text'; text: string; ips: string[]; vlans: number[]; ports: number[] };
 
 export interface StreamQuery {
@@ -28,6 +30,8 @@ export interface StreamQuery {
   sort: 'time' | 'bytes' | 'pkts';
   dir: 'asc' | 'desc';
   limit: number;
+  /** Addresses owned by our own routers. Traffic addressed to them is not reported as TTL-expired. */
+  localIps?: string[];
 }
 
 export interface StreamRow {
@@ -38,6 +42,11 @@ export interface StreamRow {
   exporters: string[];
   vlan: number | null;
   qosChanged: boolean;
+  /** The TTL ran out before the stream reached its destination: 'ttl' = an exporter saw TTL 1 or less, 'icmp' = an ICMP Time Exceeded message. */
+  ttlExpired: boolean;
+  ttlReason: 'ttl' | 'icmp' | null;
+  /** Lowest TTL seen where it ran out (only when ttlReason is 'ttl'). */
+  ttlLow: number | null;
   flags: number;
   /** DSCP seen first, and the DSCP it became when the stream was re-marked (otherwise null). */
   dscpIn: number;
@@ -58,6 +67,7 @@ export interface ReportSpec {
   sortBy: 'bytes' | 'pkts' | 'flows';
   topN: number;
   exporter?: string;
+  localIps?: string[];
 }
 
 export interface ReportRow { dims: Record<string, string | number | null>; bytes: number; pkts: number; flows: number }

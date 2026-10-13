@@ -1,5 +1,6 @@
 import type { FlowRecord } from '../collector/types.js';
 import { appName, dscpName, protoName } from '../query/apps.js';
+import { ttlEvidence } from './ttl.js';
 
 export interface HopContext {
   deviceName(exporterIp: string): string;
@@ -11,9 +12,11 @@ export interface HopContext {
   policyOf?(exporterIp: string, outIf: number): string | null;
   vlanName?(id: number): string;
   slowLinkMs?: number;
+  /** Addresses of our own routers; traffic addressed to them is never reported as TTL-expired. */
+  localIps?: ReadonlySet<string>;
 }
 
-export type ObsKind = 'loss' | 'slow' | 'remark' | 'qdrop' | 'nat' | 'path' | 'info';
+export type ObsKind = 'loss' | 'slow' | 'remark' | 'qdrop' | 'nat' | 'path' | 'ttl' | 'info';
 export interface Observation { kind: ObsKind; text: string; severity: 'info' | 'warn' | 'bad' }
 
 export interface HopView {
@@ -25,6 +28,8 @@ export interface HopView {
   frameSrc: string | null; frameDst: string | null;
   vlan: number | null; vlanName: string;
   ttl: number | null;
+  /** The TTL ran out at this hop ('ttl'), or this hop exported an ICMP Time Exceeded message ('icmp'). */
+  ttlExpired: 'ttl' | 'icmp' | null;
   dscpIn: number; dscpOut: number | null;
   dscpInS: string; dscpOutS: string;
   qosChanged: boolean;
@@ -44,6 +49,8 @@ export interface StreamDetail {
   forward: HopView[];
   reverse: HopView[];
   qosChanged: boolean;
+  /** The stream ran out of TTL before reaching its destination (or an ICMP Time Exceeded message was seen for it). */
+  ttlExpired: boolean;
   totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number };
   note: string | null;
 }
@@ -52,9 +59,10 @@ interface Agg {
   exporter: string; recs: FlowRecord[]; pkts: number; bytes: number; t0: number; t1: number;
   ttl: number | null; tosIn: number; tosOut: number | null; inIf: number; outIf: number;
   macS: string | null; macD: string | null; vlan: number | null; nat: FlowRecord | null; multiPath: boolean;
+  ttlLow: number | null; ttlWhy: 'ttl' | 'icmp' | null;
 }
 
-function aggregate(recs: FlowRecord[]): Agg[] {
+function aggregate(recs: FlowRecord[], local: ReadonlySet<string>): Agg[] {
   const by = new Map<string, FlowRecord[]>();
   for (const r of recs) { const a = by.get(r.exporter); if (a) a.push(r); else by.set(r.exporter, [r]); }
   const out: Agg[] = [];
@@ -62,7 +70,10 @@ function aggregate(recs: FlowRecord[]): Agg[] {
     let pkts = 0, bytes = 0, t0 = Infinity, t1 = 0, ttl: number | null = null;
     const ifBytes = new Map<string, number>();
     let nat: FlowRecord | null = null;
+    let ttlLow: number | null = null, ttlWhy: 'ttl' | 'icmp' | null = null;
     for (const r of rs) {
+      const ev = ttlEvidence(r, local);
+      if (ev === 'ttl') { ttlWhy = 'ttl'; ttlLow = ttlLow === null ? r.ttlMin : Math.min(ttlLow, r.ttlMin as number); } else if (ev === 'icmp' && ttlWhy === null) ttlWhy = 'icmp';
       pkts += r.pkts; bytes += r.bytes; t0 = Math.min(t0, r.ts0); t1 = Math.max(t1, r.ts1);
       if (r.ttlMax !== null) ttl = ttl === null ? r.ttlMax : Math.max(ttl, r.ttlMax);
       const k = r.inIf + '>' + r.outIf; ifBytes.set(k, (ifBytes.get(k) ?? 0) + r.bytes);
@@ -75,7 +86,7 @@ function aggregate(recs: FlowRecord[]): Agg[] {
     const post = rs.find(r => r.postTos !== null && r.postTos !== undefined);
     out.push({
       exporter, recs: rs, pkts, bytes, t0, t1, ttl, tosIn: main.tos >> 2, tosOut: post && post.postTos !== null ? post.postTos >> 2 : null,
-      inIf: ii, outIf: oo, macS: main.srcMac, macD: main.dstMac, vlan: main.vlan, nat, multiPath: ifBytes.size > 1
+      inIf: ii, outIf: oo, macS: main.srcMac, macD: main.dstMac, vlan: main.vlan, nat, multiPath: ifBytes.size > 1, ttlLow, ttlWhy
     });
   }
   return out;
@@ -91,7 +102,8 @@ function order(a: Agg[]): Agg[] {
 
 function buildHops(recs: FlowRecord[], ctx: HopContext): HopView[] {
   if (!recs.length) return [];
-  const aggs = order(aggregate(recs));
+  const aggs = order(aggregate(recs, ctx.localIps ?? new Set()));
+  const dest = recs[0].dstIp;
   const slow = ctx.slowLinkMs ?? 30;
   const hops: HopView[] = [];
   let cum = 0;
@@ -126,6 +138,8 @@ function buildHops(recs: FlowRecord[], ctx: HopContext): HopView[] {
       const to = `${r.natSrcIp ?? r.srcIp}${r.natSport ? ':' + r.natSport : ''} → ${r.natDstIp ?? r.dstIp}${r.natDport ? ':' + r.natDport : ''}`;
       obs.push({ kind: 'nat', severity: 'info', text: `NAT applied: ${to}` });
     }
+    if (a.ttlWhy === 'ttl') obs.push({ kind: 'ttl', severity: 'bad', text: `TTL expired at ${dev}: packets arrived with TTL ${a.ttlLow} and could not be forwarded, so they did not reach ${dest}` });
+    else if (a.ttlWhy === 'icmp') obs.push({ kind: 'ttl', severity: 'bad', text: `${dev} exported an ICMP Time Exceeded message: a router reported that a packet's TTL ran out on its way to ${dest}` });
     if (a.multiPath) obs.push({ kind: 'path', severity: 'info', text: 'Traffic used more than one interface pair on this device (load sharing or a path change)' });
     const drops = ctx.classDrops?.(a.exporter, a.outIf, a.t0 - 120_000, a.t1 + 120_000, dscpOut ?? a.tosIn) ?? [];
     for (const d of drops) {
@@ -135,7 +149,7 @@ function buildHops(recs: FlowRecord[], ctx: HopContext): HopView[] {
       n: i + 1, exporter: a.exporter, dev, role: ctx.deviceRole(a.exporter),
       inIf: ctx.ifName(a.exporter, a.inIf), outIf: ctx.ifName(a.exporter, a.outIf),
       frameSrc: a.macS, frameDst: a.macD, vlan: a.vlan, vlanName: a.vlan && ctx.vlanName ? ctx.vlanName(a.vlan) : '',
-      ttl: a.ttl, dscpIn: a.tosIn, dscpOut, dscpInS: dscpName(a.tosIn), dscpOutS: dscpOut === null ? 'not reported' : dscpName(dscpOut), qosChanged,
+      ttl: a.ttl, ttlExpired: a.ttlWhy, dscpIn: a.tosIn, dscpOut, dscpInS: dscpName(a.tosIn), dscpOutS: dscpOut === null ? 'not reported' : dscpName(dscpOut), qosChanged,
       pkts: a.pkts, bytes: a.bytes, firstSeen: a.t0, lastSeen: a.t1, linkMs, cumMs,
       policy: ctx.policyOf?.(a.exporter, a.outIf) ?? null, obs
     });
@@ -162,6 +176,7 @@ export function analyzeStream(skey: string, recs: (FlowRecord & { primary?: bool
     proto: first.proto, protoName: protoName(first.proto), app: appName(first.proto, first.sport, first.dport),
     t0: Math.min(...recs.map(r => r.ts0)), t1: Math.max(...recs.map(r => r.ts1)),
     forward, reverse, qosChanged: all.some(h => h.qosChanged || h.obs.some(o => o.kind === 'remark')),
+    ttlExpired: all.some(h => h.ttlExpired !== null),
     totals: { fwdBytes: sum(fwdRecs, 'bytes'), revBytes: sum(revRecs, 'bytes'), fwdPkts: sum(fwdRecs, 'pkts'), revPkts: sum(revRecs, 'pkts') },
     note
   };

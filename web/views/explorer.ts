@@ -7,22 +7,24 @@ import { bytes, clock, dayClock, dur, ms, num, RANGES, stamp, debounce } from '.
 interface Row {
   id: string; srcIp: string; dstIp: string; sport: number; dport: number; proto: number; protoName: string; app: string; vlan: number | null; vlanName: string;
   t0: number; t1: number; bytes: number; pkts: number; fwdBytes: number; revBytes: number; hopCount: number; hops: string[]; qosChanged: boolean;
+  ttlExpired: boolean; ttlReason: 'ttl' | 'icmp' | null; ttlLow: number | null;
   dscpInS: string; dscpOutS: string | null; flags: number; health: { kind: 'ok' | 'warn' | 'bad'; text: string } | null;
 }
 interface Hop {
   n: number; exporter: string; dev: string; role: string; inIf: string; outIf: string; frameSrc: string | null; frameDst: string | null; vlan: number | null; vlanName: string;
-  ttl: number | null; dscpInS: string; dscpOutS: string; qosChanged: boolean; pkts: number; bytes: number; linkMs: number | null; cumMs: number | null; policy: string | null;
+  ttl: number | null; ttlExpired: 'ttl' | 'icmp' | null; dscpInS: string; dscpOutS: string; qosChanged: boolean; pkts: number; bytes: number; linkMs: number | null; cumMs: number | null; policy: string | null;
   obs: { kind: string; text: string; severity: 'info' | 'warn' | 'bad' }[]; firstSeen: number; lastSeen: number;
 }
 interface Detail {
   skey: string; initiator: { ip: string; port: number }; responder: { ip: string; port: number }; proto: number; protoName: string; app: string; t0: number; t1: number;
-  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null;
+  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null;
   activity: { t0: number; t1: number; fwd: number[]; rev: number[] };
 }
 
 let q = '';
 const protos = { tcp: true, udp: true, icmp: true };
 let qosOnly = false;
+let ttlOnly = false;
 let range = '6h';
 let sort: { key: 'time' | 'bytes' | 'pkts'; dir: 'asc' | 'desc' } = { key: 'time', dir: 'desc' };
 let rows: Row[] = []; let total = 0; let truncated = false; let errors: string[] = [];
@@ -53,6 +55,7 @@ function fullQuery(): string {
   const on = (['tcp', 'udp', 'icmp'] as const).filter(k => protos[k]);
   if (on.length < 3) parts.push('proto:' + on.join(','));
   if (qosOnly) parts.push('qos:changed');
+  if (ttlOnly) parts.push('ttl:expired');
   return parts.filter(Boolean).join(' ');
 }
 
@@ -112,7 +115,7 @@ function search(): VNode {
   return h('section', { 'aria-label': 'Search flows', class: 'col', style: 'gap:12px' },
     h('div', { class: 'row' },
       h('div', { class: 'search' },
-        h('svg', { 'aria-hidden': 'true', width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: '#A3B0BC', 'stroke-width': 2, 'stroke-linecap': 'round' }, h('circle', { cx: 11, cy: 11, r: 7 }), h('path', { d: 'M20 20l-3.5-3.5' })),
+        h('svg', { 'aria-hidden': 'true', width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', 'stroke-width': 2, 'stroke-linecap': 'round', style: 'stroke:var(--muted)' }, h('circle', { cx: 11, cy: 11, r: 7 }), h('path', { d: 'M20 20l-3.5-3.5' })),
         h('input', { class: 'input', type: 'text', value: q, 'aria-label': 'Search flows', spellcheck: 'false', autocomplete: 'off',
           placeholder: 'Search IP, CIDR, MAC, port, service, device…   e.g. src:10.1.4.0/24 app:https hop:fw-edge-01',
           oninput: (e: Event) => { q = (e.target as HTMLInputElement).value; selId = selId; loadSoon(); redraw(); },
@@ -124,6 +127,7 @@ function search(): VNode {
       }),
       select(range, RANGES, v => { range = v; syncHash(); void load(); if (selId) void loadDetail(); }, { aria: 'Time range', width: '176px' }),
       btn('QoS re-marked only', { pressed: qosOnly, onclick: () => { qosOnly = !qosOnly; void load(); redraw(); } }),
+      btn('TTL expired only', { pressed: ttlOnly, title: 'Streams whose TTL ran out before they reached the destination', onclick: () => { ttlOnly = !ttlOnly; void load(); redraw(); } }),
       btn(live ? 'Live: on' : 'Live: off', { pressed: live, title: 'Refresh the list every 15 seconds', onclick: () => { live = !live; setLive(); redraw(); } }),
       btn('Refresh', { kind: 'ghost', onclick: () => void load() })),
     h('div', { class: 'row', style: 'gap:8px' },
@@ -134,27 +138,37 @@ function search(): VNode {
     errors.length ? note(errors.join('. '), 'warn', true) : null);
 }
 
-const COLS = '78px minmax(180px,1.4fr) minmax(180px,1.4fr) 60px 100px 150px 80px 72px 48px 116px 112px';
+const COLS = '78px minmax(160px,1.4fr) minmax(160px,1.4fr) 60px 100px 150px 80px 72px 48px 116px 112px 108px';
 
 function qosTag(r: Row): VNode {
   if (!r.qosChanged) return h('span', { class: 'dim' }, '—');
   return h('span', { class: 'tag bad' }, r.dscpOutS ? `${r.dscpInS.replace(/ \(\d+\)/, '')} → ${r.dscpOutS.replace(/ \(\d+\)/, '')}` : 'changed');
 }
 
+function ttlTag(r: Row): VNode {
+  if (!r.ttlExpired) return h('span', { class: 'dim' }, '—');
+  const why = r.ttlReason === 'icmp' ? 'An ICMP Time Exceeded message: a router reported that a packet ran out of TTL' : `An exporter saw this traffic with TTL ${r.ttlLow}: the next router had to drop it, so it did not reach ${r.dstIp}`;
+  return h('span', { class: 'tag bad', title: why }, r.ttlReason === 'icmp' ? 'TTL notice' : 'TTL expired');
+}
+
 function list(): VNode {
   const hdrBtn = (label: string, key: 'time' | 'bytes' | 'pkts') => h('button', { type: 'button', class: 'sortbtn', onclick: () => { sort = sort.key === key ? { key, dir: sort.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }; void load(); } },
     label + (sort.key === key ? (sort.dir === 'desc' ? ' ↓' : ' ↑') : ''));
   const qosCount = rows.filter(r => r.qosChanged).length;
+  const ttlCount = rows.filter(r => r.ttlExpired).length;
   return h('section', { 'aria-label': 'Flow results', class: 'col', style: 'gap:10px' },
     qosCount && !qosOnly ? h('div', { class: 'note bad row', style: 'justify-content:space-between' },
       h('span', null, h('b', null, `${qosCount} stream${qosCount === 1 ? '' : 's'}`), ' had their QoS marking (DSCP) changed somewhere along the path.'),
       btn('Show only these', { kind: 'danger', onclick: () => { qosOnly = true; void load(); redraw(); } })) : null,
+    ttlCount && !ttlOnly ? h('div', { class: 'note bad row', style: 'justify-content:space-between' },
+      h('span', null, h('b', null, `${ttlCount} stream${ttlCount === 1 ? '' : 's'}`), ' had the TTL expire before reaching the destination, or a router reported Time Exceeded for them.'),
+      btn('Show only these', { kind: 'danger', onclick: () => { ttlOnly = true; void load(); redraw(); } })) : null,
     h('div', { class: 'row', style: 'justify-content:space-between;color:var(--muted)' },
       h('span', { 'aria-live': 'polite' }, loading ? 'Searching…' : loadError ? '' : `${num(rows.length)} of ${num(total)} stream${total === 1 ? '' : 's'} shown${truncated ? ' (more exist: narrow the search)' : ''}`),
       h('span', null, 'Select a flow to follow the stream and inspect it hop by hop')),
     loadError ? note(loadError, 'bad', true) : null,
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${COLS};--w:1360px` },
-      h('div', { class: 'tr head' }, hdrBtn('Time', 'time'), h('span', null, 'Source'), h('span', null, 'Destination'), h('span', null, 'Proto'), h('span', null, 'Service'), h('span', null, 'VLAN'), hdrBtn('Bytes', 'bytes'), hdrBtn('Pkts', 'pkts'), h('span', null, 'Hops'), h('span', null, 'Status'), h('span', null, 'QoS')),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${COLS};--w:1410px` },
+      h('div', { class: 'tr head' }, hdrBtn('Time', 'time'), h('span', null, 'Source'), h('span', null, 'Destination'), h('span', null, 'Proto'), h('span', null, 'Service'), h('span', null, 'VLAN'), hdrBtn('Bytes', 'bytes'), hdrBtn('Pkts', 'pkts'), h('span', null, 'Hops'), h('span', null, 'Status'), h('span', null, 'QoS'), h('span', null, 'TTL')),
       h('div', { class: 'scroll' },
         rows.map(r => h('button', { key: r.id, type: 'button', class: 'tr', 'aria-pressed': selId === r.id, onclick: () => pick(r.id) },
           h('span', { class: 'mono muted', style: 'font-size:12px' }, dayClock(r.t0)),
@@ -167,7 +181,7 @@ function list(): VNode {
           h('span', { class: 'mono', style: 'font-size:12px' }, num(r.pkts)),
           h('span', { class: 'mono muted', style: 'font-size:12px' }, String(r.hopCount)),
           r.health ? statusEl(r.health.kind, r.health.text) : h('span', { class: 'dim' }, '—'),
-          qosTag(r))),
+          qosTag(r), ttlTag(r))),
         !rows.length && !loading ? empty('No flows match this search. Loosen the filters, widen the time range, or clear the search.') : null,
         loading && !rows.length ? spinner('Searching…') : null))));
 }
@@ -187,6 +201,16 @@ function qosMessage(d: Detail): { text: string; dev?: string; ifName?: string } 
   return d.qosChanged ? { text: 'The marking differs between hops.' } : null;
 }
 
+function ttlMessage(d: Detail): { text: string } | null {
+  for (const [dirName, hops] of [['initiator → responder', d.forward], ['responder → initiator', d.reverse]] as const) {
+    for (const hp of hops) {
+      const ob = hp.obs.find(o => o.kind === 'ttl');
+      if (ob) return { text: `${ob.text} (${dirName}).` };
+    }
+  }
+  return d.ttlExpired ? { text: 'The TTL ran out before this stream reached its destination.' } : null;
+}
+
 function strip(hops: Hop[], d: Detail): VNode {
   const items: VNode[] = [];
   const src = reverse ? d.responder : d.initiator, dst = reverse ? d.initiator : d.responder;
@@ -196,9 +220,9 @@ function strip(hops: Hop[], d: Detail): VNode {
     items.push(h('div', { key: 'l' + i, class: 'link' + (loss ? ' loss' : slow ? ' slow' : '') },
       h('span', null, i === 0 ? '' : hp.linkMs === null ? '?' : ms(hp.linkMs)), h('i'),
       h('span', { class: 'flag' }, loss ? 'loss' : slow ? 'slow' : '')));
-    items.push(h('div', { key: 'n' + i, class: 'node' + (hp.qosChanged ? ' remark' : '') },
+    items.push(h('div', { key: 'n' + i, class: 'node' + (hp.qosChanged || hp.ttlExpired ? ' remark' : '') },
       h('b', null, hp.dev), h('span', null, hp.role), h('span', { class: 'mono' }, `${hp.inIf} → ${hp.outIf}`),
-      hp.policy ? h('span', null, 'policy ' + hp.policy) : null, hp.qosChanged ? h('span', { style: 'color:var(--bad)' }, `${hp.dscpInS} → ${hp.dscpOutS}`) : null));
+      hp.policy ? h('span', null, 'policy ' + hp.policy) : null, hp.qosChanged ? h('span', { style: 'color:var(--bad)' }, `${hp.dscpInS} → ${hp.dscpOutS}`) : null, hp.ttlExpired ? h('span', { style: 'color:var(--bad)' }, hp.ttlExpired === 'icmp' ? 'TTL exceeded notice' : `TTL ${hp.ttl ?? 1}: expired here`) : null));
   });
   items.push(h('div', { key: 'lend', class: 'link' }, h('span'), h('i'), h('span')));
   items.push(h('div', { key: 'dst', class: 'node edge' }, h('b', { class: 'mono' }, dst.ip), h('span', null, 'destination host'), h('span', { class: 'mono' }, dst.port ? ':' + dst.port : '')));
@@ -206,8 +230,8 @@ function strip(hops: Hop[], d: Detail): VNode {
 }
 
 function hopsTable(hops: Hop[]): VNode {
-  const cols = '36px minmax(150px,1.1fr) minmax(130px,1fr) minmax(170px,1.2fr) 120px 48px 130px 90px 80px 70px 70px minmax(220px,1.6fr)';
-  return h('div', { class: 'tbl hops' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1400px` },
+  const cols = '36px minmax(130px,1.1fr) minmax(110px,1fr) minmax(150px,1.2fr) 110px 44px 110px 70px 70px 56px 56px minmax(200px,1.6fr)';
+  return h('div', { class: 'tbl hops' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1310px` },
     h('div', { class: 'tr head' }, ...['#', 'Exporter', 'Interfaces', 'Frame in (L2)', 'VLAN', 'TTL', 'DSCP', 'Packets', 'Bytes', 'Link', 'Cumul.', 'Observations'].map(t => h('span', null, t))),
     hops.map((hp, i) => {
       const prev = i > 0 ? hops[i - 1] : null;
@@ -267,6 +291,7 @@ function followed(): VNode | null {
   const lat = d.forward.length ? d.forward[d.forward.length - 1].cumMs : null;
   const worst = all.flatMap(x => x.obs).find(o => o.severity === 'bad') ?? all.flatMap(x => x.obs).find(o => o.severity === 'warn');
   const qm = qosMessage(d);
+  const tm = ttlMessage(d);
   return h('section', { 'aria-label': 'Selected flow', class: 'panel col', style: 'gap:16px' },
     h('div', { class: 'row', style: 'justify-content:space-between;align-items:flex-start' },
       h('div', { class: 'col', style: 'gap:6px' },
@@ -282,6 +307,7 @@ function followed(): VNode | null {
     qm ? h('div', { class: 'note bad row', style: 'justify-content:space-between' },
       h('div', null, h('b', null, 'QoS changed in transit'), h('div', null, qm.text)),
       qm.dev ? btn('Open egress queue', { kind: 'danger', onclick: () => go('links', { dev: qm.dev, if: qm.ifName }) }) : null) : null,
+    tm ? h('div', { class: 'note bad' }, h('b', null, 'TTL expired before the destination'), h('div', null, tm.text)) : null,
     hops.length ? [strip(hops, d), hopsTable(hops)] : note('No exporter reported this direction.', 'info'),
     h('div', { class: 'split' }, h('div', { class: 'mainp', style: 'flex-basis:520px' }, layers(d, row, d.forward[0])), h('div', { class: 'side', style: 'flex-basis:420px' }, activity(d))));
 }

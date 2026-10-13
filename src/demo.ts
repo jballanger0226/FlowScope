@@ -67,6 +67,10 @@ const flagBits = (s: string) => s.split(' ').filter(Boolean).reduce((a, f) => a 
 interface Spec {
   src: string; dst: string; proto: number; sport: number; dport: number; vlan: number; fB: number; rB: number; fP: number; rP: number; path: string; rev: boolean;
   agoMin: number; durSec: number; flags: string; dscp: number; dscpR?: number;
+  /** First-seen TTL at the first hop is ttl0 - 1. A small value makes the traffic run out of TTL along the path. */
+  ttl0?: number;
+  /** Only the first n hops of the path are seen (the stream does not get any further). */
+  hops?: number;
   loss?: [number, number, 'i' | 'r']; slow?: [number, number]; remark?: [number, number, 'i' | 'r' | 'b'];
 }
 const SAMPLE: Spec[] = [
@@ -95,6 +99,13 @@ const SAMPLE: Spec[] = [
   { src: '10.1.4.90', dst: '10.9.0.12', proto: TCP, sport: 49002, dport: 443, vlan: 140, fB: 71000, rB: 1300000, fP: 300, rP: 1100, path: 'B', rev: false, agoMin: 130, durSec: 51, flags: 'SYN ACK PSH FIN', dscp: 0 },
   { src: '10.1.9.4', dst: '192.0.2.88', proto: UDP, sport: 51000, dport: 443, vlan: 140, fB: 2400000, rB: 38000000, fP: 2100, rP: 31000, path: 'A', rev: false, agoMin: 300, durSec: 92, flags: '', dscp: 0 },
   { src: '10.20.3.40', dst: '198.51.100.40', proto: TCP, sport: 56001, dport: 443, vlan: 200, fB: 140000, rB: 2300000, fP: 420, rP: 1800, path: 'G', rev: false, agoMin: 9, durSec: 60, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  // TTL: traffic that runs out of TTL before the destination, and look-alikes that must not be flagged
+  { src: '10.1.4.60', dst: '198.51.100.40', proto: UDP, sport: 40001, dport: 33434, vlan: 140, fB: 180, rB: 0, fP: 3, rP: 0, path: 'A', rev: false, agoMin: 2, durSec: 1, flags: '', dscp: 0, ttl0: 4 },
+  { src: '10.20.3.88', dst: '10.9.0.12', proto: TCP, sport: 52044, dport: 443, vlan: 200, fB: 3600, rB: 0, fP: 60, rP: 0, path: 'C', rev: false, agoMin: 3, durSec: 30, flags: 'SYN', dscp: 0, ttl0: 3, hops: 2 },
+  { src: '10.255.0.1', dst: '10.1.4.77', proto: ICMP, sport: 0, dport: 2816, vlan: 140, fB: 336, rB: 0, fP: 3, rP: 0, path: 'F', rev: true, agoMin: 2, durSec: 1, flags: '', dscp: 0, ttl0: 65 },
+  { src: '10.1.4.50', dst: '224.0.0.251', proto: UDP, sport: 5353, dport: 5353, vlan: 140, fB: 2400, rB: 0, fP: 24, rP: 0, path: 'F', rev: false, agoMin: 4, durSec: 120, flags: '', dscp: 0, ttl0: 2, hops: 1 },
+  { src: '10.1.4.52', dst: '239.255.255.250', proto: UDP, sport: 51900, dport: 1900, vlan: 140, fB: 1300, rB: 0, fP: 6, rP: 0, path: 'F', rev: false, agoMin: 3, durSec: 60, flags: '', dscp: 0, ttl0: 2, hops: 1 },
+  { src: '10.1.4.61', dst: '10.255.0.1', proto: TCP, sport: 50881, dport: 22, vlan: 140, fB: 5200, rB: 0, fP: 44, rP: 0, path: 'F', rev: false, agoMin: 4, durSec: 90, flags: 'SYN ACK PSH', dscp: 16, ttl0: 2 },
   { src: '10.20.3.14', dst: '10.9.0.12', proto: TCP, sport: 55880, dport: 445, vlan: 200, fB: 1100000, rB: 22000000, fP: 1400, rP: 16000, path: 'C', rev: false, agoMin: 11, durSec: 95, flags: 'SYN ACK PSH FIN', dscp: 10, slow: [1, 38] }
 ];
 
@@ -118,8 +129,8 @@ class Net {
 
 function makeRecords(net: Net, sp: Spec, startMs: number, r: () => number): FlowRecord[] {
   const out: FlowRecord[] = [];
-  const base = PATHS[sp.path];
-  const ttl0 = sp.dport === 445 || sp.dport === 3389 ? 128 : 64;
+  const base = PATHS[sp.path].slice(0, sp.hops ?? undefined);
+  const ttl0 = sp.ttl0 ?? (sp.dport === 445 || sp.dport === 3389 ? 128 : 64);
   const mkDir = (fwd: boolean) => {
     const natural = sp.rev ? !fwd : fwd;
     const hops = natural ? base.map(h => ({ dev: h[0], inn: h[1], out: h[2], ms: h[3] })) : base.slice().reverse().map((h, i, a) => ({ dev: h[0], inn: h[2], out: i === a.length - 1 ? '@v' : h[1], ms: h[3] }));
@@ -146,7 +157,7 @@ function makeRecords(net: Net, sp: Spec, startMs: number, r: () => number): Flow
       out.push({
         ts0: t, ts1: t + sp.durSec * 1000, exporter: dev.ip, inIf, outIf, srcIp: src, dstIp: dst, proto: sp.proto, sport, dport,
         flags: sp.proto === TCP ? flagBits(sp.flags) : 0, tos: dscp << 2, postTos: post === null ? null : post << 2,
-        ttlMin: sp.proto === ICMP ? null : ttl0 - i - 1, ttlMax: sp.proto === ICMP ? null : ttl0 - i - 1,
+        ttlMin: sp.proto === ICMP && sp.ttl0 === undefined ? null : Math.max(0, ttl0 - i - 1), ttlMax: sp.proto === ICMP && sp.ttl0 === undefined ? null : Math.max(0, ttl0 - i - 1),
         bytes, pkts, srcMac: i === 0 ? hostMac(src) : prevMac, dstMac: dev.mac, vlan: sp.vlan, natSrcIp: null, natDstIp: null, natSport: null, natDport: null, nextHop: null, sampling: 1
       });
       prevMac = dev.mac;

@@ -11,7 +11,7 @@ export interface Resolver {
 
 export interface ParsedQuery { conds: Cond[]; errors: string[] }
 
-const KEYS = new Set(['src', 'dst', 'ip', 'port', 'sport', 'dport', 'proto', 'app', 'vlan', 'mac', 'hop', 'dev', 'device', 'exporter', 'qos', 'dscp']);
+const KEYS = new Set(['src', 'dst', 'ip', 'port', 'sport', 'dport', 'proto', 'app', 'vlan', 'mac', 'hop', 'dev', 'device', 'exporter', 'qos', 'dscp', 'ttl']);
 
 /** Splits on whitespace but keeps quoted phrases together. */
 export function splitTokens(q: string): string[] {
@@ -127,6 +127,13 @@ export function parseQuery(q: string, res: Resolver): ParsedQuery {
           if (v === 'changed' || v === 'remarked') conds.push({ kind: 'qos', mode: 'changed' });
           else if (v === 'unchanged' || v === 'same') conds.push({ kind: 'qos', mode: 'unchanged' });
           else errors.push('qos: use qos:changed or qos:unchanged');
+          break;
+        }
+        case 'ttl': {
+          const v = val.toLowerCase();
+          if (v === 'expired' || v === 'exceeded') conds.push({ kind: 'ttl', mode: 'expired' });
+          else if (v === 'ok' || v === 'normal') conds.push({ kind: 'ttl', mode: 'ok' });
+          else errors.push('ttl: use ttl:expired or ttl:ok');
           break;
         }
         case 'dscp': {

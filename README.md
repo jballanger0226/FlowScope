@@ -3,12 +3,14 @@
 A NetFlow / IPFIX collector with per-hop stream tracing, SNMP link and QoS monitoring, reports and an admin console.
 One Node.js 22 process, one data folder. Runs on Linux, macOS, Windows and as a container.
 
-* **Flow explorer**: search with tokens (`src:10.1.0.0/16 port:443 qos:changed dscp:46 vlan:140 exporter:...`), see every hop a stream took, and see where its DSCP marking was changed.
+* **Flow explorer**: search with tokens (`src:10.1.0.0/16 port:443 qos:changed dscp:46 vlan:140 exporter:...`), see every hop a stream took, and see where its DSCP marking was changed. `ttl:expired` (or the **TTL expired only** button) lists streams whose TTL ran out before the destination.
 * **Links & QoS**: SNMP interface utilisation, errors/discards and Cisco CBQoS per-class drops, with charts and the streams crossing a link.
 * **Reports**: group by L2/L3/L4 fields, filter, top-N with "other", export CSV or JSON.
 * **Storage & retention**: raw, 1-minute, 1-hour and daily tiers with per-tier retention, size estimate, and a choice of embedded SQLite (default) or ClickHouse (experimental).
 * **Devices**: add SNMP devices one at a time or by discovery, with several credential sets tried in turn.
 * **Admin**: HTTPS certificate (self-signed, upload PEM/PKCS#12, generate a CSR with ECDSA/RSA/Ed25519, roll back), start/stop collection, per-service authentication (local, RADIUS, LDAP, Active Directory, SAML for the web console), roles and users, SNMP credential sets, application logs.
+* **Appearance**: light, dark or follow the operating system (System / Light / Dark switch at the top right and on the sign-in page; the choice is remembered in the browser).
+* **Sign-in**: every page and API call needs a session. The signed-in user and role, and a Sign out button, are at the top right.
 * Roles: **ro** (read-only), **snmp** (read-only plus device management), **admin**.
 
 ## Quick start
@@ -78,6 +80,15 @@ Tiers and defaults (days): raw 7, 1-minute 30, 1-hour 395, daily 1095, SNMP raw 
 ## How the numbers are counted
 
 A stream is a 5-tuple seen in both directions (ICMP ignores ports). When several routers export the same flow, every record is kept for the per-hop view, but bytes and packets are counted **once**, from the exporter that saw the stream first ("primary hop"). QoS is shown as changed when the DSCP differs between hops, or when an exporter reports a different post-policy DSCP (IPFIX `postIpClassOfService`) than it received.
+
+## TTL expired flag
+
+A stream is flagged when its TTL ran out before it reached its destination. Two kinds of evidence are used:
+
+* **Exporter-reported TTL**: the exporter saw packets with a TTL of 1 or less that were not addressed to the router itself (IPFIX `minimumTTL`, IE 52, NetFlow v9 equivalent). Shown as **TTL expired**.
+* **ICMP Time Exceeded** seen in the flow data (IPv4 type 11, IPv6 type 3, code 0). Shown as **TTL notice**: a router told the sender, but the flow it refers to may be a probe.
+
+Traffic that is built to have a TTL of 1 is ignored: multicast, broadcast and link-local destinations (mDNS, SSDP, LLMNR, ...), IGMP, OSPF, EIGRP, PIM, VRRP, and UDP discovery or routing ports (NetBIOS, SSDP, WS-Discovery, mDNS, LLMNR, RIP/RIPng, DHCPv6, HSRP, GLBP), plus anything addressed to the exporter or to a router FlowScope knows. Limits: needs exporter-reported TTL, so it does not work with NetFlow v5; it is evaluated on raw flow records only (not on the 1-minute, hourly or daily rollups); traceroute probes are flagged because they do expire on purpose.
 
 ## SNMP
 

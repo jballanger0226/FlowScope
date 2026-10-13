@@ -38,6 +38,7 @@ async function run(app: App, c: { query: URLSearchParams }, b: ReportBody) {
   const conds: Cond[] = []; const errors: string[] = [];
   for (const part of [b.q, b.f2, b.f3, b.f4]) { if (!part) continue; const p = parseQuery(str(part, 1000), app.resolver()); conds.push(...p.conds); errors.push(...p.errors); }
   const tier = chooseTier(app, range, b.tier);
+  if (tier !== 'raw' && conds.some(c => c.kind === 'ttl')) throw new HttpError(400, 'The TTL filter needs individual flow records, which are only kept in the raw tier. Choose a shorter time range or the raw tier.');
   const topN = int(b.topN, 25, 1, 1000);
   const prefix = int(b.prefix, 32, 0, 32);
   const sortBy = (['bytes', 'pkts', 'flows'] as const).find(s => s === b.sortBy) ?? 'bytes';
@@ -45,7 +46,7 @@ async function run(app: App, c: { query: URLSearchParams }, b: ReportBody) {
   // "app" is derived from the protocol and the service port (the lower of the two ports, the same in both directions), so ask the store for those and group by service name here
   const storeDims: ReportDim[] = [];
   for (const d of dims) { if (d === 'app') { if (!storeDims.includes('proto')) storeDims.push('proto'); if (!storeDims.includes('svc')) storeDims.push('svc'); } else if (!storeDims.includes(d)) storeDims.push(d); }
-  const res = await app.store.report({ range, tier, dims: storeDims, prefix, bidir: !!b.bidir, conds, sortBy, topN: hasApp ? 20000 : topN, exporter: b.exporter || undefined });
+  const res = await app.store.report({ range, tier, dims: storeDims, prefix, bidir: !!b.bidir, conds, sortBy, topN: hasApp ? 20000 : topN, exporter: b.exporter || undefined, localIps: app.localIps() });
   let rows: ReportRow[] = res.rows;
   let other = res.other;
   if (hasApp) {

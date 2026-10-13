@@ -128,6 +128,9 @@ export class App {
   }
 
   /** Name lookups for the search box. */
+  /** Addresses that belong to our own routers and switches, used so traffic addressed to a router is not reported as TTL-expired. */
+  localIps(): string[] { return [...new Set([...this.devices.allAddresses(), ...this.knownExporters()])]; }
+
   resolver(): Resolver {
     return {
       vlanIdsByName: text => {

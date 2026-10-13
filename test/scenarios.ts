@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { FlowRecord } from '../src/collector/types.js';
 import type { Cond, ReportSpec, StreamQuery, StoreStats, TsStore } from '../src/store/types.js';
 import { ipToN } from '../src/store/util.js';
+import { ttlEvidence } from '../src/analysis/ttl.js';
 
 export const NOW = Date.now();
 export const HOUR = 3600_000;
@@ -287,6 +288,57 @@ export function scenarios(label: string, mk: Mk): void {
       const spec = { range: wide, dims: [] as never[], prefix: 32, bidir: false, conds: [], sortBy: 'bytes' as const, topN: 10 };
       assert.equal((await t.s.report({ ...spec, tier: 'raw' })).totals.bytes, 1200);
       assert.equal((await t.s.report({ ...spec, tier: 'm1' })).totals.bytes, 1200);
+    } finally { await t.done(); }
+  });
+
+  test(label + ': TTL expired flag, with TTL-1-by-design traffic left alone', async () => {
+    const t = await mk();
+    try {
+      const R = '10.255.0.1';
+      const cases: { name: string; r: FlowRecord; flagged: 'ttl' | 'icmp' | null }[] = [
+        { name: 'ttl ran out', r: rec({ sport: 1001, srcIp: '10.1.4.60', dstIp: '198.51.100.40', proto: 17, dport: 33434, ttlMin: 1, ttlMax: 1 }), flagged: 'ttl' },
+        { name: 'ttl zero', r: rec({ sport: 1002, srcIp: '10.1.4.61', dstIp: '198.51.100.41', ttlMin: 0, ttlMax: 0 }), flagged: 'ttl' },
+        { name: 'healthy', r: rec({ sport: 1003, srcIp: '10.1.4.62', ttlMin: 60, ttlMax: 60 }), flagged: null },
+        { name: 'no ttl reported', r: rec({ sport: 1004, srcIp: '10.1.4.63', ttlMin: null, ttlMax: null }), flagged: null },
+        { name: 'mdns', r: rec({ sport: 5353, dport: 5353, srcIp: '10.1.4.50', dstIp: '224.0.0.251', proto: 17, ttlMin: 1, ttlMax: 1 }), flagged: null },
+        { name: 'ssdp unicast reply', r: rec({ sport: 1900, dport: 40000, srcIp: '10.1.4.52', dstIp: '10.1.4.99', proto: 17, ttlMin: 1, ttlMax: 1 }), flagged: null },
+        { name: 'ipv6 multicast', r: rec({ sport: 1006, srcIp: 'fe80::1', dstIp: 'ff02::fb', proto: 17, dport: 5353, ttlMin: 1, ttlMax: 1 }), flagged: null },
+        { name: 'link-local', r: rec({ sport: 1007, srcIp: '169.254.3.4', dstIp: '10.1.4.5', ttlMin: 1, ttlMax: 1 }), flagged: null },
+        { name: 'broadcast', r: rec({ sport: 68, dport: 67, srcIp: '0.0.0.0', dstIp: '255.255.255.255', proto: 17, ttlMin: 1, ttlMax: 1 }), flagged: null },
+        { name: 'ospf', r: rec({ sport: 0, dport: 0, srcIp: '10.9.9.1', dstIp: '10.9.9.2', proto: 89, ttlMin: 1, ttlMax: 1 }), flagged: null },
+        { name: 'to the router itself', r: rec({ sport: 1010, srcIp: '10.1.4.64', dstIp: R, dport: 22, ttlMin: 1, ttlMax: 1 }), flagged: null },
+        { name: 'to a router address', r: rec({ sport: 1011, srcIp: '10.1.4.65', dstIp: '10.255.0.77', dport: 22, ttlMin: 1, ttlMax: 1 }), flagged: null },
+        { name: 'icmp time exceeded', r: rec({ sport: 0, dport: 11 * 256, srcIp: R, dstIp: '10.1.4.60', proto: 1, ttlMin: 64, ttlMax: 64 }), flagged: 'icmp' },
+        { name: 'icmp echo', r: rec({ sport: 0, dport: 8 * 256, srcIp: '10.1.4.66', dstIp: '10.1.4.67', proto: 1, ttlMin: 64, ttlMax: 64 }), flagged: null },
+        { name: 'icmp fragment reassembly time exceeded', r: rec({ sport: 0, dport: 11 * 256 + 1, srcIp: '10.1.4.68', dstIp: '10.1.4.69', proto: 1, ttlMin: 64, ttlMax: 64 }), flagged: null }
+      ];
+      const local = ['10.255.0.77'];
+      await t.s.insertFlows(cases.map(c => ({ ...c.r, exporter: R })));
+      const all = await t.s.searchStreams({ ...q(), localIps: local });
+      assert.equal(all.total, cases.length);
+      for (const c of cases) {
+        const s = all.rows.find(x => x.srcIp === c.r.srcIp && x.dstIp === c.r.dstIp && x.sport === c.r.sport && x.dport === c.r.dport)!;
+        assert.ok(s, c.name);
+        assert.equal(s.ttlReason, c.flagged, c.name);
+        assert.equal(s.ttlExpired, c.flagged !== null, c.name);
+        // the JavaScript rules used for hop detail agree with the SQL used for the list
+        assert.equal(ttlEvidence({ ...c.r, exporter: R }, new Set(local)), c.flagged, 'js ' + c.name);
+      }
+      assert.equal(all.rows.find(x => x.sport === 1001)!.ttlLow, 1);
+      assert.equal(all.rows.find(x => x.sport === 1002)!.ttlLow, 0);
+      const expired = await t.s.searchStreams({ ...q([{ kind: 'ttl', mode: 'expired' }]), localIps: local });
+      assert.deepEqual(expired.rows.map(x => x.sport).sort((a, b) => a - b), [0, 1001, 1002]);
+      const ok = await t.s.searchStreams({ ...q([{ kind: 'ttl', mode: 'ok' }]), localIps: local });
+      assert.equal(ok.total, cases.length - 3);
+      // without the router address list the unknown router address looks like a destination that was never reached
+      const noLocal = await t.s.searchStreams({ ...q([{ kind: 'ttl', mode: 'expired' }]) });
+      assert.equal(noLocal.total, 4);
+      // combines with other filters, and works in reports
+      const both = await t.s.searchStreams({ ...q([{ kind: 'ttl', mode: 'expired' }, { kind: 'proto', protos: [17] }]), localIps: local });
+      assert.deepEqual(both.rows.map(x => x.sport), [1001]);
+      const rep = await t.s.report({ range, tier: 'raw', dims: ['srcIp'], prefix: 32, bidir: false, conds: [{ kind: 'ttl', mode: 'expired' }], sortBy: 'bytes', topN: 10, localIps: local });
+      assert.equal(rep.rows.length, 3);
+      await assert.rejects(() => t.s.report({ range, tier: 'm1', dims: ['srcIp'], prefix: 32, bidir: false, conds: [{ kind: 'ttl', mode: 'expired' }], sortBy: 'bytes', topN: 10 }), /raw/);
     } finally { await t.done(); }
   });
 }

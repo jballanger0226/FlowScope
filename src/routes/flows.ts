@@ -11,6 +11,7 @@ export function streamView(app: App, r: StreamRow) {
     id: r.skey, srcIp: r.srcIp, dstIp: r.dstIp, sport: r.sport, dport: r.dport, proto: r.proto, protoName: protoName(r.proto), app: appName(r.proto, r.sport, r.dport),
     vlan: r.vlan, vlanName: r.vlan ? app.vlanName(r.vlan) : '', t0: r.t0, t1: r.t1, bytes: r.bytes, pkts: r.pkts, fwdBytes: r.fwdBytes, revBytes: r.revBytes,
     hopCount: r.exporters.length, hops: r.exporters.map(e => app.devices.deviceName(e)), qosChanged: r.qosChanged,
+    ttlExpired: r.ttlExpired, ttlReason: r.ttlReason, ttlLow: r.ttlLow,
     dscpIn: r.dscpIn, dscpInS: dscpName(r.dscpIn), dscpOut: r.dscpOut, dscpOutS: r.dscpOut === null ? null : dscpName(r.dscpOut), flags: r.flags
   };
 }
@@ -41,10 +42,11 @@ export function registerFlows(app: App): void {
     const sort = (['time', 'bytes', 'pkts'] as const).find(s => s === c.query.get('sort')) ?? 'time';
     const dir = c.query.get('dir') === 'asc' ? 'asc' : 'desc';
     const limit = int(c.query.get('limit'), 200, 1, 2000);
-    const page = await app.store.searchStreams({ range, conds: parsed.conds, sort, dir, limit });
+    const page = await app.store.searchStreams({ range, conds: parsed.conds, sort, dir, limit, localIps: app.localIps() });
     const user = c.user().username;
     // health of the first rows: a quick hop analysis of each stream (loss between hops, slow links) without the SNMP lookups
-    const quick: HopContext = { deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i) };
+    const localIps = new Set(app.localIps());
+    const quick: HopContext = { localIps, deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i) };
     const health = new Map<string, { kind: 'ok' | 'warn' | 'bad'; text: string }>();
     await Promise.all(page.rows.slice(0, 100).map(async r => {
       try {
@@ -53,7 +55,8 @@ export function registerFlows(app: App): void {
         if (!d) return;
         const obs = [...d.forward, ...d.reverse].flatMap(h => h.obs);
         const loss = obs.filter(o => o.kind === 'loss').map(o => Number(/^([\d.]+)%/.exec(o.text)?.[1] ?? 0));
-        if (loss.length) health.set(r.skey, { kind: Math.max(...loss) >= 5 ? 'bad' : 'warn', text: `Loss ${Math.max(...loss).toFixed(1)}%` });
+        if (r.ttlExpired) health.set(r.skey, { kind: 'bad', text: 'TTL expired' });
+        else if (loss.length) health.set(r.skey, { kind: Math.max(...loss) >= 5 ? 'bad' : 'warn', text: `Loss ${Math.max(...loss).toFixed(1)}%` });
         else if (obs.some(o => o.kind === 'slow')) health.set(r.skey, { kind: 'warn', text: 'High latency' });
         else health.set(r.skey, { kind: 'ok', text: 'Healthy' });
       } catch { /* leave the status blank */ }
@@ -91,6 +94,7 @@ export function registerFlows(app: App): void {
       } catch { /* SNMP history is optional */ }
     }
     const detail = analyzeStream(id, recs, {
+      localIps: new Set(app.localIps()),
       deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i), policyOf: (ip, i) => app.devices.policyOf(ip, i),
       vlanName: id2 => app.vlanName(id2),
       classDrops: (ip, outIf, _a, _b, dscp) => (drops.get(`${ip}|${outIf}`) ?? []).filter(d => d.dscps.includes(dscp)).map(d => ({ cls: d.cls, dropPct: d.dropPct, dropPkts: d.dropPkts }))

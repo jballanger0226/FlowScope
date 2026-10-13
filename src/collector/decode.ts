@@ -230,7 +230,7 @@ export class TemplateDecoder {
       case 14: r.outIf = uint(b, o, len); break;
       case 15: if (len === 4) r.nextHop = ipv4(b, o); break;
       case 62: if (len === 16) r.nextHop6 = ipv6(b, o); break;
-      case 32: r.icmp = uint(b, o, len); break;
+      case 32: case 139: r.icmp = uint(b, o, len); break;
       case 52: r.ttlMin = uint(b, o, len); break;
       case 53: r.ttlMax = uint(b, o, len); break;
       case 56: if (len === 6) r.srcMac = mac(b, o); break;

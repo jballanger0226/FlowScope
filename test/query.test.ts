@@ -84,3 +84,29 @@ test('one-directional stream gets a note', () => {
   assert.equal(d.reverse.length, 0);
   assert.ok(d.note);
 });
+
+test('ttl search token', () => {
+  assert.deepEqual(parseQuery('ttl:expired', res).conds, [{ kind: 'ttl', mode: 'expired' }]);
+  assert.deepEqual(parseQuery('ttl:ok', res).conds, [{ kind: 'ttl', mode: 'ok' }]);
+  assert.equal(parseQuery('ttl:maybe', res).errors.length, 1);
+});
+
+test('hop detail points at the router where the TTL ran out', () => {
+  const base = { ts0: 1000, ts1: 2000, inIf: 1, outIf: 2, srcIp: '10.1.4.60', dstIp: '198.51.100.40', proto: 17, sport: 40001, dport: 33434, flags: 0, tos: 0, postTos: null, ttlMax: null, bytes: 180, pkts: 3,
+    srcMac: null, dstMac: null, vlan: null, natSrcIp: null, natDstIp: null, natSport: null, natDport: null, nextHop: null, sampling: 1 } as FlowRecord;
+  const recs: FlowRecord[] = [
+    { ...base, exporter: '10.255.0.2', ttlMin: 3, ttlMax: 3 },
+    { ...base, exporter: '10.255.0.1', ts0: 1001, ttlMin: 2, ttlMax: 2 },
+    { ...base, exporter: '10.255.0.5', ts0: 1002, ttlMin: 1, ttlMax: 1 }
+  ];
+  const ctx = { deviceName: (ip: string) => 'dev-' + ip.split('.').pop(), deviceRole: () => 'router', ifName: (_ip: string, i: number) => 'if' + i };
+  const d = analyzeStream('k', recs, ctx)!;
+  assert.equal(d.ttlExpired, true);
+  assert.deepEqual(d.forward.map(h => h.ttlExpired), [null, null, 'ttl']);
+  assert.match(d.forward[2].obs.find(o => o.kind === 'ttl')!.text, /TTL expired at dev-5: packets arrived with TTL 1/);
+  const healthy = analyzeStream('k', recs.map(r => ({ ...r, ttlMin: 60, ttlMax: 60 })), ctx)!;
+  assert.equal(healthy.ttlExpired, false);
+  // multicast discovery with TTL 1 is not a problem
+  const mdns = analyzeStream('k', recs.slice(0, 1).map(r => ({ ...r, dstIp: '224.0.0.251', ttlMin: 1, ttlMax: 1 })), ctx)!;
+  assert.equal(mdns.ttlExpired, false);
+});

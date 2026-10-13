@@ -244,6 +244,9 @@ export class DeviceService {
     return this.lookup;
   }
 
+  /** Every address of every known device (management and interface addresses). */
+  allAddresses(): string[] { return [...this.build().ipToDev.keys()]; }
+
   deviceIdForExporter(ip: string): number | null { return this.build().ipToDev.get(ip) ?? null; }
   deviceName(exporterIp: string): string { const l = this.build(); const id = l.ipToDev.get(exporterIp); return id === undefined ? exporterIp : l.names.get(id) ?? exporterIp; }
   deviceRole(exporterIp: string): string { const l = this.build(); const id = l.ipToDev.get(exporterIp); return id === undefined ? 'device' : l.roles.get(id) ?? 'device'; }

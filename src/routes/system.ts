@@ -26,7 +26,7 @@ export function registerSystem(app: App): void {
       devices: app.devices.list().map(d => ({ id: d.id, name: d.name, ip: d.ip, role: d.role })),
       apps: APPS.map(a => ({ name: a.name, ports: a.ports })),
       tokens: ['src', 'dst', 'ip', 'port', 'sport', 'dport', 'proto', 'app', 'vlan', 'mac', 'hop', 'dev', 'qos', 'dscp'],
-      examples: ['qos:changed', 'src:10.1.4.0/24', 'dst:10.9.0.0/16 proto:tcp', 'app:smb', 'hop:fw-edge-01', 'vlan:150', 'vlan:campus', 'port:5432']
+      examples: ['qos:changed', 'ttl:expired', 'src:10.1.4.0/24', 'dst:10.9.0.0/16 proto:tcp', 'app:smb', 'hop:fw-edge-01', 'vlan:150', 'vlan:campus', 'port:5432']
     });
     void appByName;
   });

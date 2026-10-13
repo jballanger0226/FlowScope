@@ -6,6 +6,7 @@ import {
   type ReportDim, type ReportResult, type ReportRow, type ReportSpec, type StoreStats, type StreamPage, type StreamQuery, type StreamRow, type TimeRange, type TsStore
 } from './types.js';
 import { skeyOf, ymd } from './util.js';
+import { ttlSql, type SqlDialect } from '../analysis/ttl.js';
 
 /*
  * ClickHouse storage backend (experimental). Talks to the server over its HTTP interface, so it has no native dependencies.
@@ -127,20 +128,27 @@ const DDL: string[] = [
 
 /* ------------------------------------------------------------------ predicates */
 
+const CH_DIALECT: SqlDialect = { nn: e => `ifNull((${e}), 0)`, startsWith: (col, p) => `startsWith(${col}, ${S(p)})`, str: S };
+const addrOnly = (l: readonly string[] = []) => l.filter(x => /^[0-9a-fA-F:.]{2,45}$/.test(x));
+function rawTtlSql(local?: readonly string[]) {
+  return ttlSql(CH_DIALECT, { ttl: 'ttl_min', srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'IPv4StringToNumOrNull(src_ip)', dstN: 'IPv4StringToNumOrNull(dst_ip)', proto: 'proto', sport: 'sport', dport: 'dport', exporter: 'exporter' }, addrOnly(local));
+}
+
 interface Cm {
   srcIp: string; dstIp: string; srcN: string; dstN: string; sport: string | null; dport: string; proto: string; vlan: string;
   srcMac: string; dstMac: string; exporter: string; inIf: string; dscp: string; postDscp: string; flags: string | null; svc: string; outIf: string | null;
   bytes: string; pkts: string; flows: string;
+  rawTtl: boolean;
 }
 const RAW: Cm = {
   srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'IPv4StringToNumOrNull(src_ip)', dstN: 'IPv4StringToNumOrNull(dst_ip)', sport: 'sport', dport: 'dport', proto: 'proto', vlan: 'vlan',
   srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: 'bitShiftRight(tos, 2)', postDscp: 'ifNull(bitShiftRight(post_tos, 2), -1)',
-  flags: 'flags', svc: 'least(sport, dport)', outIf: 'out_if', bytes: 'nbytes', pkts: 'npkts', flows: '1'
+  flags: 'flags', svc: 'least(sport, dport)', outIf: 'out_if', bytes: 'nbytes', pkts: 'npkts', flows: '1', rawTtl: true
 };
 const ROLL: Cm = {
   srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'IPv4StringToNumOrNull(src_ip)', dstN: 'IPv4StringToNumOrNull(dst_ip)', sport: null, dport: 'dport', proto: 'proto', vlan: 'vlan',
   srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: 'dscp', postDscp: 'post_dscp', flags: null, svc: 'svc', outIf: null,
-  bytes: 'bytes', pkts: 'pkts', flows: 'flows'
+  bytes: 'bytes', pkts: 'pkts', flows: 'flows', rawTtl: false
 };
 
 function ipPred(col: string, nExpr: string, ms: IpMatch[]): string {
@@ -156,7 +164,7 @@ const has = (col: string, text: string): string => `ifNull(position(${col}, ${S(
 const portPred = (t: Cm, ports: number[]): string => (t.sport ? `(${numIn(t.sport, ports)} OR ${numIn(t.dport, ports)})` : numIn(t.dport, ports));
 
 /** Record-level predicate that is a safe superset of the condition (used to find candidate streams). */
-function recordPred(c: Cond, t: Cm): string {
+function recordPred(c: Cond, t: Cm, local?: readonly string[]): string {
   switch (c.kind) {
     case 'src': case 'dst': case 'ip': return `(${ipPred(t.srcIp, t.srcN, c.m)} OR ${ipPred(t.dstIp, t.dstN, c.m)})`;
     case 'port': case 'sport': case 'dport': return portPred(t, c.ports);
@@ -168,6 +176,11 @@ function recordPred(c: Cond, t: Cm): string {
       if (!t.outIf) return '1';
       return c.ips.length ? `(${t.exporter} IN (${c.ips.map(S).join(',')}) AND ${t.outIf} = ${N(c.ifIndex)})` : '0';
     case 'qos': return '1';
+    case 'ttl': {
+      if (!t.rawTtl) throw new Error('The TTL filter needs flow records. Pick the raw data tier.');
+      const x = rawTtlSql(local);
+      return c.mode === 'expired' ? x.any : `NOT ${x.any}`;
+    }
     case 'dscp': return numIn(t.dscp, c.values);
     case 'text': {
       const x = c.text.toLowerCase();
@@ -252,7 +265,9 @@ class ClickHouseStore implements TsStore {
   async searchStreams(q: StreamQuery): Promise<StreamPage> {
     if (!q.range || !Number.isFinite(q.range.from) || !Number.isFinite(q.range.to)) throw new Error('invalid time range');
     const inRange = `ts1 BETWEEN ${N(q.range.from)} AND ${N(q.range.to)}`;
-    const cand = q.conds.filter(c => c.kind !== 'qos').map(c => `AND skey IN (SELECT skey FROM flow_raw WHERE ${inRange} AND ${recordPred(c, RAW)})`).join('\n');
+    const cand = q.conds.filter(c => c.kind !== 'qos' && !(c.kind === 'ttl' && c.mode === 'ok')).map(c => `AND skey IN (SELECT skey FROM flow_raw WHERE ${inRange} AND ${recordPred(c, RAW, q.localIps)})`).join('\n');
+    const tx = rawTtlSql(q.localIps);
+    let ttlCond = '';
     const exact: string[] = [];
     let qos = '';
     for (const c of q.conds) {
@@ -261,6 +276,7 @@ class ClickHouseStore implements TsStore {
       else if (c.kind === 'sport') exact.push(numIn('i.i_sp', c.ports));
       else if (c.kind === 'dport') exact.push(numIn('i.i_dp', c.ports));
       else if (c.kind === 'qos') qos = c.mode === 'changed' ? 'AND (t.tnd > 1 OR t.trm = 1)' : 'AND NOT (t.tnd > 1 OR t.trm = 1)';
+      else if (c.kind === 'ttl') ttlCond = c.mode === 'expired' ? 'AND (t.ttx = 1 OR t.ttxi = 1)' : 'AND NOT (t.ttx = 1 OR t.ttxi = 1)';
     }
     const order = q.sort === 'bytes' ? 't.tb' : q.sort === 'pkts' ? 't.tp' : 't.tt1';
     const sql = `
@@ -271,7 +287,8 @@ class ClickHouseStore implements TsStore {
                uniqExact(bitShiftRight(tos, 2)) AS nd, argMin(bitShiftRight(tos, 2), ts0) AS d_in,
                min(bitShiftRight(tos, 2)) AS d_min, max(bitShiftRight(tos, 2)) AS d_max,
                max(${RM}) AS rm, maxIf(bitShiftRight(assumeNotNull(post_tos), 2), ${RM}) AS d_post,
-               groupUniqArray(exporter) AS exps, max(vlan) AS vl, max(flags) AS fl
+               groupUniqArray(exporter) AS exps, max(vlan) AS vl, max(flags) AS fl,
+               max(${tx.expired}) AS tx, max(${tx.icmp}) AS txi, minIf(ttl_min, ${tx.expired}) AS ttl_lo
         FROM flow_raw WHERE ${inRange} ${cand}
         GROUP BY skey, src_ip, sport),
       i AS (
@@ -282,14 +299,15 @@ class ClickHouseStore implements TsStore {
                sumIf(d.b, d.s_ip = i.i_ip AND d.s_port = i.i_sp) AS tfb, sumIf(d.p, d.s_ip = i.i_ip AND d.s_port = i.i_sp) AS tfp,
                max(d.nd) AS tnd, max(d.rm) AS trm, groupUniqArrayArray(d.exps) AS texps, max(d.vl) AS tvl, max(d.fl) AS tfl,
                min(d.d_min) AS tdmin, max(d.d_max) AS tdmax, max(d.d_post) AS tdpost,
-               maxIf(d.d_in, d.s_ip = i.i_ip AND d.s_port = i.i_sp) AS tdin
+               maxIf(d.d_in, d.s_ip = i.i_ip AND d.s_port = i.i_sp) AS tdin,
+               max(d.tx) AS ttx, max(d.txi) AS ttxi, min(d.ttl_lo) AS tttl
         FROM d INNER JOIN i ON i.k = d.k GROUP BY d.k)
       SELECT i.k AS skey, i.i_ip AS src_ip, i.i_dip AS dst_ip, i.i_pr AS proto, i.i_sp AS sport, i.i_dp AS dport,
              t.tt0 AS t0, t.tt1 AS t1, t.tb AS b, t.tp AS p, t.tfb AS fb, t.tfp AS fp, t.texps AS exps, t.tvl AS vlan, t.tfl AS fl,
-             t.tdin AS d_in, t.tdmin AS d_min, t.tdmax AS d_max, t.tdpost AS d_post, t.trm AS rm,
+             t.tdin AS d_in, t.tdmin AS d_min, t.tdmax AS d_max, t.tdpost AS d_post, t.trm AS rm, t.ttx AS tx, t.ttxi AS txi, t.tttl AS ttl_lo,
              if(t.tnd > 1 OR t.trm = 1, 1, 0) AS qchg, count() OVER () AS total
       FROM i INNER JOIN t ON t.k = i.k
-      WHERE 1 = 1 ${exact.length ? 'AND ' + exact.join(' AND ') : ''} ${qos}
+      WHERE 1 = 1 ${exact.length ? 'AND ' + exact.join(' AND ') : ''} ${qos} ${ttlCond}
       ORDER BY ${order} ${q.dir === 'asc' ? 'ASC' : 'DESC'}, t.tt1 DESC
       LIMIT ${N(Math.max(1, Math.trunc(q.limit)))}`;
     const rows = await this.c.rows<Record<string, any>>(sql);
@@ -303,6 +321,8 @@ class ClickHouseStore implements TsStore {
         fwdPkts: Number(r.fp), revPkts: Number(r.p) - Number(r.fp),
         exporters: [...new Set<string>(r.exps as string[])], vlan: r.vlan === null || r.vlan === undefined ? null : Number(r.vlan),
         qosChanged: qchg, flags: Number(r.fl || 0), dscpIn: dIn,
+        ttlExpired: Number(r.tx) === 1 || Number(r.txi) === 1, ttlReason: Number(r.tx) === 1 ? 'ttl' : Number(r.txi) === 1 ? 'icmp' : null,
+        ttlLow: Number(r.tx) === 1 && r.ttl_lo !== null && r.ttl_lo !== undefined ? Number(r.ttl_lo) : null,
         dscpOut: qchg ? (Number(r.rm) === 1 ? Number(r.d_post) : (Number(r.d_max) !== dIn ? Number(r.d_max) : Number(r.d_min))) : null
       };
     });
@@ -343,7 +363,7 @@ class ClickHouseStore implements TsStore {
       else if (cc.kind === 'dst') where.push(ipPred(cm.dstIp, cm.dstN, cc.m));
       else if (cc.kind === 'sport') { if (cm.sport) where.push(numIn(cm.sport, cc.ports)); }
       else if (cc.kind === 'dport') where.push(numIn(cm.dport, cc.ports));
-      else where.push(recordPred(cc, cm));
+      else where.push(recordPred(cc, cm, spec.localIps));
     }
     const swp = `ifNull(${cm.srcN} > ${cm.dstN}, ${cm.srcIp} > ${cm.dstIp})`;
     const pick = (a: string, b: string) => (spec.bidir ? `if(${swp}, ${b}, ${a})` : a);

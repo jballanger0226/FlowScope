@@ -11,10 +11,21 @@ import {
 /* ------------------------------------------------------------------ small helpers */
 
 import { ymd, ipToN, nToIp, skeyOf } from './util.js';
+import { ttlSql, type SqlDialect } from '../analysis/ttl.js';
 export { ymd, ipToN, nToIp, skeyOf };
 function ymdToMs(s: string): number { return Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)); }
 
 type SqlArg = string | number | null;
+
+const SQLITE_DIALECT: SqlDialect = {
+  nn: e => `COALESCE((${e}), 0)`,
+  startsWith: (col, p) => `substr(${col}, 1, ${p.length}) = '${p}'`,
+  str: s => `'${s.replace(/'/g, "''")}'`
+};
+const addrOnly = (l: readonly string[] = []) => l.filter(x => /^[0-9a-fA-F:.]{2,45}$/.test(x));
+export function rawTtlSql(local?: readonly string[]) {
+  return ttlSql(SQLITE_DIALECT, { ttl: 'ttl_min', srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'src_n', dstN: 'dst_n', proto: 'proto', sport: 'sport', dport: 'dport', exporter: 'exporter' }, addrOnly(local));
+}
 
 const FLOW_COLS = 'ts0, ts1, exporter, in_if, out_if, src_ip, dst_ip, proto, sport, dport, flags, tos, post_tos, ttl_min, ttl_max, bytes, pkts, src_mac, dst_mac, vlan, nat_src, nat_dst, nat_sport, nat_dport, next_hop, skey, primary_hop, src_n, dst_n';
 
@@ -194,7 +205,7 @@ export class SqliteOps {
   }
 
   /** Record-level predicate that is a safe superset of the condition (used to find candidate streams). */
-  private recordPred(c: Cond, args: SqlArg[], t: ColMap): string {
+  private recordPred(c: Cond, args: SqlArg[], t: ColMap, local?: readonly string[]): string {
     switch (c.kind) {
       case 'src': case 'dst': case 'ip': {
         const a: SqlArg[] = [], b: SqlArg[] = [];
@@ -210,6 +221,11 @@ export class SqliteOps {
       case 'exporter': if (!c.ips.length) return '0'; args.push(...c.ips); return `${t.exporter} IN (${c.ips.map(() => '?').join(',')})`;
       case 'outif': if (!t.outIf || !c.ips.length) return t.outIf ? '0' : '1'; args.push(...c.ips, c.ifIndex); return `(${t.exporter} IN (${c.ips.map(() => '?').join(',')}) AND ${t.outIf} = ?)`;
       case 'qos': return '1';
+      case 'ttl': {
+        if (!t.rawTtl) throw new Error('The TTL filter needs flow records. Pick the raw data tier.');
+        const x = rawTtlSql(local);
+        return c.mode === 'expired' ? x.any : `NOT ${x.any}`;
+      }
       case 'dscp': { const a: SqlArg[] = []; const x = this.numIn(t.dscp, c.values, a); args.push(...a); return x; }
       case 'text': {
         const parts: string[] = [];
@@ -235,22 +251,24 @@ export class SqliteOps {
     // candidate streams: intersect one set per condition
     const sets: string[] = [];
     for (const c of q.conds) {
-      if (c.kind === 'qos') continue;
+      if (c.kind === 'qos' || (c.kind === 'ttl' && c.mode === 'ok')) continue;
       const a: SqlArg[] = [];
-      const pred = this.recordPred(c, a, raw);
+      const pred = this.recordPred(c, a, raw, q.localIps);
       sets.push(`SELECT DISTINCT skey FROM f WHERE ${pred}`);
       args.push(...a);
     }
     const cand = sets.length ? `WHERE skey IN (${sets.join(' INTERSECT ')})` : '';
     // exact conditions on the stream's initiator direction
     const exact: string[] = []; const exArgs: SqlArg[] = [];
-    let qosCond = '';
+    let qosCond = '', ttlCond = '';
+    const tx = rawTtlSql(q.localIps);
     for (const c of q.conds) {
       if (c.kind === 'src') exact.push(this.ipPred('i.src_ip', 'i.src_n', c.m, exArgs));
       else if (c.kind === 'dst') exact.push(this.ipPred('i.dst_ip', 'i.dst_n', c.m, exArgs));
       else if (c.kind === 'sport') exact.push(this.numIn('i.sport', c.ports, exArgs));
       else if (c.kind === 'dport') exact.push(this.numIn('i.dport', c.ports, exArgs));
       else if (c.kind === 'qos') qosCond = c.mode === 'changed' ? 'AND (t.nd > 1 OR t.rm = 1)' : 'AND NOT (t.nd > 1 OR t.rm = 1)';
+      else if (c.kind === 'ttl') ttlCond = c.mode === 'expired' ? 'AND (t.tx = 1 OR t.txi = 1)' : 'AND NOT (t.tx = 1 OR t.txi = 1)';
     }
     const order = q.sort === 'bytes' ? 't.b' : q.sort === 'pkts' ? 't.p' : 't.t1';
     const sql = `
@@ -262,7 +280,8 @@ export class SqliteOps {
                COUNT(DISTINCT tos >> 2) AS nd, MAX(fd) AS d_in, MIN(tos >> 2) AS d_min, MAX(tos >> 2) AS d_max,
                MAX(CASE WHEN post_tos IS NOT NULL AND (post_tos >> 2) != (tos >> 2) THEN 1 ELSE 0 END) AS rm,
                MAX(CASE WHEN post_tos IS NOT NULL AND (post_tos >> 2) != (tos >> 2) THEN post_tos >> 2 END) AS d_post,
-               GROUP_CONCAT(DISTINCT exporter) AS exps, MAX(vlan) AS vlan, MAX(flags) AS fl
+               GROUP_CONCAT(DISTINCT exporter) AS exps, MAX(vlan) AS vlan, MAX(flags) AS fl,
+               MAX(CASE WHEN ${tx.expired} THEN 1 ELSE 0 END) AS tx, MAX(CASE WHEN ${tx.icmp} THEN 1 ELSE 0 END) AS txi, MIN(CASE WHEN ${tx.expired} THEN ttl_min END) AS ttl_lo
         FROM fr GROUP BY skey, src_ip, sport),
       i AS (SELECT skey, src_ip, dst_ip, src_n, dst_n, proto, sport, dport, MIN(t0) AS it0 FROM d GROUP BY skey),
       t AS (
@@ -271,12 +290,13 @@ export class SqliteOps {
                SUM(CASE WHEN d.src_ip = i.src_ip AND d.sport = i.sport THEN d.p ELSE 0 END) AS fp,
                MAX(d.nd) AS nd, MAX(d.rm) AS rm, GROUP_CONCAT(d.exps) AS exps, MAX(d.vlan) AS vlan, MAX(d.fl) AS fl,
                MIN(d.d_min) AS d_min, MAX(d.d_max) AS d_max, MAX(d.d_post) AS d_post,
-               MAX(CASE WHEN d.src_ip = i.src_ip AND d.sport = i.sport THEN d.d_in END) AS d_in
+               MAX(CASE WHEN d.src_ip = i.src_ip AND d.sport = i.sport THEN d.d_in END) AS d_in,
+               MAX(d.tx) AS tx, MAX(d.txi) AS txi, MIN(d.ttl_lo) AS ttl_lo
         FROM d JOIN i ON i.skey = d.skey GROUP BY d.skey)
-      SELECT i.skey AS skey, i.src_ip, i.dst_ip, i.proto, i.sport, i.dport, t.t0, t.t1, t.b, t.p, t.fb, t.fp, t.exps, t.vlan, t.fl, t.d_in, t.d_min, t.d_max, t.d_post,
+      SELECT i.skey AS skey, i.src_ip, i.dst_ip, i.proto, i.sport, i.dport, t.t0, t.t1, t.b, t.p, t.fb, t.fp, t.exps, t.vlan, t.fl, t.d_in, t.d_min, t.d_max, t.d_post, t.tx, t.txi, t.ttl_lo,
              (CASE WHEN t.nd > 1 OR t.rm = 1 THEN 1 ELSE 0 END) AS qchg, COUNT(*) OVER () AS total
       FROM i JOIN t ON t.skey = i.skey
-      WHERE 1 = 1 ${exact.length ? 'AND ' + exact.join(' AND ') : ''} ${qosCond}
+      WHERE 1 = 1 ${exact.length ? 'AND ' + exact.join(' AND ') : ''} ${qosCond} ${ttlCond}
       ORDER BY ${order} ${q.dir === 'asc' ? 'ASC' : 'DESC'}, t.t1 DESC
       LIMIT ?`;
     const rows = this.db.prepare(sql).all(...args, ...exArgs, q.limit) as unknown as Record<string, number | string | null>[];
@@ -287,6 +307,7 @@ export class SqliteOps {
       fwdPkts: Number(r.fp), revPkts: Number(r.p) - Number(r.fp),
       exporters: [...new Set(String(r.exps || '').split(',').filter(Boolean))], vlan: r.vlan === null ? null : Number(r.vlan),
       qosChanged: Number(r.qchg) === 1, flags: Number(r.fl || 0),
+      ttlExpired: Number(r.tx) === 1 || Number(r.txi) === 1, ttlReason: Number(r.tx) === 1 ? 'ttl' : Number(r.txi) === 1 ? 'icmp' : null, ttlLow: r.ttl_lo === null || r.ttl_lo === undefined ? null : Number(r.ttl_lo),
       dscpIn: r.d_in === null ? Number(r.d_min) : Number(r.d_in),
       dscpOut: Number(r.qchg) === 1 ? (r.d_post !== null ? Number(r.d_post) : (Number(r.d_max) !== Number(r.d_in ?? r.d_min) ? Number(r.d_max) : Number(r.d_min))) : null
     }));
@@ -343,7 +364,7 @@ export class SqliteOps {
       if (cc.kind === 'sport') { const a: SqlArg[] = []; where.push(this.numIn(cm.sport!, cc.ports, a)); args.push(...a); continue; }
       if (cc.kind === 'dport') { const a: SqlArg[] = []; where.push(this.numIn(cm.dport, cc.ports, a)); args.push(...a); continue; }
       const a: SqlArg[] = [];
-      where.push(this.recordPred(cc, a, cm)); args.push(...a);
+      where.push(this.recordPred(cc, a, cm, spec.localIps)); args.push(...a);
     }
     // dimension expressions
     const swp = `(CASE WHEN ${cm.srcN} IS NOT NULL AND ${cm.dstN} IS NOT NULL THEN ${cm.srcN} > ${cm.dstN} ELSE ${cm.srcIp} > ${cm.dstIp} END)`;
@@ -610,14 +631,16 @@ export class SqliteOps {
 interface ColMap {
   srcIp: string; dstIp: string; srcN: string; dstN: string; sport: string | null; dport: string; proto: string; vlan: string;
   srcMac: string; dstMac: string; exporter: string; inIf: string; dscp: string; postDscp: string; flags: string | null; svc: string; outIf: string | null;
+  /** True when the table has TTL columns (raw flow tables only). */
+  rawTtl: boolean;
 }
 const RAW_COLS: ColMap = {
   srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'src_n', dstN: 'dst_n', sport: 'sport', dport: 'dport', proto: 'proto', vlan: 'vlan',
-  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: '(tos >> 2)', postDscp: '(CASE WHEN post_tos IS NULL THEN NULL ELSE post_tos >> 2 END)', flags: 'flags', svc: 'MIN(COALESCE(sport, 0), COALESCE(dport, 0))', outIf: 'out_if'
+  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: '(tos >> 2)', postDscp: '(CASE WHEN post_tos IS NULL THEN NULL ELSE post_tos >> 2 END)', flags: 'flags', svc: 'MIN(COALESCE(sport, 0), COALESCE(dport, 0))', outIf: 'out_if', rawTtl: true
 };
 const ROLLUP_MAP: ColMap = {
   srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'src_n', dstN: 'dst_n', sport: null, dport: 'dport', proto: 'proto', vlan: 'vlan',
-  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: 'dscp', postDscp: 'post_dscp', flags: null, svc: 'svc', outIf: null
+  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: 'dscp', postDscp: 'post_dscp', flags: null, svc: 'svc', outIf: null, rawTtl: false
 };
 
 function likeEsc(s: string): string { return s.replace(/[\\%_]/g, m => '\\' + m); }
