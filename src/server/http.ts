@@ -16,6 +16,9 @@ export interface Ctx {
   method: string; path: string; query: URLSearchParams; params: Record<string, string>;
   principal: Principal | null; ip: string; secure: boolean;
   body<T = Record<string, unknown>>(maxBytes?: number): Promise<T>;
+  /** Reads an application/x-www-form-urlencoded body (used by the SAML POST binding). */
+  form(maxBytes?: number): Promise<URLSearchParams>;
+  redirect(url: string, status?: number): void;
   json(data: unknown, status?: number): void;
   text(data: string, type: string, status?: number, headers?: Record<string, string>): void;
   setCookie(name: string, value: string, opts?: { maxAge?: number; clear?: boolean }): void;
@@ -98,6 +101,13 @@ export class WebServer {
         if (!ct.includes('json')) throw new HttpError(415, 'Send JSON with Content-Type: application/json');
         try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T; } catch { throw new HttpError(400, 'The request body is not valid JSON'); }
       },
+      form: async (max = 1_000_000) => {
+        const chunks: Buffer[] = []; let n = 0;
+        for await (const c of req) { n += (c as Buffer).length; if (n > max) throw new HttpError(413, 'The request is too large'); chunks.push(c as Buffer); }
+        if (!String(req.headers['content-type'] || '').includes('application/x-www-form-urlencoded')) throw new HttpError(415, 'Send a form (application/x-www-form-urlencoded)');
+        return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+      },
+      redirect: (to, status = 302) => { if (cookies.length) res.setHeader('Set-Cookie', cookies); res.setHeader('Cache-Control', 'no-store'); res.setHeader('Location', to); res.writeHead(status); res.end(); },
       json: (data, status = 200) => this.send(req, res, status, JSON.stringify(data), 'application/json; charset=utf-8', cookies, true),
       text: (data, type, status = 200, headers = {}) => { for (const [k, v] of Object.entries(headers)) res.setHeader(k, v); this.send(req, res, status, data, type, cookies, true); },
       setCookie: (name, value, o = {}) => {

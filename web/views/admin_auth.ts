@@ -126,11 +126,11 @@ function samlForm(a: Aaa): VNode {
   return h('div', { class: 'col', style: 'gap:12px' },
     note('The SAML sign-in is a built-in implementation that has not been checked against a production identity provider. Test it with a non-critical account before relying on it, and keep the local break-glass admin on.', 'warn'),
     h('div', { class: 'two' },
-      tx('Identity provider name', () => m.idp, v => { m.idp = v; }, { ph: 'Entra ID, Okta, ADFS…' }), tx('Service provider entity ID', () => m.sp, v => { m.sp = v; }, { ph: 'https://flowscope.example.com/saml', mono: true }),
+      tx('Identity provider name (for your own reference)', () => m.idp, v => { m.idp = v; }, { ph: 'Entra ID, Okta, ADFS…' }), tx('Service provider entity ID', () => m.sp, v => { m.sp = v; }, { ph: 'Leave blank to use the metadata URL below', mono: true }),
       tx('IdP entity ID', () => m.idpEntity, v => { m.idpEntity = v; }, { mono: true }), tx('IdP single sign-on URL', () => m.idpSso, v => { m.idpSso = v; }, { ph: 'https://login.example.com/saml2', mono: true }),
       tx('User name attribute', () => m.nameAttr, v => { m.nameAttr = v; }, { mono: true }), tx('Group attribute', () => m.groupAttr, v => { m.groupAttr = v; }, { mono: true })),
     field('IdP signing certificate (PEM)', textArea(m.idpCert, v => { m.idpCert = v; }, { rows: 4, placeholder: '-----BEGIN CERTIFICATE-----', aria: 'IdP signing certificate' })),
-    tg('Require signed assertions', m.sign, () => { m.sign = !m.sign; }),
+    tg('Also require the response itself to be signed (assertions must always be signed)', m.sign, () => { m.sign = !m.sign; }),
     h('div', { class: 'layer col', style: 'gap:4px' }, h('b', null, 'Give your identity provider these addresses'),
       h('span', { class: 'muted' }, 'Assertion consumer service (ACS) URL'), h('code', { class: 'code', style: 'word-break:break-all' }, callback),
       h('span', { class: 'muted' }, 'Service provider metadata'), h('code', { class: 'code', style: 'word-break:break-all' }, callback.replace(/\/acs$/, '/metadata'))));

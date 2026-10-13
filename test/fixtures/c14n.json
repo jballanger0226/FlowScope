@@ -1,0 +1,50 @@
+{
+ "simple": {
+  "xml": "<a xmlns=\"urn:x\"><b id=\"1\" z=\"2\" a=\"3\">t &amp; &lt; &gt; \"q\"</b><c/></a>",
+  "c14n": "<a xmlns=\"urn:x\"><b a=\"3\" id=\"1\" z=\"2\">t &amp; &lt; &gt; \"q\"</b><c></c></a>",
+  "subs": {
+   "/*/*[1]": "<b xmlns=\"urn:x\" a=\"3\" id=\"1\" z=\"2\">t &amp; &lt; &gt; \"q\"</b>",
+   "/*/*[2]": "<c xmlns=\"urn:x\"></c>"
+  }
+ },
+ "prefixes": {
+  "xml": "<s:r xmlns:s=\"urn:s\" xmlns:p=\"urn:p\" xmlns:unused=\"urn:u\"><s:k p:att=\"v\" s:att2=\"w\">x</s:k><p:m xmlns:s=\"urn:other\"><s:n/></p:m></s:r>",
+  "c14n": "<s:r xmlns:s=\"urn:s\"><s:k xmlns:p=\"urn:p\" p:att=\"v\" s:att2=\"w\">x</s:k><p:m xmlns:p=\"urn:p\"><s:n xmlns:s=\"urn:other\"></s:n></p:m></s:r>",
+  "subs": {
+   "/s:r/s:k": "<s:k xmlns:p=\"urn:p\" xmlns:s=\"urn:s\" p:att=\"v\" s:att2=\"w\">x</s:k>",
+   "/s:r/p:m": "<p:m xmlns:p=\"urn:p\"><s:n xmlns:s=\"urn:other\"></s:n></p:m>",
+   "/s:r/p:m/s:n": "<s:n xmlns:s=\"urn:other\"></s:n>"
+  }
+ },
+ "defaultns": {
+  "xml": "<a xmlns=\"urn:a\"><b xmlns=\"\"><c xmlns=\"urn:c\"/></b><d/></a>",
+  "c14n": "<a xmlns=\"urn:a\"><b xmlns=\"\"><c xmlns=\"urn:c\"></c></b><d></d></a>",
+  "subs": {
+   "/*/b": "<b><c xmlns=\"urn:c\"></c></b>",
+   "/*/b/*": "<c xmlns=\"urn:c\"></c>",
+   "/*/*[2]": "<d xmlns=\"urn:a\"></d>"
+  }
+ },
+ "attrs": {
+  "xml": "<e b=\"2\" a=\"1\" xmlns:n=\"urn:n\" n:z=\"3\" n:a=\"4\">\n  text\t<f x=\" a\tb\n c \"/>\n</e>",
+  "c14n": "<e xmlns:n=\"urn:n\" a=\"1\" b=\"2\" n:a=\"4\" n:z=\"3\">\n  text\t<f x=\" a b  c \"></f>\n</e>",
+  "subs": {
+   "/e/f": "<f x=\" a b  c \"></f>"
+  }
+ },
+ "entities": {
+  "xml": "<e a=\"&#xA;&#x9;&#xD;&amp;&lt;&gt;&quot;\">&#xD;&#x41;<![CDATA[<raw & stuff>]]> end</e>",
+  "c14n": "<e a=\"&#xA;&#x9;&#xD;&amp;&lt;>&quot;\">&#xD;A&lt;raw &amp; stuff&gt; end</e>",
+  "subs": {}
+ },
+ "saml": {
+  "xml": "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_r1\" Version=\"2.0\"><saml:Issuer>https://idp</saml:Issuer><saml:Assertion ID=\"_a1\"><saml:Subject><saml:NameID Format=\"urn:x\">user@example.com</saml:NameID></saml:Subject></saml:Assertion></samlp:Response>",
+  "c14n": "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" ID=\"_r1\" Version=\"2.0\"><saml:Issuer xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\">https://idp</saml:Issuer><saml:Assertion xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_a1\"><saml:Subject><saml:NameID Format=\"urn:x\">user@example.com</saml:NameID></saml:Subject></saml:Assertion></samlp:Response>",
+  "subs": {
+   "/samlp:Response/saml:Issuer": "<saml:Issuer xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\">https://idp</saml:Issuer>",
+   "/samlp:Response/saml:Assertion": "<saml:Assertion xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_a1\"><saml:Subject><saml:NameID Format=\"urn:x\">user@example.com</saml:NameID></saml:Subject></saml:Assertion>",
+   "/samlp:Response/saml:Assertion/saml:Subject": "<saml:Subject xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\"><saml:NameID Format=\"urn:x\">user@example.com</saml:NameID></saml:Subject>",
+   "/samlp:Response/saml:Assertion/saml:Subject/saml:NameID": "<saml:NameID xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" Format=\"urn:x\">user@example.com</saml:NameID>"
+  }
+ }
+}

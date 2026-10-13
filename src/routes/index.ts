@@ -6,10 +6,12 @@ import { registerReports } from './reports.js';
 import { registerStorage } from './storage.js';
 import { registerDevices } from './devices.js';
 import { registerAdmin } from './admin.js';
+import { registerSaml } from './saml.js';
 import { registerSystem } from './system.js';
 
 export function registerRoutes(app: App): void {
   registerAuth(app);
+  registerSaml(app);
   registerSystem(app);
   registerFlows(app);
   registerLinks(app);

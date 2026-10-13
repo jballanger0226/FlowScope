@@ -230,6 +230,17 @@ export class AuthService {
     return { principal: { username: canon, role: outcome.role!, source: outcome.source!, service }, mustChange: !!outcome.mustChange };
   }
 
+  /** Completes a browser sign-in whose identity was already proven by the SAML identity provider. */
+  samlLogin(name: string, groups: string[], ip: string): { principal: Principal; mustChange: boolean } {
+    const role = this.mapRole('saml', groups);
+    if (!role) { this.log.warn('auth', `SAML sign-in for ${name} from ${ip} refused: none of the groups (${groups.slice(0, 6).join(', ') || 'none sent'}) maps to a role`, name); throw new AuthError('You signed in, but none of your groups maps to a FlowScope role. Ask an administrator to map one.', 403); }
+    try { this.upsertRemote(name, role, 'saml'); } catch (e) { this.log.warn('auth', `SAML sign-in for ${name} from ${ip} refused: ${(e as Error).message}`, name); throw e; }
+    const canon = (this.cdb.db.prepare('SELECT username FROM users WHERE username = ?').get(name) as { username: string }).username;
+    this.cdb.db.prepare('UPDATE users SET last_login = ?, last_source = ? WHERE username = ?').run(Date.now(), `web from ${ip}`, canon);
+    this.log.audit(canon, `Signed in to web from ${ip} (saml)`);
+    return { principal: { username: canon, role, source: 'saml', service: 'web' }, mustChange: false };
+  }
+
   /* ---------------------------------------------------------------- sessions */
 
   createSession(p: Principal, ip: string): { token: string; csrf: string } {

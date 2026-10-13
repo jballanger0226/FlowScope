@@ -19,6 +19,7 @@ import type { TsStore } from './store/types.js';
 import { SwitchableStore } from './store/switchable.js';
 import { WebServer } from './server/http.js';
 import type { Resolver } from './query/tokens.js';
+import { SamlState } from './auth/saml/saml.js';
 import { registerRoutes } from './routes/index.js';
 
 export const VERSION = '0.1.0';
@@ -29,6 +30,7 @@ export class App {
   cdb!: ConfigDb; secrets!: Secrets; settings!: Settings; log!: AppLog; auth!: AuthService; certs!: CertManager;
   creds!: CredentialStore; devices!: DeviceService; discovery!: Discovery; poller!: Poller; collector!: FlowCollector; store!: SwitchableStore; web!: WebServer;
   initialAdminPassword: string | null = null;
+  saml = new SamlState();
   private timers: NodeJS.Timeout[] = [];
   private collectCache: CollectSettings = { flow: true, snmp: true, flowAt: 0, snmpAt: 0 };
   ports: { https?: number; http?: number } = {};
