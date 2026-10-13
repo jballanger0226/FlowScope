@@ -38,11 +38,14 @@ export interface StreamRow {
   vlan: number | null;
   qosChanged: boolean;
   flags: number;
+  /** DSCP seen first, and the DSCP it became when the stream was re-marked (otherwise null). */
+  dscpIn: number;
+  dscpOut: number | null;
 }
 
 export interface StreamPage { rows: StreamRow[]; total: number; truncated: boolean; tier: 'raw' }
 
-export type ReportDim = 'srcMac' | 'dstMac' | 'vlan' | 'inIf' | 'srcIp' | 'dstIp' | 'proto' | 'dscp' | 'qos' | 'sport' | 'dport' | 'flags';
+export type ReportDim = 'srcMac' | 'dstMac' | 'vlan' | 'inIf' | 'srcIp' | 'dstIp' | 'proto' | 'dscp' | 'qos' | 'sport' | 'dport' | 'svc' | 'flags';
 
 export interface ReportSpec {
   range: TimeRange;

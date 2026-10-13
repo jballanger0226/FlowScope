@@ -49,9 +49,9 @@ function flowDdl(t: string): string {
 }
 
 const ROLLUP_COLS = `ts INTEGER NOT NULL, exporter TEXT NOT NULL, in_if INTEGER NOT NULL, vlan INTEGER NOT NULL, src_mac TEXT NOT NULL, dst_mac TEXT NOT NULL,
-  src_ip TEXT NOT NULL, dst_ip TEXT NOT NULL, src_n INTEGER, dst_n INTEGER, proto INTEGER NOT NULL, dport INTEGER NOT NULL, dscp INTEGER NOT NULL, post_dscp INTEGER NOT NULL,
+  src_ip TEXT NOT NULL, dst_ip TEXT NOT NULL, src_n INTEGER, dst_n INTEGER, proto INTEGER NOT NULL, dport INTEGER NOT NULL, svc INTEGER NOT NULL, dscp INTEGER NOT NULL, post_dscp INTEGER NOT NULL,
   bytes INTEGER NOT NULL, pkts INTEGER NOT NULL, flows INTEGER NOT NULL,
-  PRIMARY KEY (ts, exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, proto, dport, dscp, post_dscp)`;
+  PRIMARY KEY (ts, exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, proto, dport, svc, dscp, post_dscp)`;
 
 const STATIC_DDL = `
   CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
@@ -271,12 +271,13 @@ export class SqliteOps {
     const order = q.sort === 'bytes' ? 't.b' : q.sort === 'pkts' ? 't.p' : 't.t1';
     const sql = `
       WITH f AS (${union}),
-      fr AS (SELECT * FROM f ${cand}),
+      fr AS (SELECT *, FIRST_VALUE(tos >> 2) OVER (PARTITION BY skey, src_ip, sport ORDER BY ts0) AS fd FROM f ${cand}),
       d AS (
         SELECT skey, src_ip, dst_ip, src_n, dst_n, proto, sport, dport, MIN(ts0) AS t0, MAX(ts1) AS t1,
                SUM(CASE WHEN primary_hop = 1 THEN bytes ELSE 0 END) AS b, SUM(CASE WHEN primary_hop = 1 THEN pkts ELSE 0 END) AS p,
-               COUNT(DISTINCT tos >> 2) AS nd,
+               COUNT(DISTINCT tos >> 2) AS nd, MAX(fd) AS d_in, MIN(tos >> 2) AS d_min, MAX(tos >> 2) AS d_max,
                MAX(CASE WHEN post_tos IS NOT NULL AND (post_tos >> 2) != (tos >> 2) THEN 1 ELSE 0 END) AS rm,
+               MAX(CASE WHEN post_tos IS NOT NULL AND (post_tos >> 2) != (tos >> 2) THEN post_tos >> 2 END) AS d_post,
                GROUP_CONCAT(DISTINCT exporter) AS exps, MAX(vlan) AS vlan, MAX(flags) AS fl
         FROM fr GROUP BY skey, src_ip, sport),
       i AS (SELECT skey, src_ip, dst_ip, src_n, dst_n, proto, sport, dport, MIN(t0) AS it0 FROM d GROUP BY skey),
@@ -284,9 +285,11 @@ export class SqliteOps {
         SELECT d.skey AS skey, MIN(d.t0) AS t0, MAX(d.t1) AS t1, SUM(d.b) AS b, SUM(d.p) AS p,
                SUM(CASE WHEN d.src_ip = i.src_ip AND d.sport = i.sport THEN d.b ELSE 0 END) AS fb,
                SUM(CASE WHEN d.src_ip = i.src_ip AND d.sport = i.sport THEN d.p ELSE 0 END) AS fp,
-               MAX(d.nd) AS nd, MAX(d.rm) AS rm, GROUP_CONCAT(d.exps) AS exps, MAX(d.vlan) AS vlan, MAX(d.fl) AS fl
+               MAX(d.nd) AS nd, MAX(d.rm) AS rm, GROUP_CONCAT(d.exps) AS exps, MAX(d.vlan) AS vlan, MAX(d.fl) AS fl,
+               MIN(d.d_min) AS d_min, MAX(d.d_max) AS d_max, MAX(d.d_post) AS d_post,
+               MAX(CASE WHEN d.src_ip = i.src_ip AND d.sport = i.sport THEN d.d_in END) AS d_in
         FROM d JOIN i ON i.skey = d.skey GROUP BY d.skey)
-      SELECT i.skey AS skey, i.src_ip, i.dst_ip, i.proto, i.sport, i.dport, t.t0, t.t1, t.b, t.p, t.fb, t.fp, t.exps, t.vlan, t.fl,
+      SELECT i.skey AS skey, i.src_ip, i.dst_ip, i.proto, i.sport, i.dport, t.t0, t.t1, t.b, t.p, t.fb, t.fp, t.exps, t.vlan, t.fl, t.d_in, t.d_min, t.d_max, t.d_post,
              (CASE WHEN t.nd > 1 OR t.rm = 1 THEN 1 ELSE 0 END) AS qchg, COUNT(*) OVER () AS total
       FROM i JOIN t ON t.skey = i.skey
       WHERE 1 = 1 ${exact.length ? 'AND ' + exact.join(' AND ') : ''} ${qosCond}
@@ -299,7 +302,9 @@ export class SqliteOps {
       t0: Number(r.t0), t1: Number(r.t1), bytes: Number(r.b), pkts: Number(r.p), fwdBytes: Number(r.fb), revBytes: Number(r.b) - Number(r.fb),
       fwdPkts: Number(r.fp), revPkts: Number(r.p) - Number(r.fp),
       exporters: [...new Set(String(r.exps || '').split(',').filter(Boolean))], vlan: r.vlan === null ? null : Number(r.vlan),
-      qosChanged: Number(r.qchg) === 1, flags: Number(r.fl || 0)
+      qosChanged: Number(r.qchg) === 1, flags: Number(r.fl || 0),
+      dscpIn: r.d_in === null ? Number(r.d_min) : Number(r.d_in),
+      dscpOut: Number(r.qchg) === 1 ? (r.d_post !== null ? Number(r.d_post) : (Number(r.d_max) !== Number(r.d_in ?? r.d_min) ? Number(r.d_max) : Number(r.d_min))) : null
     }));
     return { rows: out, total, truncated: total > out.length, tier: 'raw' };
   }
@@ -365,7 +370,7 @@ export class SqliteOps {
       srcMac: pick(cm.srcMac, cm.dstMac), dstMac: pick(cm.dstMac, cm.srcMac), vlan: cm.vlan,
       inIf: `${cm.exporter} || '#' || ${cm.inIf}`,
       srcIp: ipExpr(pick(cm.srcIp, cm.dstIp), pick(cm.srcN, cm.dstN)), dstIp: ipExpr(pick(cm.dstIp, cm.srcIp), pick(cm.dstN, cm.srcN)),
-      proto: cm.proto, dscp: cm.dscp,
+      proto: cm.proto, dscp: cm.dscp, svc: cm.svc,
       qos: `(CASE WHEN ${cm.postDscp} IS NOT NULL AND ${cm.postDscp} >= 0 AND ${cm.postDscp} != ${cm.dscp} THEN ${cm.dscp} || '>' || ${cm.postDscp} ELSE 'unchanged' END)`,
       sport: cm.sport ? pick(cm.sport, cm.dport) : '0', dport: cm.sport ? pick(cm.dport, cm.sport) : pick(cm.dport, '0'), flags: cm.flags || '0'
     };
@@ -506,44 +511,34 @@ export class SqliteOps {
 
   private rollupAll(now: number): void {
     const MIN = 60_000, HOUR = 3600_000;
-    // flows: raw -> 1m
-    const upto1m = Math.floor((now - 120_000) / MIN) * MIN;
-    let wm = this.meta('wm_1m', 0);
-    if (wm === 0) {
-      const first = this.firstRawTs();
-      wm = first === null ? upto1m : Math.floor(first / MIN) * MIN;
-    }
-    if (wm < upto1m) {
-      for (let a = wm; a < upto1m; a += HOUR) {
-        const b = Math.min(upto1m, a + HOUR);
-        const tabs = this.tablesFor('flows', { from: a, to: b });
+    // flows: raw -> 1m. Progress is tracked per raw table by row number, not by time, so a record that arrives late (or
+    // is loaded after the fact) is still counted exactly once. Totals are added into the minute the record ended in.
+    for (const t of this.tables('flows').sort()) {
+      const key = 'rid_' + t;
+      const done = this.meta(key, 0);
+      const top = (this.db.prepare(`SELECT MAX(rowid) AS m FROM ${t}`).get() as { m: number | null }).m ?? 0;
+      if (top <= done) continue;
+      for (let lo = done; lo < top; lo += 200_000) {
+        const hi = Math.min(top, lo + 200_000);
         this.tx(() => {
-          for (const t of tabs) {
-            this.db.prepare(`INSERT INTO flow_1m (ts, exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, src_n, dst_n, proto, dport, dscp, post_dscp, bytes, pkts, flows)
-              SELECT (ts1 / ${MIN}) * ${MIN}, exporter, COALESCE(in_if, 0), COALESCE(vlan, 0), COALESCE(src_mac, ''), COALESCE(dst_mac, ''), src_ip, dst_ip, src_n, dst_n, proto, dport, tos >> 2,
-                     COALESCE(post_tos >> 2, -1), SUM(bytes), SUM(pkts), COUNT(*)
-              FROM ${t} WHERE primary_hop = 1 AND ts1 >= ? AND ts1 < ?
-              GROUP BY 1, exporter, 3, 4, 5, 6, src_ip, dst_ip, proto, dport, 13, 14
-              ON CONFLICT DO UPDATE SET bytes = bytes + excluded.bytes, pkts = pkts + excluded.pkts, flows = flows + excluded.flows`).run(a, b);
-          }
-          this.setMeta('wm_1m', b);
+          this.db.prepare(`INSERT INTO flow_1m (ts, exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, src_n, dst_n, proto, dport, svc, dscp, post_dscp, bytes, pkts, flows)
+            SELECT (ts1 / ${MIN}) * ${MIN}, exporter, COALESCE(in_if, 0), COALESCE(vlan, 0), COALESCE(src_mac, ''), COALESCE(dst_mac, ''), src_ip, dst_ip, src_n, dst_n, proto, COALESCE(dport, 0), MIN(COALESCE(sport, 0), COALESCE(dport, 0)), tos >> 2,
+                   COALESCE(post_tos >> 2, -1), SUM(bytes), SUM(pkts), COUNT(*)
+            FROM ${t} WHERE primary_hop = 1 AND rowid > ? AND rowid <= ?
+            GROUP BY 1, exporter, 3, 4, 5, 6, src_ip, dst_ip, proto, 12, 13, 14, 15
+            ON CONFLICT DO UPDATE SET bytes = bytes + excluded.bytes, pkts = pkts + excluded.pkts, flows = flows + excluded.flows`).run(lo, hi);
+          this.setMeta(key, hi);
         });
       }
-    } else if (this.meta('wm_1m', 0) === 0) this.setMeta('wm_1m', upto1m);
-    // 1m -> 1h -> 1d
-    this.chain('flow_1m', 'flow_1h', 'wm_1h', HOUR, this.meta('wm_1m', 0), now);
+    }
+    // forget progress for raw tables that retention has removed
+    const live = new Set(this.tables('flows'));
+    for (const r of this.db.prepare("SELECT k FROM meta WHERE k LIKE 'rid\\_%' ESCAPE '\\'").all() as unknown as { k: string }[]) if (!live.has(r.k.slice(4))) this.db.prepare('DELETE FROM meta WHERE k = ?').run(r.k);
+    // 1m -> 1h -> 1d. An hour is closed 30 minutes after it ends; records later than that stay in the 1-minute table only.
+    this.chain('flow_1m', 'flow_1h', 'wm_1h', HOUR, now - 30 * MIN, now);
     this.chain('flow_1h', 'flow_1d', 'wm_1d', 24 * HOUR, Math.floor(this.meta('wm_1h', 0) / (24 * HOUR)) * 24 * HOUR, now);
     // SNMP hourly
     this.snmpHourly(now);
-  }
-
-  private firstRawTs(): number | null {
-    const names = this.tables('flows').sort();
-    for (const n of names) {
-      const r = this.db.prepare(`SELECT MIN(ts1) AS m FROM ${n}`).get() as { m: number | null };
-      if (r.m !== null) return r.m;
-    }
-    return null;
   }
 
   private chain(from: string, to: string, key: string, size: number, available: number, now: number): void {
@@ -558,9 +553,9 @@ export class SqliteOps {
     for (let a = wm; a < complete; a += size) {
       const b = a + size;
       this.tx(() => {
-        this.db.prepare(`INSERT INTO ${to} (ts, exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, src_n, dst_n, proto, dport, dscp, post_dscp, bytes, pkts, flows)
-          SELECT ${a}, exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, src_n, dst_n, proto, dport, dscp, post_dscp, SUM(bytes), SUM(pkts), SUM(flows)
-          FROM ${from} WHERE ts >= ? AND ts < ? GROUP BY exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, proto, dport, dscp, post_dscp
+        this.db.prepare(`INSERT INTO ${to} (ts, exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, src_n, dst_n, proto, dport, svc, dscp, post_dscp, bytes, pkts, flows)
+          SELECT ${a}, exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, src_n, dst_n, proto, dport, svc, dscp, post_dscp, SUM(bytes), SUM(pkts), SUM(flows)
+          FROM ${from} WHERE ts >= ? AND ts < ? GROUP BY exporter, in_if, vlan, src_mac, dst_mac, src_ip, dst_ip, proto, dport, svc, dscp, post_dscp
           ON CONFLICT DO UPDATE SET bytes = bytes + excluded.bytes, pkts = pkts + excluded.pkts, flows = flows + excluded.flows`).run(a, b);
         this.setMeta(key, b);
       });
@@ -630,15 +625,15 @@ export class SqliteOps {
 
 interface ColMap {
   srcIp: string; dstIp: string; srcN: string; dstN: string; sport: string | null; dport: string; proto: string; vlan: string;
-  srcMac: string; dstMac: string; exporter: string; inIf: string; dscp: string; postDscp: string; flags: string | null;
+  srcMac: string; dstMac: string; exporter: string; inIf: string; dscp: string; postDscp: string; flags: string | null; svc: string;
 }
 const RAW_COLS: ColMap = {
   srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'src_n', dstN: 'dst_n', sport: 'sport', dport: 'dport', proto: 'proto', vlan: 'vlan',
-  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: '(tos >> 2)', postDscp: '(CASE WHEN post_tos IS NULL THEN NULL ELSE post_tos >> 2 END)', flags: 'flags'
+  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: '(tos >> 2)', postDscp: '(CASE WHEN post_tos IS NULL THEN NULL ELSE post_tos >> 2 END)', flags: 'flags', svc: 'MIN(COALESCE(sport, 0), COALESCE(dport, 0))'
 };
 const ROLLUP_MAP: ColMap = {
   srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'src_n', dstN: 'dst_n', sport: null, dport: 'dport', proto: 'proto', vlan: 'vlan',
-  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: 'dscp', postDscp: 'post_dscp', flags: null
+  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: 'dscp', postDscp: 'post_dscp', flags: null, svc: 'svc'
 };
 
 function likeEsc(s: string): string { return s.replace(/[\\%_]/g, m => '\\' + m); }

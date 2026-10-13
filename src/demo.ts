@@ -1,0 +1,329 @@
+import type { App } from './app.js';
+import type { FlowRecord } from './collector/types.js';
+import type { ClsPoint, IfPoint } from './store/types.js';
+import { dscpName } from './query/apps.js';
+
+/** Demo mode: a small simulated network (eight devices, the traffic between them and SNMP history) written straight into
+ *  the real stores, so every screen has realistic data without any exporters. Nothing here talks to the network. */
+
+type Role = 'switch' | 'router' | 'firewall';
+// interface: [name, description, speed Mbps, output policy, out util %, in util %]
+type Ifc = [string, string, number, string | null, number, number];
+interface Dev { name: string; ip: string; role: Role; descr: string; secs: number; ifs: Ifc[]; mac: string }
+
+const DEVS: Dev[] = [
+  { name: 'dist-sw-01', ip: '10.255.0.2', role: 'switch', descr: 'Distribution switch', secs: 60, mac: '00:1c:73:00:00:02', ifs: [
+    ['Vl140', 'VLAN 140 CAMPUS-USERS (SVI)', 10000, null, 12, 9], ['Vl150', 'VLAN 150 CAMPUS-WIFI (SVI)', 10000, null, 7, 6],
+    ['Te1/0/1', 'Uplink to core-rtr-01', 10000, 'CORE-OUT', 31, 28], ['Te1/0/2', 'Uplink to core-rtr-01 (DC path)', 10000, 'CORE-OUT', 22, 35]] },
+  { name: 'core-rtr-01', ip: '10.255.0.1', role: 'router', descr: 'Core router', secs: 60, mac: '00:1c:73:00:00:01', ifs: [
+    ['Te0/0/0', 'Downlink to dist-sw-01', 10000, 'CORE-OUT', 38, 33], ['Te0/0/1', 'Link to DC fabric', 10000, 'CORE-OUT', 44, 41],
+    ['Te0/0/2', 'Link to fw-edge-01', 10000, 'CORE-OUT', 27, 30], ['Te0/0/3', 'Link to wan-rtr-01', 1000, 'WAN-OUT', 71, 64], ['Lo0', 'Loopback', 0, null, 0, 0]] },
+  { name: 'fw-edge-01', ip: '10.255.0.5', role: 'firewall', descr: 'Edge firewall', secs: 60, mac: '00:1c:73:00:00:05', ifs: [
+    ['Eth1/1', 'Inside, to core-rtr-01', 10000, null, 27, 30], ['Eth1/2', 'Outside, to ISP', 1000, 'FW-OUT', 58, 49]] },
+  { name: 'dc-leaf-07', ip: '10.255.1.7', role: 'switch', descr: 'Data center leaf', secs: 60, mac: '00:1c:73:00:01:07', ifs: [
+    ['Vl310', 'VLAN 310 DC-APPS (SVI)', 10000, null, 40, 36], ['Eth1/49', 'Uplink to core-rtr-01', 40000, 'DC-FABRIC-OUT', 52, 47], ['Eth1/52', 'Uplink to dc-spine-01', 40000, 'DC-FABRIC-OUT', 61, 58]] },
+  { name: 'dc-leaf-11', ip: '10.255.1.11', role: 'switch', descr: 'Data center leaf', secs: 60, mac: '00:1c:73:00:01:0b', ifs: [
+    ['Eth1/49', 'Uplink to dc-spine-01', 40000, 'DC-FABRIC-OUT', 33, 36], ['Vl320', 'VLAN 320 DC-DATABASE (SVI)', 10000, null, 22, 25]] },
+  { name: 'dc-spine-01', ip: '10.255.1.1', role: 'switch', descr: 'Data center spine', secs: 60, mac: '00:1c:73:00:01:01', ifs: [
+    ['Eth1/7', 'Downlink to dc-leaf-07', 40000, 'DC-FABRIC-OUT', 59, 62], ['Eth1/9', 'Downlink to dc-leaf-11', 40000, 'DC-FABRIC-OUT', 35, 33]] },
+  { name: 'wan-rtr-01', ip: '10.255.0.9', role: 'router', descr: 'WAN aggregation router', secs: 60, mac: '00:1c:73:00:00:09', ifs: [
+    ['Tu100', 'Tunnel to br-rtr-02', 1000, 'WAN-OUT', 66, 72], ['Gi0/0/0', 'Link to core-rtr-01', 1000, 'WAN-OUT', 64, 71]] },
+  { name: 'br-rtr-02', ip: '10.255.2.2', role: 'router', descr: 'Branch router', secs: 300, mac: '00:1c:73:00:02:02', ifs: [
+    ['Gi0/0/1', 'Branch LAN, VLAN 200 BRANCH-LAN', 1000, null, 28, 31], ['Tu100', 'WAN tunnel to wan-rtr-01', 200, 'WAN-OUT', 94, 61]] }
+];
+
+// class: [name, queue, matched DSCP values, guarantee]
+const POLICIES: Record<string, [string, string, number[], string][]> = {
+  'CORE-OUT': [['VOICE', 'Q0 · strict priority', [46], 'priority 10%'], ['VIDEO', 'Q1', [34], '25%'], ['CRITICAL', 'Q2', [18], '30%'], ['BULK', 'Q3', [10], '5%'], ['DEFAULT', 'Q4 · class-default', [], 'remainder']],
+  'WAN-OUT': [['VOICE', 'Q0 · strict priority', [46], 'priority 20%'], ['VIDEO', 'Q1', [34], '25%'], ['SIGNALING', 'Q2', [24], '5%'], ['CRITICAL', 'Q3', [18], '30%'], ['BULK', 'Q4', [10], '5%'], ['DEFAULT', 'Q5 · class-default', [], 'remainder']],
+  'DC-FABRIC-OUT': [['REPLICATION', 'Q1', [26], '30%'], ['CRITICAL', 'Q2', [18], '30%'], ['BULK', 'Q3', [10], '10%'], ['DEFAULT', 'Q4 · class-default', [], 'remainder']],
+  'FW-OUT': [['VOICE', 'Q0 · strict priority', [46], 'priority 10%'], ['CRITICAL', 'Q1', [18], '40%'], ['DEFAULT', 'Q2 · class-default', [], 'remainder']]
+};
+const SHARE: Record<string, number> = { VOICE: 0.03, VIDEO: 0.08, SIGNALING: 0.01, CRITICAL: 0.35, REPLICATION: 0.3, BULK: 0.12, DEFAULT: 0.25 };
+const OVERRIDE: Record<string, { drop: number; depth: number; mode: 'burst' | 'ramp' }> = {
+  'dc-leaf-07|Eth1/49|BULK': { drop: 2.4, depth: 212, mode: 'burst' },
+  'core-rtr-01|Te0/0/3|DEFAULT': { drop: 1.2, depth: 96, mode: 'ramp' },
+  'br-rtr-02|Tu100|CRITICAL': { drop: 0.3, depth: 148, mode: 'burst' },
+  'br-rtr-02|Tu100|DEFAULT': { drop: 0.6, depth: 74, mode: 'burst' }
+};
+const VLANS: [number, string][] = [[140, 'CAMPUS-USERS'], [150, 'CAMPUS-WIFI'], [200, 'BRANCH-LAN'], [310, 'DC-APPS'], [320, 'DC-DATABASE']];
+
+// path hop: [device, ingress interface ('@v' = the VLAN's SVI), egress interface, link latency in ms from the previous hop]
+type Hop = [string, string, string, number];
+const PATHS: Record<string, Hop[]> = {
+  A: [['dist-sw-01', '@v', 'Te1/0/1', 0], ['core-rtr-01', 'Te0/0/0', 'Te0/0/2', 0.4], ['fw-edge-01', 'Eth1/1', 'Eth1/2', 0.3]],
+  B: [['dist-sw-01', '@v', 'Te1/0/2', 0], ['core-rtr-01', 'Te0/0/0', 'Te0/0/1', 0.4], ['dc-leaf-07', 'Eth1/49', 'Vl310', 0.6]],
+  C: [['br-rtr-02', 'Gi0/0/1', 'Tu100', 0], ['wan-rtr-01', 'Tu100', 'Gi0/0/0', 18.2], ['core-rtr-01', 'Te0/0/3', 'Te0/0/1', 0.5], ['dc-leaf-07', 'Eth1/49', 'Vl310', 0.6]],
+  D: [['dc-leaf-07', 'Vl310', 'Eth1/52', 0], ['dc-spine-01', 'Eth1/7', 'Eth1/9', 0.2], ['dc-leaf-11', 'Eth1/49', 'Vl320', 0.2]],
+  E: [['dc-leaf-07', 'Vl310', 'Eth1/49', 0], ['core-rtr-01', 'Te0/0/1', 'Te0/0/2', 0.6], ['fw-edge-01', 'Eth1/1', 'Eth1/2', 0.3]],
+  F: [['dist-sw-01', '@v', 'Te1/0/1', 0], ['core-rtr-01', 'Te0/0/0', 'Lo0', 0.4]],
+  G: [['br-rtr-02', 'Gi0/0/1', 'Tu100', 0], ['wan-rtr-01', 'Tu100', 'Gi0/0/0', 18.2], ['core-rtr-01', 'Te0/0/3', 'Te0/0/2', 0.5], ['fw-edge-01', 'Eth1/1', 'Eth1/2', 0.3]]
+};
+
+const TCP = 6, UDP = 17, ICMP = 1;
+const FL: Record<string, number> = { FIN: 1, SYN: 2, RST: 4, PSH: 8, ACK: 16 };
+const flagBits = (s: string) => s.split(' ').filter(Boolean).reduce((a, f) => a | (FL[f] ?? 0), 0);
+
+interface Spec {
+  src: string; dst: string; proto: number; sport: number; dport: number; vlan: number; fB: number; rB: number; fP: number; rP: number; path: string; rev: boolean;
+  agoMin: number; durSec: number; flags: string; dscp: number; dscpR?: number;
+  loss?: [number, number, 'i' | 'r']; slow?: [number, number]; remark?: [number, number, 'i' | 'r' | 'b'];
+}
+const SAMPLE: Spec[] = [
+  { src: '10.1.4.21', dst: '198.51.100.40', proto: TCP, sport: 51522, dport: 443, vlan: 140, fB: 184200, rB: 3320000, fP: 1200, rP: 2650, path: 'A', rev: false, agoMin: 1, durSec: 42, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  { src: '10.1.4.33', dst: '192.0.2.53', proto: UDP, sport: 49311, dport: 53, vlan: 140, fB: 1450, rB: 3920, fP: 22, rP: 22, path: 'A', rev: false, agoMin: 1, durSec: 1, flags: '', dscp: 0 },
+  { src: '10.1.4.21', dst: '10.9.0.5', proto: TCP, sport: 50002, dport: 5432, vlan: 140, fB: 922000, rB: 14800000, fP: 1800, rP: 11000, path: 'B', rev: false, agoMin: 2, durSec: 311, flags: 'SYN ACK PSH', dscp: 18, remark: [1, 0, 'i'] },
+  { src: '10.1.7.88', dst: '10.9.0.12', proto: TCP, sport: 61004, dport: 445, vlan: 150, fB: 2100000, rB: 88400000, fP: 2300, rP: 62000, path: 'B', rev: false, agoMin: 3, durSec: 129, flags: 'SYN ACK PSH FIN', dscp: 10, loss: [2, 2.4, 'r'], remark: [1, 0, 'r'] },
+  { src: '10.20.3.14', dst: '10.9.0.12', proto: TCP, sport: 55871, dport: 443, vlan: 200, fB: 312000, rB: 4820000, fP: 380, rP: 3600, path: 'C', rev: false, agoMin: 4, durSec: 87, flags: 'SYN ACK PSH FIN', dscp: 0, slow: [1, 38] },
+  { src: '10.20.3.14', dst: '10.9.0.5', proto: TCP, sport: 55872, dport: 5432, vlan: 200, fB: 640000, rB: 9800000, fP: 900, rP: 7400, path: 'C', rev: false, agoMin: 4, durSec: 203, flags: 'SYN ACK PSH', dscp: 18, slow: [1, 38] },
+  { src: '10.9.0.5', dst: '10.9.2.30', proto: TCP, sport: 40123, dport: 9092, vlan: 310, fB: 412000000, rB: 9100000, fP: 310000, rP: 98000, path: 'D', rev: false, agoMin: 1, durSec: 3540, flags: 'SYN ACK PSH', dscp: 26 },
+  { src: '10.9.2.30', dst: '10.9.0.5', proto: TCP, sport: 40890, dport: 5432, vlan: 320, fB: 5200000, rB: 61000000, fP: 6100, rP: 47000, path: 'D', rev: true, agoMin: 2, durSec: 640, flags: 'SYN ACK PSH', dscp: 18 },
+  { src: '10.9.0.12', dst: '198.51.100.77', proto: TCP, sport: 44312, dport: 443, vlan: 310, fB: 96000, rB: 1900000, fP: 420, rP: 1500, path: 'E', rev: false, agoMin: 7, durSec: 18, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  { src: '10.1.4.60', dst: '10.9.0.20', proto: TCP, sport: 50220, dport: 22, vlan: 140, fB: 48000, rB: 310000, fP: 520, rP: 640, path: 'B', rev: false, agoMin: 3, durSec: 1280, flags: 'SYN ACK PSH', dscp: 16 },
+  { src: '10.1.4.60', dst: '10.255.0.1', proto: ICMP, sport: 0, dport: 0, vlan: 140, fB: 4000, rB: 4000, fP: 50, rP: 50, path: 'F', rev: false, agoMin: 6, durSec: 49, flags: '', dscp: 0 },
+  { src: '10.1.9.15', dst: '192.0.2.123', proto: UDP, sport: 123, dport: 123, vlan: 140, fB: 380, rB: 380, fP: 5, rP: 5, path: 'A', rev: false, agoMin: 9, durSec: 256, flags: '', dscp: 0 },
+  { src: '10.1.7.19', dst: '198.51.100.200', proto: TCP, sport: 52311, dport: 443, vlan: 150, fB: 88000, rB: 2400000, fP: 610, rP: 1900, path: 'A', rev: false, agoMin: 5, durSec: 33, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  { src: '10.1.7.19', dst: '198.51.100.201', proto: TCP, sport: 52312, dport: 443, vlan: 150, fB: 64000, rB: 1100000, fP: 420, rP: 980, path: 'A', rev: false, agoMin: 5, durSec: 31, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  { src: '10.20.5.7', dst: '10.9.0.30', proto: UDP, sport: 5060, dport: 5060, vlan: 200, fB: 52000, rB: 48000, fP: 160, rP: 150, path: 'C', rev: false, agoMin: 2, durSec: 415, flags: '', dscp: 24, slow: [1, 38], remark: [1, 0, 'i'] },
+  { src: '10.9.0.30', dst: '10.20.5.7', proto: UDP, sport: 16384, dport: 16390, vlan: 310, fB: 9200000, rB: 9100000, fP: 46000, rP: 45500, path: 'C', rev: true, agoMin: 2, durSec: 414, flags: '', dscp: 46, loss: [2, 1.2, 'i'], slow: [1, 38], remark: [2, 0, 'i'] },
+  { src: '10.1.4.33', dst: '10.9.0.8', proto: TCP, sport: 49800, dport: 3389, vlan: 140, fB: 2200000, rB: 41000000, fP: 9100, rP: 33000, path: 'B', rev: false, agoMin: 8, durSec: 1860, flags: 'SYN ACK PSH', dscp: 34, remark: [1, 18, 'i'] },
+  { src: '10.9.0.9', dst: '10.9.2.40', proto: UDP, sport: 51234, dport: 514, vlan: 310, fB: 830000, rB: 0, fP: 2100, rP: 0, path: 'D', rev: false, agoMin: 2, durSec: 3590, flags: '', dscp: 0 },
+  { src: '10.1.4.77', dst: '198.51.100.5', proto: TCP, sport: 50910, dport: 80, vlan: 140, fB: 22000, rB: 640000, fP: 160, rP: 540, path: 'A', rev: false, agoMin: 10, durSec: 12, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  { src: '10.1.7.88', dst: '198.51.100.40', proto: TCP, sport: 53500, dport: 443, vlan: 150, fB: 310000, rB: 5200000, fP: 980, rP: 4100, path: 'A', rev: false, agoMin: 12, durSec: 64, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  { src: '10.1.4.21', dst: '10.9.0.5', proto: TCP, sport: 50003, dport: 5432, vlan: 140, fB: 410000, rB: 6200000, fP: 820, rP: 5200, path: 'B', rev: false, agoMin: 15, durSec: 188, flags: 'SYN ACK PSH', dscp: 18 },
+  { src: '10.9.0.5', dst: '10.1.4.21', proto: TCP, sport: 38211, dport: 8080, vlan: 310, fB: 18000, rB: 92000, fP: 60, rP: 110, path: 'B', rev: true, agoMin: 16, durSec: 22, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  { src: '10.1.4.90', dst: '10.9.0.12', proto: TCP, sport: 49002, dport: 443, vlan: 140, fB: 71000, rB: 1300000, fP: 300, rP: 1100, path: 'B', rev: false, agoMin: 130, durSec: 51, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  { src: '10.1.9.4', dst: '192.0.2.88', proto: UDP, sport: 51000, dport: 443, vlan: 140, fB: 2400000, rB: 38000000, fP: 2100, rP: 31000, path: 'A', rev: false, agoMin: 300, durSec: 92, flags: '', dscp: 0 },
+  { src: '10.20.3.40', dst: '198.51.100.40', proto: TCP, sport: 56001, dport: 443, vlan: 200, fB: 140000, rB: 2300000, fP: 420, rP: 1800, path: 'G', rev: false, agoMin: 9, durSec: 60, flags: 'SYN ACK PSH FIN', dscp: 0 },
+  { src: '10.20.3.14', dst: '10.9.0.12', proto: TCP, sport: 55880, dport: 445, vlan: 200, fB: 1100000, rB: 22000000, fP: 1400, rP: 16000, path: 'C', rev: false, agoMin: 11, durSec: 95, flags: 'SYN ACK PSH FIN', dscp: 10, slow: [1, 38] }
+];
+
+/** Small deterministic random generator so a demo looks the same each time it is seeded. */
+function rng(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => { s = (s + 0x6D2B79F5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+function hostMac(ip: string): string {
+  const p = ip.split('.').map(Number);
+  return ['00', '50', '56', ...p.map(n => n.toString(16).padStart(2, '0'))].slice(0, 6).join(':');
+}
+
+class Net {
+  ids = new Map<string, number>();            // device name -> id
+  ifIdx = new Map<string, number>();          // "dev|ifname" -> ifIndex
+  byName = new Map(DEVS.map(d => [d.name, d]));
+  idx(dev: string, ifn: string): number { return this.ifIdx.get(dev + '|' + ifn) ?? 0; }
+}
+
+function makeRecords(net: Net, sp: Spec, startMs: number, r: () => number): FlowRecord[] {
+  const out: FlowRecord[] = [];
+  const base = PATHS[sp.path];
+  const ttl0 = sp.dport === 445 || sp.dport === 3389 ? 128 : 64;
+  const mkDir = (fwd: boolean) => {
+    const natural = sp.rev ? !fwd : fwd;
+    const hops = natural ? base.map(h => ({ dev: h[0], inn: h[1], out: h[2], ms: h[3] })) : base.slice().reverse().map((h, i, a) => ({ dev: h[0], inn: h[2], out: i === a.length - 1 ? '@v' : h[1], ms: h[3] }));
+    // in the reverse direction the ingress of the first hop is the egress of the last natural hop; the link delay stays attached to each device
+    const src = fwd ? sp.src : sp.dst, dst = fwd ? sp.dst : sp.src, sport = fwd ? sp.sport : sp.dport, dport = fwd ? sp.dport : sp.sport;
+    let pkts = fwd ? sp.fP : sp.rP, bytes = fwd ? sp.fB : sp.rB;
+    if (!pkts) return;
+    let dscp = fwd ? sp.dscp : sp.dscpR ?? (sp.dscp === 0 ? 0 : sp.dscp);
+    const dirTag = fwd ? 'i' : 'r';
+    let t = startMs + (fwd ? 0 : 3);
+    let prevMac = hostMac(src);
+    const ratio = bytes / pkts;
+    hops.forEach((h, i) => {
+      const dev = net.byName.get(h.dev)!;
+      let ms = h.ms;
+      if (sp.slow && sp.slow[0] === i) ms = sp.slow[1];
+      if (i > 0) t += Math.round(ms);
+      if (sp.loss && sp.loss[2] === dirTag && sp.loss[0] === i) { const keep = 1 - sp.loss[1] / 100; pkts = Math.max(1, Math.round(pkts * keep)); bytes = Math.round(pkts * ratio); }
+      const inName = h.inn === '@v' ? 'Vl' + sp.vlan : h.inn, outName = h.out === '@v' ? 'Vl' + sp.vlan : h.out;
+      const inIf = net.idx(h.dev, inName) || net.idx(h.dev, h.inn);
+      const outIf = net.idx(h.dev, outName) || net.idx(h.dev, h.out);
+      let post: number | null = null;
+      if (sp.remark && (sp.remark[2] === 'b' || sp.remark[2] === dirTag) && sp.remark[0] === i) post = sp.remark[1];
+      out.push({
+        ts0: t, ts1: t + sp.durSec * 1000, exporter: dev.ip, inIf, outIf, srcIp: src, dstIp: dst, proto: sp.proto, sport, dport,
+        flags: sp.proto === TCP ? flagBits(sp.flags) : 0, tos: dscp << 2, postTos: post === null ? null : post << 2,
+        ttlMin: sp.proto === ICMP ? null : ttl0 - i - 1, ttlMax: sp.proto === ICMP ? null : ttl0 - i - 1,
+        bytes, pkts, srcMac: i === 0 ? hostMac(src) : prevMac, dstMac: dev.mac, vlan: sp.vlan, natSrcIp: null, natDstIp: null, natSport: null, natDport: null, nextHop: null, sampling: 1
+      });
+      prevMac = dev.mac;
+      if (post !== null) dscp = post;
+    });
+  };
+  mkDir(true); mkDir(false);
+  void r;
+  return out;
+}
+
+// templates for background traffic: [src subnet prefix, dst prefix, proto, dport, vlan, path, dscp, bytes scale]
+const BG: { s: string; d: string; proto: number; dport: number; vlan: number; path: string; rev?: boolean; dscp: number; scale: number }[] = [
+  { s: '10.1.4.', d: '198.51.100.', proto: TCP, dport: 443, vlan: 140, path: 'A', dscp: 0, scale: 3e6 },
+  { s: '10.1.7.', d: '198.51.100.', proto: TCP, dport: 443, vlan: 150, path: 'A', dscp: 0, scale: 2e6 },
+  { s: '10.1.4.', d: '10.9.0.', proto: TCP, dport: 5432, vlan: 140, path: 'B', dscp: 18, scale: 8e6 },
+  { s: '10.1.7.', d: '10.9.0.', proto: TCP, dport: 445, vlan: 150, path: 'B', dscp: 10, scale: 3e7 },
+  { s: '10.1.4.', d: '192.0.2.', proto: UDP, dport: 53, vlan: 140, path: 'A', dscp: 0, scale: 3e3 },
+  { s: '10.20.3.', d: '10.9.0.', proto: TCP, dport: 443, vlan: 200, path: 'C', dscp: 0, scale: 4e6 },
+  { s: '10.20.3.', d: '10.9.0.', proto: TCP, dport: 445, vlan: 200, path: 'C', dscp: 10, scale: 1e7 },
+  { s: '10.9.0.', d: '10.9.2.', proto: TCP, dport: 9092, vlan: 310, path: 'D', dscp: 26, scale: 1e8 },
+  { s: '10.9.2.', d: '10.9.0.', proto: TCP, dport: 5432, vlan: 320, path: 'D', rev: true, dscp: 18, scale: 2e7 },
+  { s: '10.9.0.', d: '198.51.100.', proto: TCP, dport: 443, vlan: 310, path: 'E', dscp: 0, scale: 2e6 },
+  { s: '10.1.4.', d: '10.9.0.', proto: TCP, dport: 22, vlan: 140, path: 'B', dscp: 16, scale: 4e5 },
+  { s: '10.1.4.', d: '10.9.0.', proto: TCP, dport: 3389, vlan: 140, path: 'B', dscp: 34, scale: 2e7 },
+  { s: '10.20.5.', d: '10.9.0.', proto: UDP, dport: 5060, vlan: 200, path: 'C', dscp: 24, scale: 5e4 }
+];
+
+function backgroundSpec(r: () => number, agoMin: number): Spec {
+  const t = BG[Math.floor(r() * BG.length)];
+  const rbytes = Math.round(t.scale * (0.05 + r() * 1.4));
+  const fbytes = Math.round(rbytes * (0.04 + r() * 0.12));
+  const mtu = t.proto === UDP ? 180 : 700;
+  return {
+    src: t.s + (2 + Math.floor(r() * 90)), dst: t.d + (3 + Math.floor(r() * 60)), proto: t.proto, sport: 32768 + Math.floor(r() * 28000), dport: t.dport, vlan: t.vlan,
+    fB: fbytes, rB: rbytes, fP: Math.max(1, Math.round(fbytes / 160)), rP: Math.max(1, Math.round(rbytes / mtu)), path: t.path, rev: !!t.rev,
+    agoMin, durSec: 1 + Math.floor(r() * 400), flags: t.proto === TCP ? 'SYN ACK PSH FIN' : '', dscp: t.dscp
+  };
+}
+
+/* ------------------------------------------------------------------ SNMP model */
+
+function diurnal(ms: number): number { return 0.78 + 0.22 * Math.sin(2 * Math.PI * ((ms % 86400000) / 86400000 - 0.30)); }
+
+class SnmpModel {
+  private r = rng(42);
+  constructor(private net: Net, private app: App) {}
+
+  point(now: number, dt: number, onlyDevs?: Set<string>): { ifs: IfPoint[]; cls: ClsPoint[] } {
+    const ifs: IfPoint[] = [], cls: ClsPoint[] = [];
+    for (const d of DEVS) {
+      if (onlyDevs && !onlyDevs.has(d.name)) continue;
+      const dev = this.net.ids.get(d.name)!;
+      for (const [name, , speed, policy, outU, inU] of d.ifs) {
+        const ifIndex = this.net.idx(d.name, name);
+        const k = diurnal(now) * (1 + (this.r() - 0.5) * 0.16);
+        const outUtil = Math.min(99.5, outU * k), inUtil = Math.min(99.5, inU * k);
+        const outBps = speed * 1e6 * outUtil / 100, inBps = speed * 1e6 * inUtil / 100;
+        let discPkts = 0;
+        if (policy) {
+          const defs = POLICIES[policy];
+          const total = defs.reduce((a, c) => a + (SHARE[c[0]] ?? 0.1), 0);
+          for (const [cname] of defs) {
+            const key = `${d.name}|${name}|${cname}`;
+            const o = OVERRIDE[key];
+            const classBps = outBps * (SHARE[cname] ?? 0.1) / total;
+            const preBytes = classBps * dt / 8, avg = cname === 'VOICE' ? 200 : 600;
+            const prePkts = preBytes / avg;
+            let pct = 0, depth = Math.round(5 + this.r() * 20);
+            if (o) {
+              if (o.mode === 'ramp') { const age = (Date.now() - now) / 60000; pct = age > 120 ? 0.1 + this.r() * 0.2 : o.drop * (1 - age / 120) * (0.7 + this.r() * 0.6) + 0.05; depth = Math.round(o.depth * (0.4 + (pct / o.drop) * 0.6)); }
+              else { const spike = this.r() < 0.28; pct = spike ? o.drop * (0.6 + this.r() * 0.9) : 0.02 + this.r() * 0.08; depth = Math.round(spike ? o.depth * (0.7 + this.r() * 0.5) : 10 + this.r() * 30); }
+            }
+            const dropPkts = Math.round(prePkts * pct / 100), dropBytes = Math.round(preBytes * pct / 100);
+            discPkts += dropPkts;
+            cls.push({ ts: now, dev, ifIndex, cls: cname, dt, prePkts: Math.round(prePkts), preBytes: Math.round(preBytes), postBytes: Math.round(preBytes - dropBytes), dropPkts, dropBytes, qdepth: depth });
+          }
+        }
+        ifs.push({ ts: now, dev, ifIndex, dt, inBps, outBps, utilIn: inUtil, utilOut: outUtil, inDisc: 0, outDisc: discPkts, inErr: 0, outErr: 0, oper: 1 });
+      }
+    }
+    return { ifs, cls };
+  }
+}
+
+/* ------------------------------------------------------------------ seeding */
+
+export const DEMO_LOGINS = [
+  { user: 'admin', role: 'Admin', password: 'flowscope-demo-admin' },
+  { user: 'netops', role: 'SNMP admin', password: 'flowscope-demo-snmp' },
+  { user: 'viewer', role: 'Read only', password: 'flowscope-demo-ro' }
+];
+
+function seedConfig(app: App, net: Net): void {
+  const db = app.cdb.db;
+  if (!app.creds.list().length) app.creds.create({ name: 'demo-snmpv3', version: 'v3', username: 'demo', level: 'authPriv', authProto: 'SHA-256', authKey: 'demo-auth-key-1', privProto: 'AES-128', privKey: 'demo-priv-key-1' }, true);
+  const cred = app.creds.defaultId()!;
+  const now = Date.now();
+  for (const d of DEVS) {
+    let row = db.prepare('SELECT id FROM devices WHERE ip = ?').get(d.ip) as { id: number } | undefined;
+    if (!row) {
+      const hasPol = d.ifs.some(i => i[3]);
+      const r = db.prepare(`INSERT INTO devices(name, ip, port, cred_id, interval_sec, polling, src, added_at, sys_name, sys_descr, sys_object_id, role, profile, last_poll, last_ok)
+        VALUES (?,?,161,?,?,1,'Demo network',?,?,?,?,?,?,?,?)`)
+        .run(d.name, d.ip, cred, d.secs, now - 14 * 86400000, d.name, d.descr + ' (simulated)', '1.3.6.1.4.1.9.1.0', d.role, hasPol ? 'cisco-cbqos' : 'generic', now, now);
+      row = { id: Number(r.lastInsertRowid) };
+      d.ifs.forEach((ifc, i) => {
+        db.prepare('INSERT INTO interfaces(dev_id, if_index, name, descr, alias, speed_mbps, oper_status, policy) VALUES (?,?,?,?,?,?,?,?)').run(row!.id, i + 1, ifc[0], ifc[1], ifc[1], ifc[2], 1, ifc[3]);
+        if (ifc[3]) for (const c of POLICIES[ifc[3]]) db.prepare('INSERT INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)').run(row!.id, i + 1, c[0], c[1], JSON.stringify(c[2]), c[3]);
+      });
+      db.prepare('INSERT OR REPLACE INTO device_ips(dev_id, ip, if_index) VALUES (?,?,NULL)').run(row.id, d.ip);
+      db.prepare('INSERT OR REPLACE INTO exporters(ip, name, device_id, first_seen, last_seen, flows, version) VALUES (?,?,?,?,?,0,?)').run(d.ip, d.name, row.id, now - 14 * 86400000, now, d.name === 'fw-edge-01' ? 'IPFIX' : 'v9');
+    }
+    net.ids.set(d.name, row.id);
+    const ifs = db.prepare('SELECT if_index, name FROM interfaces WHERE dev_id = ?').all(row.id) as unknown as { if_index: number; name: string }[];
+    for (const i of ifs) net.ifIdx.set(d.name + '|' + i.name, i.if_index);
+  }
+  for (const [id, name] of VLANS) db.prepare("INSERT OR IGNORE INTO vlans(id, name, source) VALUES (?,?,'manual')").run(id, name);
+  app.devices.invalidate();
+  const have = new Set(app.auth.listUsers().map(u => u.username));
+  for (const u of DEMO_LOGINS.slice(1)) if (!have.has(u.user)) app.auth.createUser('demo', { username: u.user, password: u.password, role: u.role === 'SNMP admin' ? 'snmp' : 'ro', mustChange: false });
+}
+
+export async function startDemo(app: App): Promise<void> {
+  const net = new Net();
+  seedConfig(app, net);
+  const model = new SnmpModel(net, app);
+  const r = rng(7);
+  const now = Date.now();
+  const flowBatch = async (specs: { sp: Spec; start: number }[]) => {
+    const recs: FlowRecord[] = [];
+    for (const { sp, start } of specs) recs.push(...makeRecords(net, sp, start, r));
+    recs.sort((a, b) => a.ts0 - b.ts0);
+    for (let i = 0; i < recs.length; i += 4000) await app.store.insertFlows(recs.slice(i, i + 4000));
+    return recs.length;
+  };
+
+  const seeded = app.settings.raw('demoSeededAt');
+  if (!seeded) {
+    app.log.info('demo', 'Seeding the simulated network: 8 devices, 3 days of SNMP history and flow records');
+    // SNMP: 2 days at 5-minute spacing, then 1 day at 1-minute spacing
+    for (let t = now - 3 * 86400000; t < now; t += (t < now - 86400000 ? 300_000 : 60_000)) {
+      const step = t < now - 86400000 ? 300 : 60;
+      const p = model.point(t, step);
+      await app.store.insertSnmp(p.ifs, p.cls);
+    }
+    // flows: the sample streams, then background sessions over the last 3 days
+    await flowBatch(SAMPLE.map(sp => ({ sp, start: now - sp.agoMin * 60000 - Math.floor(r() * 40000) })));
+    const bg: { sp: Spec; start: number }[] = [];
+    for (let i = 0; i < 1800; i++) { const ago = r() * 3 * 1440; bg.push({ sp: backgroundSpec(r, ago), start: now - ago * 60000 }); }
+    await flowBatch(bg);
+    app.settings.setRaw('demoSeededAt', String(now));
+    try { await app.store.maintain(app.settings.get('retention')); } catch { /* rollups will run at the next maintenance cycle */ }
+    app.log.info('demo', 'Demo data is ready');
+  }
+
+  app.log.info('demo', 'Demo mode: traffic and SNMP counters are simulated. Nothing here comes from your network.');
+  let tick = 0;
+  const every = (ms: number, fn: () => Promise<void>) => { const t = setInterval(() => { void fn().catch(e => app.log.error('demo', String(e))); }, ms); t.unref(); };
+  // new sessions every few seconds while flow collection is on
+  every(5000, async () => {
+    if (!app.collect().flow) return;
+    const n = 2 + Math.floor(r() * 6);
+    const specs = Array.from({ length: n }, () => { const sp = backgroundSpec(r, 0); sp.durSec = 1 + Math.floor(r() * 30); return { sp, start: Date.now() - sp.durSec * 1000 }; });
+    const c = await flowBatch(specs);
+    app.cdb.db.prepare('UPDATE exporters SET last_seen = ?, flows = flows + ?').run(Date.now(), Math.round(c / DEVS.length));
+  });
+  // SNMP counters every minute (the branch router every fifth minute)
+  every(60_000, async () => {
+    if (!app.collect().snmp) return;
+    tick++;
+    const only = new Set(DEVS.filter(d => d.secs === 60 || tick % 5 === 0).map(d => d.name));
+    const p = model.point(Date.now(), 60, only);
+    await app.store.insertSnmp(p.ifs, p.cls);
+    for (const d of DEVS) if (only.has(d.name)) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
+  });
+  for (const d of DEVS) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
+  void dscpName;
+  console.log(' Demo sign-ins:  ' + DEMO_LOGINS.map(l => `${l.user} / ${l.password} (${l.role})`).join('   '));
+}

@@ -318,3 +318,37 @@ test('collector receives v5, v9 and IPFIX over UDP and stores them', async () =>
     assert.equal(c.stats.discarded, 1);
   } finally { await c.stop(); await store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('stream rows report dscp in/out', () => {
+  const t = mk();
+  try {
+    t.ops.insertFlows([
+      rec({ srcIp: '10.0.0.1', dstIp: '10.0.0.2', sport: 1, dport: 1, tos: 184, postTos: 184, ts0: NOW - 50_000, ts1: NOW - 40_000 }),
+      rec({ srcIp: '10.0.0.1', dstIp: '10.0.0.2', sport: 1, dport: 1, tos: 0, postTos: 0, exporter: '10.255.0.2', ts0: NOW - 49_000, ts1: NOW - 39_000 }),
+      rec({ srcIp: '10.0.0.3', dstIp: '10.0.0.4', sport: 2, dport: 2, tos: 184, postTos: 32 }),
+      rec({ srcIp: '10.0.0.5', dstIp: '10.0.0.6', sport: 3, dport: 3, tos: 40, postTos: 40 })
+    ]);
+    const r = t.ops.searchStreams(q());
+    const by = (ip: string) => r.rows.find(x => x.srcIp === ip)!;
+    assert.deepEqual([by('10.0.0.1').dscpIn, by('10.0.0.1').dscpOut], [46, 0]);
+    assert.deepEqual([by('10.0.0.3').dscpIn, by('10.0.0.3').dscpOut], [46, 8]);
+    assert.deepEqual([by('10.0.0.5').dscpIn, by('10.0.0.5').dscpOut], [10, null]);
+  } finally { t.done(); }
+});
+
+test('rollups count records that arrive late or are loaded after the first run, exactly once', () => {
+  const t = mk();
+  try {
+    t.ops.maintain(RET, NOW);                       // first run on an empty store must not set a time watermark
+    const ts = NOW - 2 * HOUR - 17_000;
+    t.ops.insertFlows([rec({ ts0: ts - 1000, ts1: ts, bytes: 500, pkts: 5, sport: 1111 })]);
+    t.ops.maintain(RET, NOW);
+    t.ops.insertFlows([rec({ ts0: ts - 3000, ts1: ts - 600_000, bytes: 700, pkts: 7, sport: 2222 })]);   // older than the data already rolled
+    t.ops.maintain(RET, NOW);
+    t.ops.maintain(RET, NOW);
+    const wide = { from: NOW - 4 * HOUR, to: NOW };
+    const spec = { range: wide, dims: [] as never[], prefix: 32, bidir: false, conds: [], sortBy: 'bytes' as const, topN: 10 };
+    assert.equal(t.ops.report({ ...spec, tier: 'raw' }).totals.bytes, 1200);
+    assert.equal(t.ops.report({ ...spec, tier: 'm1' }).totals.bytes, 1200);
+  } finally { t.done(); }
+});

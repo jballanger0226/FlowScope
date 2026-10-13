@@ -6,7 +6,7 @@ export interface HopContext {
   deviceRole(exporterIp: string): string;
   ifName(exporterIp: string, ifIndex: number): string;
   /** Egress queue statistics from SNMP for the hop's outgoing interface in the time window. */
-  classDrops?(exporterIp: string, outIf: number, from: number, to: number): { cls: string; dropPct: number; dropPkts: number }[];
+  classDrops?(exporterIp: string, outIf: number, from: number, to: number, dscp: number): { cls: string; dropPct: number; dropPkts: number }[];
   /** Policy name attached to the outgoing interface, if known. */
   policyOf?(exporterIp: string, outIf: number): string | null;
   vlanName?(id: number): string;
@@ -127,7 +127,7 @@ function buildHops(recs: FlowRecord[], ctx: HopContext): HopView[] {
       obs.push({ kind: 'nat', severity: 'info', text: `NAT applied: ${to}` });
     }
     if (a.multiPath) obs.push({ kind: 'path', severity: 'info', text: 'Traffic used more than one interface pair on this device (load sharing or a path change)' });
-    const drops = ctx.classDrops?.(a.exporter, a.outIf, a.t0 - 120_000, a.t1 + 120_000) ?? [];
+    const drops = ctx.classDrops?.(a.exporter, a.outIf, a.t0 - 120_000, a.t1 + 120_000, dscpOut ?? a.tosIn) ?? [];
     for (const d of drops) {
       if (d.dropPkts > 0) obs.push({ kind: 'qdrop', severity: d.dropPct >= 1 ? 'bad' : 'warn', text: `Egress queue drops on ${ctx.ifName(a.exporter, a.outIf)}: class ${d.cls} dropped ${d.dropPct.toFixed(2)}% (${d.dropPkts} packets) around this time` });
     }
