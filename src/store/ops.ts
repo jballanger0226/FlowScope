@@ -10,28 +10,11 @@ import {
 
 /* ------------------------------------------------------------------ small helpers */
 
-export function ymd(ts: number): string {
-  const d = new Date(ts);
-  return d.getUTCFullYear().toString() + String(d.getUTCMonth() + 1).padStart(2, '0') + String(d.getUTCDate()).padStart(2, '0');
-}
+import { ymd, ipToN, nToIp, skeyOf } from './util.js';
+export { ymd, ipToN, nToIp, skeyOf };
 function ymdToMs(s: string): number { return Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)); }
 
-export function ipToN(ip: string): number | null {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
-  if (!m || +m[1] > 255 || +m[2] > 255 || +m[3] > 255 || +m[4] > 255) return null;
-  return ((+m[1] * 256 + +m[2]) * 256 + +m[3]) * 256 + +m[4];
-}
-export function nToIp(n: number): string {
-  return [Math.floor(n / 16777216) % 256, Math.floor(n / 65536) % 256, Math.floor(n / 256) % 256, n % 256].join('.');
-}
-
 type SqlArg = string | number | null;
-
-export function skeyOf(r: Pick<FlowRecord, 'srcIp' | 'dstIp' | 'sport' | 'dport' | 'proto'>): string {
-  const icmp = r.proto === 1 || r.proto === 58;
-  const a = r.srcIp + '|' + (icmp ? 0 : r.sport), b = r.dstIp + '|' + (icmp ? 0 : r.dport);
-  return (a <= b ? a + '|' + b : b + '|' + a) + '|' + r.proto;
-}
 
 const FLOW_COLS = 'ts0, ts1, exporter, in_if, out_if, src_ip, dst_ip, proto, sport, dport, flags, tos, post_tos, ttl_min, ttl_max, bytes, pkts, src_mac, dst_mac, vlan, nat_src, nat_dst, nat_sport, nat_dport, next_hop, skey, primary_hop, src_n, dst_n';
 
