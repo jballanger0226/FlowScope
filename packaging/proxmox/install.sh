@@ -11,7 +11,8 @@
 #   FLOWSCOPE_REPO=owner/name [FLOWSCOPE_REF=main] [GITHUB_TOKEN=...]   download from GitHub (a token is needed for a private repository)
 #
 # Other settings: FLOWSCOPE_ADMIN_PASSWORD (first install only; generated when unset), FLOWSCOPE_NODE=system to use the Node.js
-# already on the machine instead of downloading one.
+# already on the machine instead of downloading one, FLOWSCOPE_TEMPLATE_BUILD=1 when making the Proxmox CT template (no admin password is
+# written; the template's first-boot service creates one for every container made from it).
 set -euo pipefail
 
 OPT="${FLOWSCOPE_OPT:-/opt/flowscope}"
@@ -34,7 +35,10 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 [ -z "${FLOWSCOPE_ADMIN_PASSWORD:-}" ] || [ "${#FLOWSCOPE_ADMIN_PASSWORD}" -ge 12 ] || die "FLOWSCOPE_ADMIN_PASSWORD must be at least 12 characters."
 
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+self="$0"
+work="$(mktemp -d)"
+cleanup() { rm -rf "$work"; case "$self" in /tmp/flowscope-install.*) rm -f "$self";; esac; }   # flowscope-ctl update runs a temporary copy of this script
+trap cleanup EXIT
 
 # ---------------------------------------------------------------- packages
 need_pkgs=()
@@ -128,12 +132,17 @@ say "Installed to $OPT (the previous version, if any, is in $OPT.prev)"
 # ---------------------------------------------------------------- settings
 first_pw=""
 if [ ! -f "$ETC/flowscope.env" ]; then
-  first_pw="${FLOWSCOPE_ADMIN_PASSWORD:-$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)}"
-  [ "${#first_pw}" -ge 12 ] || die "FLOWSCOPE_ADMIN_PASSWORD must be at least 12 characters."
+  if [ -z "${FLOWSCOPE_TEMPLATE_BUILD:-}" ]; then
+    first_pw="${FLOWSCOPE_ADMIN_PASSWORD:-$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)}"
+    [ "${#first_pw}" -ge 12 ] || die "FLOWSCOPE_ADMIN_PASSWORD must be at least 12 characters."
+    pwline="FLOWSCOPE_ADMIN_PASSWORD=$first_pw"
+  else
+    pwline="# FLOWSCOPE_ADMIN_PASSWORD=                # a first-boot service generated one for this container; see /root/flowscope-admin-password.txt"
+  fi
   cat > "$ETC/flowscope.env" <<ENV
 # One KEY=value per line. See the README for every setting. Restart after a change: systemctl restart flowscope
 # Password of the "admin" account. It is only read the first time FlowScope starts; delete this line after you have signed in.
-FLOWSCOPE_ADMIN_PASSWORD=$first_pw
+$pwline
 # FLOWSCOPE_HTTPS_PORT=8443
 # FLOWSCOPE_FLOW_PORTS=2055,4739
 # FLOWSCOPE_TLS=off              # plain HTTP on 8080 behind your own reverse proxy
@@ -172,13 +181,19 @@ fi
 # ---------------------------------------------------------------- helper command
 cat > "$BIN_DIR/flowscope-ctl" <<CTL
 #!/bin/sh
-# Small helper installed by FlowScope. Usage: flowscope-ctl status | logs | reset-password <user> | version
+# Small helper installed by FlowScope. Usage: flowscope-ctl status | logs | update | reset-password <user> | version
 case "\${1:-status}" in
   status) systemctl status flowscope --no-pager ;;
   logs) shift; exec journalctl -u flowscope --no-pager "\${@:--n 100}" ;;
   reset-password) shift; exec runuser -u flowscope -- env FLOWSCOPE_DATA_DIR=$VAR $NODE_BIN --disable-warning=ExperimentalWarning $OPT/dist/src/cli.js reset-password "\$@" ;;
   version) exec $NODE_BIN $OPT/dist/src/cli.js version ;;
-  *) echo "usage: flowscope-ctl status | logs | reset-password <user> | version" >&2; exit 2 ;;
+  update)
+    # Downloads the current source from GitHub and installs it. A private repository needs GITHUB_TOKEN=... in $ETC/update.env (chmod 600).
+    if [ -f $ETC/update.env ]; then set -a; . $ETC/update.env; set +a; fi
+    t=\$(mktemp /tmp/flowscope-install.XXXXXX) || exit 1
+    cp $OPT/packaging/proxmox/install.sh "\$t"
+    exec env FLOWSCOPE_REPO="\${FLOWSCOPE_REPO:-jballanger0226/flowscope}" FLOWSCOPE_REF="\${FLOWSCOPE_REF:-main}" bash "\$t" --update ;;
+  *) echo "usage: flowscope-ctl status | logs | update | reset-password <user> | version" >&2; exit 2 ;;
 esac
 CTL
 chmod 755 "$BIN_DIR/flowscope-ctl"

@@ -77,21 +77,21 @@ If every exporter shows up as the Docker bridge address, use `docker compose -f 
 
 ### Proxmox VE
 
-On the Proxmox host, from a checkout of this repository:
+Everything can be done in the Proxmox web interface, without a shell:
 
-```sh
-packaging/proxmox/flowscope-lxc.sh            # creates an unprivileged Debian 12 LXC container and installs FlowScope in it
-packaging/proxmox/flowscope-lxc.sh update 210 # later: snapshot, then update container 210
-```
+1. Download the template `debian-12-flowscope_<version>_amd64.tar.zst` from this repository's **Releases** page (built by GitHub Actions; or build it yourself with `packaging/lxc-template/build.sh`).
+2. Proxmox: your node → a storage → **CT Templates** → **Upload**.
+3. **Create CT**, choose that template (Debian 12, 2 cores, 2 GiB, 16 GiB disk is a good start), start it, open **Console**, log in as `root`, and read the `admin` password from `/root/flowscope-admin-password.txt`.
+4. Open `https://<container address>:8443/`.
 
-Proxmox VE 9.1 and newer can also run the Docker image directly as an LXC application container. Both routes, with all options, are in **[docs/deployment.md](docs/deployment.md)**, together with Docker details, upgrades, backups and troubleshooting.
+A walkthrough of each wizard tab, updating, backups and troubleshooting: **[docs/deployment.md](docs/deployment.md)**. The same document covers the command-line alternative (`packaging/proxmox/flowscope-lxc.sh`, which creates the container for you) and running the Docker image directly as an OCI application container on Proxmox VE 9.1 and newer.
 
 ### As a service
 
 | OS | How |
 | --- | --- |
 | Linux | `sudo packaging/linux/install.sh` (systemd unit, dedicated user, settings in `/etc/flowscope/flowscope.env`, data in `/var/lib/flowscope`) |
-| Proxmox VE | `packaging/proxmox/flowscope-lxc.sh` on the host (see above); `packaging/proxmox/install.sh` is the installer it runs inside the container |
+| Proxmox VE | CT template via the web interface (see above), or `packaging/proxmox/flowscope-lxc.sh` on the host; `packaging/proxmox/install.sh` is the installer both use |
 | macOS | `sudo packaging/macos/install.sh` (launchd daemon, data in `/Library/Application Support/FlowScope`, log `/var/log/flowscope.log`) |
 | Windows | elevated PowerShell: `.\packaging\windows\install.ps1` (scheduled task at boot as SYSTEM, firewall rules, settings in `%ProgramData%\FlowScope\flowscope.env`) |
 

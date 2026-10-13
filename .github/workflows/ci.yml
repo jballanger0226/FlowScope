@@ -47,9 +47,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Shell syntax
         run: |
-          for f in packaging/docker-entrypoint.sh packaging/linux/install.sh packaging/macos/install.sh packaging/proxmox/*.sh; do bash -n "$f" && echo "ok $f"; done
+          for f in packaging/docker-entrypoint.sh packaging/linux/install.sh packaging/macos/install.sh packaging/proxmox/*.sh packaging/lxc-template/build.sh packaging/lxc-template/rootfs/usr/local/sbin/flowscope-firstboot; do bash -n "$f" && echo "ok $f"; done
       - name: ShellCheck
-        run: sudo apt-get install -y -qq shellcheck && shellcheck -S warning packaging/docker-entrypoint.sh packaging/proxmox/*.sh
+        run: sudo apt-get install -y -qq shellcheck && shellcheck -S warning packaging/docker-entrypoint.sh packaging/proxmox/*.sh packaging/lxc-template/build.sh packaging/lxc-template/rootfs/usr/local/sbin/flowscope-firstboot
 
   docker:
     runs-on: ubuntu-latest

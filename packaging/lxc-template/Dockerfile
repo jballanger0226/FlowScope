@@ -1,0 +1,51 @@
+# Builds the root filesystem of the FlowScope Proxmox VE container template (a "CT template").
+# Not run with `docker run`: build.sh exports the result as a .tar.zst that you upload in the Proxmox web interface
+# (storage -> CT Templates -> Upload) and then pick when you click Create CT. See docs/deployment.md.
+#
+# It is Debian 12 with systemd, the network tools Proxmox expects in a container, and FlowScope installed as a service by the same
+# installer the command-line route uses (packaging/proxmox/install.sh), so both routes end up with the same layout and `flowscope-ctl`.
+# Build from the repository root:   docker build -f packaging/lxc-template/Dockerfile --output type=tar,dest=rootfs.tar .
+ARG DEBIAN_IMAGE=debian:bookworm-slim
+ARG NODE_IMAGE=node:22-bookworm-slim
+
+FROM ${NODE_IMAGE} AS nodesrc
+
+FROM ${DEBIAN_IMAGE}
+ENV DEBIAN_FRONTEND=noninteractive
+# What a Proxmox container needs from the inside: an init system, a DHCP client and ifupdown (Proxmox writes /etc/network/interfaces),
+# login tools for setting the root password, and SSH for key-based access. Also what the installer and `flowscope-ctl update` use.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      systemd systemd-sysv dbus libpam-systemd \
+      ifupdown isc-dhcp-client iproute2 iputils-ping \
+      openssh-server \
+      ca-certificates curl tar gzip xz-utils \
+      locales procps nano less tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
+# Node.js from the official image of the same Debian release, including npm (the installer needs it to update FlowScope later).
+COPY --from=nodesrc /usr/local/bin/node /usr/local/bin/node
+COPY --from=nodesrc /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+ && node --version && npm --version
+
+# FlowScope itself. FLOWSCOPE_TEMPLATE_BUILD keeps a password out of the template; the first-boot service makes one per container.
+COPY . /tmp/flowscope-src
+RUN FLOWSCOPE_TEMPLATE_BUILD=1 FLOWSCOPE_NODE=system FLOWSCOPE_SKIP_APT=1 FLOWSCOPE_SKIP_SYSTEMD=1 FLOWSCOPE_LXC=1 \
+    FLOWSCOPE_SRC=/tmp/flowscope-src bash /tmp/flowscope-src/packaging/proxmox/install.sh \
+ && rm -rf /tmp/flowscope-src /root/.npm
+
+# Template extras: first-boot service and its drop-in for flowscope.service.
+COPY packaging/lxc-template/rootfs/ /
+RUN chmod 755 /usr/local/sbin/flowscope-firstboot \
+ && systemctl enable flowscope.service flowscope-firstboot.service ssh.service
+
+# Turn the Docker-flavoured Debian image into a normal system: no "do not start services" policy, no Docker apt tweaks.
+# Nothing machine-specific may ship in a template: empty machine-id (systemd makes a new one at first boot), no SSH host keys.
+RUN rm -f /usr/sbin/policy-rc.d /etc/apt/apt.conf.d/docker-* \
+ && echo 'LANG=C.UTF-8' > /etc/default/locale \
+ && rm -f /etc/ssh/ssh_host_* \
+ && : > /etc/machine-id && rm -f /var/lib/dbus/machine-id \
+ && printf 'FlowScope Proxmox template for Debian 12, built from %s\n' "$(cat /opt/flowscope/package.json | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -n1)" > /etc/flowscope-template \
+ && apt-get clean && rm -rf /var/cache/apt /var/lib/apt/lists/* /tmp/* /var/tmp/*

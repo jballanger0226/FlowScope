@@ -1,0 +1,13 @@
+[Unit]
+Description=FlowScope first boot (SSH host keys, admin password)
+ConditionPathExists=/usr/local/sbin/flowscope-firstboot
+After=local-fs.target
+Before=flowscope.service ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/flowscope-firstboot
+
+[Install]
+WantedBy=multi-user.target

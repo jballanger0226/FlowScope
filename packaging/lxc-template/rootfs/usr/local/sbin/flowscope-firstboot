@@ -1,0 +1,49 @@
+#!/bin/sh
+# Runs at boot, before FlowScope, in a container made from the FlowScope Proxmox template.
+#   - every boot: makes SSH host keys if there are none (the template ships without, so no two containers share keys)
+#   - first boot only: makes the "admin" password, hands it to FlowScope for its first start, and tells the person at the console where to find it
+# Paths can be overridden with environment variables so the script can be tested outside a container.
+set -eu
+
+ETC="${FLOWSCOPE_ETC:-/etc/flowscope}"
+RUNENV="${FLOWSCOPE_FIRSTBOOT_ENV:-/run/flowscope-firstboot.env}"
+CREDS="${FLOWSCOPE_CREDS_FILE:-/root/flowscope-admin-password.txt}"
+MOTD="${FLOWSCOPE_MOTD:-/etc/motd}"
+MARKER="$ETC/.firstboot-done"
+
+if [ -z "${FLOWSCOPE_SKIP_SSH_KEYS:-}" ] && command -v ssh-keygen >/dev/null 2>&1; then
+  ssh-keygen -A >/dev/null 2>&1 || true
+fi
+
+if [ -f "$MARKER" ]; then exit 0; fi
+
+umask 077
+if grep -Eq '^[[:space:]]*FLOWSCOPE_ADMIN_PASSWORD=.{12,}' "$ETC/flowscope.env" 2>/dev/null; then
+  # someone already chose a password in the settings file; keep it
+  note="The admin password is the one set in $ETC/flowscope.env."
+else
+  pw="$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)"
+  # /run is a RAM disk: the password is handed to FlowScope for this boot only and is not left in the settings file
+  printf 'FLOWSCOPE_ADMIN_PASSWORD=%s\n' "$pw" > "$RUNENV"
+  printf 'FlowScope administrator\n  user:      admin\n  password:  %s\n\nChange it after signing in, then delete this file.\n' "$pw" > "$CREDS"
+  note="The admin password is in $CREDS   (cat $CREDS)"
+fi
+
+umask 022
+cat > "$MOTD" <<MSG
+
+  FlowScope is installed in this container.
+
+    Web console:  https://<this container's address>:8443/     (address: hostname -I, or the container's Summary tab)
+    Sign in as:   admin
+    $note
+    Exporters:    send NetFlow v5/v9 or IPFIX to this address, UDP 2055 or 4739
+    Commands:     flowscope-ctl status | logs | update | reset-password admin
+    Settings:     $ETC/flowscope.env   (then: systemctl restart flowscope)
+
+  To remove this message: rm /etc/motd
+
+MSG
+
+mkdir -p "$ETC"
+touch "$MARKER"

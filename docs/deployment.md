@@ -11,9 +11,10 @@ FlowScope listens on three ports. Whatever you choose below, these have to be re
 Pick one of these:
 
 1. [Docker or Docker Compose](#docker) — any machine with Docker, Podman or Docker Desktop.
-2. [Proxmox VE, as a Debian LXC container](#proxmox-lxc) — works on every current Proxmox VE. **Recommended on Proxmox.**
-3. [Proxmox VE 9.1 or newer, running the Docker image as an LXC "application container"](#proxmox-oci).
-4. [A service on a plain Linux, macOS or Windows machine](#plain-service).
+2. [Proxmox VE with a CT template, using only the web interface](#proxmox-ct-template-web-interface) — upload one file, click Create CT. **Recommended on Proxmox.**
+3. [Proxmox VE from the command line](#proxmox-command-line-script) — one script on the Proxmox host that builds the same kind of container.
+4. [Proxmox VE 9.1 or newer, running the Docker image as an LXC "application container"](#proxmox-oci).
+5. [A service on a plain Linux, macOS or Windows machine](#plain-service).
 
 What has and has not been tested for each is in [verification.md](verification.md). The Proxmox paths have not been run on a real Proxmox host.
 
@@ -82,9 +83,109 @@ git pull && docker compose build && docker compose up -d      # or: docker pull 
 
 The data volume is kept. Back it up with, for example, `docker run --rm -v flowscope-data:/data -v "$PWD":/backup alpine tar czf /backup/flowscope-data.tgz -C /data .` (stop the container first for a consistent copy of the database).
 
-## Proxmox LXC
+## Proxmox CT template (web interface)
 
-This creates a small unprivileged Debian 12 container and installs FlowScope in it as a systemd service. It does not need Docker. Nothing in it needs a privileged container.
+FlowScope is packaged as a Proxmox **container template**: a single `.tar.zst` file with Debian 12, Node.js and FlowScope already installed. You upload it to Proxmox like any other template and create the container with the normal **Create CT** wizard. No shell is needed on the Proxmox host, and the container does not need internet access to run.
+
+### 1. Get the template file
+
+Pick one:
+
+* **From GitHub (easiest).** In the repository open **Releases** → **Proxmox template (latest main)** (or the newest `v*` release) and download `debian-12-flowscope_<version>_amd64.tar.zst`. The repository is private, so you have to be signed in to GitHub; a browser download is fine.
+* **From a workflow run.** **Actions** → *Proxmox container template* → the newest run → **proxmox-ct-template** at the bottom. This downloads a `.zip`; unzip it and use the `.tar.zst` inside.
+* **Build it yourself** on any Linux machine (or WSL) with Docker and `zstd`: `packaging/lxc-template/build.sh`. The file appears in `template-out/`. This needs no Proxmox and takes a few minutes.
+
+Do not unpack the `.tar.zst`; Proxmox wants it as it is.
+
+### 2. Upload it in Proxmox
+
+1. In the web interface select your node, then a storage that can hold templates, for example **local** (left tree: *Datacenter → your node → local*).
+2. Open **CT Templates** and click **Upload**.
+3. Choose the file with **Select File…** and click **Upload**. It is about 100 to 150 MB.
+
+If the storage has no **CT Templates** entry, enable it: *Datacenter → Storage →* the storage *→ Edit →* **Content** *→* add **Container template**.
+
+The template can also be added with **Download from URL** (same page) when the file is reachable without signing in, for example from a public repository's release. A private repository's links need a login, so upload the file instead.
+
+### 3. Create the container
+
+Click **Create CT** (top right) and fill in the tabs:
+
+| Tab | Setting |
+| --- | --- |
+| General | **Hostname** `flowscope`. Leave **Unprivileged container** ticked and **Nesting** ticked. Set a **Password** for the container's `root` user (and/or paste an SSH public key). |
+| Template | **Storage** where you uploaded it, **Template** `debian-12-flowscope_…tar.zst`. |
+| Disks | At least **16 GiB**. Flow records are stored here, so size it for your retention (the Storage and retention page in FlowScope has an estimator). |
+| CPU | **2** cores. |
+| Memory | **2048** MiB memory, **512** MiB swap. More helps with many exporters. |
+| Network | Your bridge (usually `vmbr0`), a **VLAN Tag** if needed, **IPv4** *DHCP*, or *Static* with an address like `192.168.10.50/24` and the gateway. A fixed address is best, because your routers send flows to it. |
+| DNS | Leave as *use host settings*, or set your own. |
+| Confirm | Tick **Start after created** and click **Finish**. |
+
+### 4. Sign in
+
+1. Select the new container, open **Console**, and log in as `root` with the password you set in the wizard.
+2. The welcome message shows what to do next. Read the generated password for FlowScope's `admin` account with:
+
+   ```sh
+   cat /root/flowscope-admin-password.txt
+   ```
+
+3. Find the container's address on its **Summary** tab (or run `hostname -I`) and open `https://<address>:8443/`. The browser warns about the self-signed certificate once; install your own under Admin → HTTPS certificate when you are ready.
+4. Sign in as `admin`, change the password, then delete the file: `rm /root/flowscope-admin-password.txt`.
+
+The password is generated for you; you can change it in FlowScope after signing in. If you ever lose it, run `flowscope-ctl reset-password admin` in the container's console for a new one-time password.
+
+### 5. Finish up in the GUI
+
+* **Start at boot:** container → **Options** → **Start at boot** → Yes.
+* **Firewall:** if you enable the Proxmox firewall on the container, allow TCP 8443 and UDP 2055 and 4739 in.
+* **Exporters:** send NetFlow v5/v9 or IPFIX from your routers and switches to the container's address, UDP 2055 or 4739. See [After installing](#after-installing).
+* **Backups:** *Datacenter → Backup → Add*, select the container. All FlowScope data lives on its root disk, so a normal backup is complete.
+* **More disk later:** container → **Resources** → *Root Disk* → **Volume Action** → **Resize**.
+
+### Settings
+
+Settings are in `/etc/flowscope/flowscope.env` inside the container (open **Console**, `nano /etc/flowscope/flowscope.env`, then `systemctl restart flowscope`). The README lists them all. Helpful commands in the console:
+
+```sh
+flowscope-ctl status                  # is it running?
+flowscope-ctl logs                    # recent log; add -f to follow
+flowscope-ctl reset-password admin    # prints a new one-time password for admin
+flowscope-ctl update                  # see below
+```
+
+### Updating
+
+Take a snapshot first: container → **Snapshots** → **Take Snapshot**. To undo an update later, select it and click **Rollback**.
+
+Then, in the container's **Console**:
+
+```sh
+flowscope-ctl update
+```
+
+This downloads the current source from GitHub, builds it, swaps it in and restarts FlowScope; your data and settings are kept, and the previous version stays in `/opt/flowscope.prev`. The container needs internet access for this. Because the repository is private, give it a GitHub token (a fine-grained token with read access to the repository's **Contents**) once:
+
+```sh
+install -m 600 /dev/null /etc/flowscope/update.env
+echo 'GITHUB_TOKEN=github_pat_xxxxxxxx' >> /etc/flowscope/update.env
+```
+
+`update.env` can also set `FLOWSCOPE_REF=` (a branch or tag; default `main`) and `FLOWSCOPE_REPO=owner/name` for a fork.
+
+The alternative, with no internet access in the container, is to upload a newer template and create a new container from it, then move your exporters to it. Data is not carried over automatically in that case; use a Proxmox backup of the old container if you need to restore it.
+
+### What is in the template
+
+* Debian 12 with systemd, DHCP and `ifupdown` networking as Proxmox expects, and OpenSSH (key logins as root; Proxmox places the key you gave in the wizard).
+* Node.js 22 and npm, FlowScope in `/opt/flowscope` running as a systemd service under its own user, data in `/var/lib/flowscope`.
+* A first-boot service that makes the SSH host keys and the `admin` password for each container, so no two containers made from the same template share secrets.
+* The template contains no password or key. The Proxmox wizard's password is the only credential for the container itself.
+
+## Proxmox command line (script)
+
+This does the same job as the template above from a shell on the Proxmox host: it downloads Proxmox's own Debian 12 template, creates an unprivileged container and installs FlowScope in it as a systemd service, building it from your checkout. It does not need Docker or a pre-built template file. Use the web-interface route above if you would rather not use a shell.
 
 ### Create
 
@@ -159,7 +260,7 @@ Everything is on the container's root disk, so a normal Proxmox backup job (**Da
 
 ## Proxmox OCI
 
-Proxmox VE 9.1 and newer can create an LXC container from an OCI image ("application container"), so the Docker image can run there without Docker. This is the less proven path: it depends on Proxmox features that are new, and nothing here has been tried on a real host. If anything below does not match what you see, use the Debian LXC route above, which does not depend on it.
+Proxmox VE 9.1 and newer can create an LXC container from an OCI image ("application container"), so the Docker image can run there without Docker. This is the less proven path: it depends on Proxmox features that are new, and nothing here has been tried on a real host. If anything below does not match what you see, use the CT template route above, which does not depend on it.
 
 1. Make the image available from a registry Proxmox can reach. Either use the one published by `.github/workflows/image.yml` (`ghcr.io/jballanger0226/flowscope:latest`, which must be made public first; see above) or push your own build to a registry you control.
 2. On the node: select a storage that holds container templates → **CT Templates** → **Pull from OCI Registry**; enter the image reference and the tag.
@@ -198,7 +299,10 @@ These need Node.js 22.13 or newer. Step-by-step Windows instructions, including 
 | All flows appear to come from one device, with the Docker bridge address | Use `docker-compose.host.yml`, or run FlowScope in an LXC container |
 | No flows at all | Firewall in the way; exporter pointed at the wrong port; the log shows `new exporter <address>` when the first packet from a device arrives |
 | Container exits with `EACCES` or `unable to open database file` on `/data` | The data directory is not writable. Run without `--user` so the entrypoint can fix ownership, or `chown 1000:1000` the directory |
-| Service fails in an LXC with `status=226/NAMESPACE` | The sandboxing drop-in is missing; re-run the installer (`flowscope-lxc.sh update <CTID>`) |
+| Service fails in an LXC with `status=226/NAMESPACE` | The sandboxing drop-in is missing; re-run the installer (`flowscope-lxc.sh update <CTID>`, or `flowscope-ctl update` in the container) |
+| The uploaded template is not listed under Create CT → Template | Check that it was uploaded to a storage with *Container template* content, and that the file name ends in `.tar.zst` (not `.zip`) |
+| The container starts but there is no network | Check the bridge, VLAN tag, address and gateway on the Network tab (container → Network). Inside the console: `ip a`, `ip route` |
+| `flowscope-ctl update` says it could not download | The repository is private: add `GITHUB_TOKEN` to `/etc/flowscope/update.env`; the container also needs internet access |
 | `pct create` fails with a template error | Run `pveam update`, or set `TEMPLATE=` to a template you already have under **CT Templates** |
 | Container has no network during install | Check the bridge, gateway and DNS; the installer needs to reach deb.debian.org and nodejs.org |
 | `npm error ... Could not read package.json` (Windows or anywhere) | `npm` was run in the wrong folder, usually one level above the real project folder after unzipping. `cd` into the folder that contains `package.json` (README: "Getting the files") |

@@ -1,0 +1,7 @@
+# Used instead of the repository's .dockerignore for the template build, which needs the packaging files.
+.git
+node_modules
+dist
+data
+*.tar.zst
+template-out
