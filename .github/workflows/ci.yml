@@ -41,11 +41,36 @@ jobs:
         env:
           FLOWSCOPE_TEST_CLICKHOUSE: http://127.0.0.1:8123
 
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: |
+          for f in packaging/docker-entrypoint.sh packaging/linux/install.sh packaging/macos/install.sh packaging/proxmox/*.sh; do bash -n "$f" && echo "ok $f"; done
+      - name: ShellCheck
+        run: sudo apt-get install -y -qq shellcheck && shellcheck -S warning packaging/docker-entrypoint.sh packaging/proxmox/*.sh
+
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t flowscope:ci .
+      - name: Entrypoint hands a root-owned folder to the unprivileged user (Proxmox mount points, new bind mounts)
+        run: |
+          sudo mkdir /tmp/rootdata && sudo chown root:root /tmp/rootdata
+          docker run -d --name fsroot -e FLOWSCOPE_ADMIN_PASSWORD='ci-password-12345' -v /tmp/rootdata:/data flowscope:ci
+          for i in $(seq 1 40); do [ "$(docker inspect -f '{{.State.Health.Status}}' fsroot)" = healthy ] && break; sleep 3; done
+          test "$(docker inspect -f '{{.State.Health.Status}}' fsroot)" = healthy
+          test "$(stat -c %u /tmp/rootdata)" = 1000
+          docker exec fsroot sh -c 'test "$(id -u $(ps -o user= -p 1 2>/dev/null || echo node))" != 0 || true'
+          docker top fsroot -o user | tail -n +2 | grep -qv '^root'
+      - name: Starts directly as another user
+        run: |
+          mkdir /tmp/userdata && sudo chown 1000:1000 /tmp/userdata
+          docker run -d --name fsuser --user 1000:1000 -e FLOWSCOPE_ADMIN_PASSWORD='ci-password-12345' -v /tmp/userdata:/data flowscope:ci
+          for i in $(seq 1 40); do [ "$(docker inspect -f '{{.State.Health.Status}}' fsuser)" = healthy ] && exit 0; sleep 3; done
+          docker logs fsuser; exit 1
       - name: Start and wait for the health check
         run: |
           docker run -d --name fs -e FLOWSCOPE_ADMIN_PASSWORD='ci-password-12345' -p 8443:8443 flowscope:ci

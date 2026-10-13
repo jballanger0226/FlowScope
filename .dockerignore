@@ -5,4 +5,5 @@ data
 *.log
 test
 docs
-packaging
+packaging/*
+!packaging/docker-entrypoint.sh

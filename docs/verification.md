@@ -3,6 +3,7 @@
 Be aware of what has actually been exercised before relying on this in production.
 
 ## Run and passing
+* Container behaviour under Docker (against the stand-in base above): the entrypoint fixing ownership of a named volume and of a root-owned bind mount, running with `--user`, health check, graceful stop on `docker stop`, data persisting across re-creation, CLI commands through the entrypoint, and NetFlow packets ingested over published UDP ports.
 * Typecheck of server and web sources; the unit, API-integration and protocol tests (`npm test`) on Linux with Node 22.
 * NetFlow v5, v9 and IPFIX decoding and the UDP collector, using packets built by `src/sim/packets.ts` (written from the protocol specifications, not captured from real routers).
 * The UI in a real browser (Chromium via Playwright) against the demo network: every tab, role-gated views, certificate and authentication screens, sign-in and sign-out, and light, dark and system themes (Chromium only; Firefox and Safari were not checked).
@@ -14,7 +15,9 @@ Be aware of what has actually been exercised before relying on this in productio
 
 ## Written but not run
 * **Windows and macOS.** Nothing here has been executed on either OS. Code avoids POSIX-only APIs, paths come from `node:path`, and `packaging/windows` and `packaging/macos` are untested. The CI workflow runs the test suite on both; treat its first run as the real check.
-* **Container image.** The Dockerfile and compose file were written without a Docker daemon available. The image layout was reproduced by hand (same files, same entry point, health check returns 0), but `docker build` itself has not been run.
+* **Container image on a real base.** The Docker image was built and run with a Docker daemon, but registries were unreachable, so the base layer was a stand-in root filesystem labelled `node:22-slim`, with `node_modules` and `dist` built outside the image. Not exercised: the real `node:22-slim` base, `npm install` inside the build, and a multi-arch (arm64) build. The CI `docker` job is the real check.
+* **Proxmox VE.** `packaging/proxmox/flowscope-lxc.sh` and `install.sh` have never run on Proxmox or on a Debian system: they were tested with stub `pct`/`pveam`/`systemctl` commands and a local source tarball, and checked with `bash -n`. Not exercised: template download, container creation and snapshots, the Node.js download from nodejs.org, systemd start inside an unprivileged LXC (including the `226/NAMESPACE` workaround), and the update and rollback path.
+* **Proxmox VE 9.1 OCI application container.** Directions only, from Proxmox's published behaviour; menu names may differ. The `image.yml` workflow that publishes to GHCR, and the shellcheck job in `ci.yml`, have not run.
 * **ClickHouse beyond the test server**: other versions, clusters, TLS/auth setups, and large volumes. It is labelled experimental in the UI.
 
 ## Not validated against real systems

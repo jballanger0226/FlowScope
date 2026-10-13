@@ -1,10 +1,12 @@
 # docker compose up -d                       FlowScope with embedded SQLite storage
 # docker compose --profile clickhouse up -d  also starts ClickHouse (experimental backend, pick it under Storage)
+# Exporters all look like one device (the Docker bridge address)? Use docker-compose.host.yml instead. Full directions: docs/deployment.md
 services:
   flowscope:
     build: .
     image: flowscope:latest
     restart: unless-stopped
+    # user: "1000:1000"        # run as this user from the start instead of starting as root and dropping to "node"; the /data volume must then be owned by it
     ports:
       - "8443:8443/tcp"     # web console
       - "2055:2055/udp"     # NetFlow v5 / v9 / IPFIX

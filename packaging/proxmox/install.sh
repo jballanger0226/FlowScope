@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# FlowScope installer for a Debian or Ubuntu system, written for a Proxmox VE LXC container but fine on any systemd host.
+# Run it as root INSIDE the container. flowscope-lxc.sh (on the Proxmox host) does that for you.
+#
+#   install.sh                 install, or update an existing install, from the source in FLOWSCOPE_SRC
+#   install.sh --update        same, but refuse to run if FlowScope is not installed yet
+#
+# Where the source comes from (first match wins):
+#   FLOWSCOPE_SRC=/path/to/flowscope.tar.gz   a tarball of the repository (what flowscope-lxc.sh pushes in)
+#   FLOWSCOPE_SRC=/path/to/checkout           a checkout of the repository
+#   FLOWSCOPE_REPO=owner/name [FLOWSCOPE_REF=main] [GITHUB_TOKEN=...]   download from GitHub (a token is needed for a private repository)
+#
+# Other settings: FLOWSCOPE_ADMIN_PASSWORD (first install only; generated when unset), FLOWSCOPE_NODE=system to use the Node.js
+# already on the machine instead of downloading one.
+set -euo pipefail
+
+OPT="${FLOWSCOPE_OPT:-/opt/flowscope}"
+ETC="${FLOWSCOPE_ETC:-/etc/flowscope}"
+VAR="${FLOWSCOPE_VAR:-/var/lib/flowscope}"
+UNIT_DIR="${FLOWSCOPE_UNIT_DIR:-/etc/systemd/system}"
+BIN_DIR="${FLOWSCOPE_BIN_DIR:-/usr/local/bin}"
+NODE_DIR="${FLOWSCOPE_NODE_DIR:-/opt/node}"
+NODE_MAJOR=22
+NODE_MIN_MINOR=13
+MODE="install"
+[ "${1:-}" = "--update" ] && MODE="update"
+
+say()  { printf '\033[1m==> %s\033[0m\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || [ -n "${FLOWSCOPE_ALLOW_NONROOT:-}" ] || die "Run as root."
+[ "$MODE" = "install" ] || [ -d "$OPT/dist/src" ] || die "FlowScope is not installed in $OPT; run without --update."
+
+[ -z "${FLOWSCOPE_ADMIN_PASSWORD:-}" ] || [ "${#FLOWSCOPE_ADMIN_PASSWORD}" -ge 12 ] || die "FLOWSCOPE_ADMIN_PASSWORD must be at least 12 characters."
+
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+
+# ---------------------------------------------------------------- packages
+need_pkgs=()
+for c in curl tar xz gzip; do command -v "$c" >/dev/null 2>&1 || need_pkgs+=("$c"); done
+[ -f /etc/ssl/certs/ca-certificates.crt ] || need_pkgs+=(ca-certificates)
+if [ ${#need_pkgs[@]} -gt 0 ] && [ -z "${FLOWSCOPE_SKIP_APT:-}" ]; then
+  say "Installing packages: ${need_pkgs[*]}"
+  export DEBIAN_FRONTEND=noninteractive
+  pkgs=()
+  for p in "${need_pkgs[@]}"; do case "$p" in xz) pkgs+=(xz-utils);; *) pkgs+=("$p");; esac; done
+  apt-get update -qq
+  apt-get install -y -qq --no-install-recommends "${pkgs[@]}"
+fi
+
+# ---------------------------------------------------------------- Node.js
+node_ok() {
+  command -v node >/dev/null 2>&1 || return 1
+  node -e "const [a,b]=process.versions.node.split('.').map(Number); process.exit(a>$NODE_MAJOR||(a===$NODE_MAJOR&&b>=$NODE_MIN_MINOR)?0:1)"
+}
+if [ "${FLOWSCOPE_NODE:-}" = "system" ]; then
+  node_ok || die "FLOWSCOPE_NODE=system but Node.js $NODE_MAJOR.$NODE_MIN_MINOR or newer was not found."
+elif ! node_ok || [ -x "$NODE_DIR/bin/node" ]; then
+  # Official Node.js build from nodejs.org, checked against its published SHA-256 list. Kept in $NODE_DIR, away from apt.
+  case "$(uname -m)" in x86_64|amd64) arch=x64;; aarch64|arm64) arch=arm64;; armv7l) arch=armv7l;; *) die "Unsupported CPU: $(uname -m)";; esac
+  base="https://nodejs.org/dist/latest-v${NODE_MAJOR}.x"
+  say "Downloading Node.js ${NODE_MAJOR} (linux-$arch)"
+  curl -fsSL "$base/SHASUMS256.txt" -o "$work/SHASUMS256.txt" || die "Could not reach nodejs.org. Install Node.js $NODE_MAJOR.$NODE_MIN_MINOR+ yourself and run again with FLOWSCOPE_NODE=system."
+  file="$(grep -o "node-v[0-9.]*-linux-$arch\.tar\.xz" "$work/SHASUMS256.txt" | head -n1)"
+  [ -n "$file" ] || die "No Node.js build for linux-$arch was found."
+  curl -fsSL "$base/$file" -o "$work/$file"
+  ( cd "$work" && grep " $file\$" SHASUMS256.txt | sha256sum -c - >/dev/null ) || die "Node.js download failed its checksum."
+  rm -rf "$NODE_DIR.new"; mkdir -p "$NODE_DIR.new"
+  tar -xJf "$work/$file" -C "$NODE_DIR.new" --strip-components=1
+  rm -rf "$NODE_DIR"; mv "$NODE_DIR.new" "$NODE_DIR"
+  export PATH="$NODE_DIR/bin:$PATH"
+  ln -sf "$NODE_DIR/bin/node" "$BIN_DIR/node"; ln -sf "$NODE_DIR/bin/npm" "$BIN_DIR/npm"; ln -sf "$NODE_DIR/bin/npx" "$BIN_DIR/npx"
+fi
+export PATH="${NODE_DIR}/bin:$PATH"
+node_ok || die "Node.js $NODE_MAJOR.$NODE_MIN_MINOR or newer is required (found $(node -v 2>/dev/null || echo none))."
+NODE_BIN="$(command -v node)"
+say "Using Node.js $(node -v) at $NODE_BIN"
+
+# ---------------------------------------------------------------- source
+src=""
+if [ -n "${FLOWSCOPE_SRC:-}" ]; then
+  if [ -d "$FLOWSCOPE_SRC" ]; then src="$FLOWSCOPE_SRC"
+  elif [ -f "$FLOWSCOPE_SRC" ]; then
+    mkdir -p "$work/src"; tar -xzf "$FLOWSCOPE_SRC" -C "$work/src" --strip-components=0
+    # a GitHub tarball has one top-level folder; one made by flowscope-lxc.sh has none
+    if [ ! -f "$work/src/package.json" ]; then top="$(find "$work/src" -mindepth 1 -maxdepth 1 -type d | head -n1)"; [ -n "$top" ] && src="$top"; else src="$work/src"; fi
+  else die "FLOWSCOPE_SRC=$FLOWSCOPE_SRC does not exist."; fi
+elif [ -n "${FLOWSCOPE_REPO:-}" ]; then
+  ref="${FLOWSCOPE_REF:-main}"
+  say "Downloading $FLOWSCOPE_REPO@$ref from GitHub"
+  auth=(); [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
+  curl -fsSL "${auth[@]}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$FLOWSCOPE_REPO/tarball/$ref" -o "$work/src.tgz" \
+    || die "Could not download $FLOWSCOPE_REPO. A private repository needs GITHUB_TOKEN (read access to contents)."
+  mkdir -p "$work/src"; tar -xzf "$work/src.tgz" -C "$work/src"
+  src="$(find "$work/src" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+else
+  die "No source given. Set FLOWSCOPE_SRC (a tarball or checkout) or FLOWSCOPE_REPO (owner/name)."
+fi
+[ -f "$src/package.json" ] && [ -f "$src/packaging/linux/flowscope.service" ] || die "$src does not look like a FlowScope checkout."
+
+# ---------------------------------------------------------------- build
+say "Building FlowScope"
+build="$work/build"; mkdir -p "$build"
+( cd "$src" && tar --exclude=./.git --exclude=./node_modules --exclude=./dist --exclude=./data -cf - . ) | tar -xf - -C "$build"
+( cd "$build"
+  npm install --no-audit --no-fund --loglevel=error
+  node tools/build.mjs
+  npm prune --omit=dev --no-audit --no-fund --loglevel=error )
+
+# ---------------------------------------------------------------- install files
+id flowscope >/dev/null 2>&1 || useradd --system --home-dir "$VAR" --shell /usr/sbin/nologin flowscope
+install -d -m 755 "$ETC"
+install -d -m 750 -o flowscope -g flowscope "$VAR"
+
+running=0
+if command -v systemctl >/dev/null 2>&1 && [ -z "${FLOWSCOPE_SKIP_SYSTEMD:-}" ] && systemctl is-active --quiet flowscope 2>/dev/null; then
+  running=1; say "Stopping the running service"; systemctl stop flowscope
+fi
+
+new="$OPT.new"; rm -rf "$new"; mkdir -p "$new"
+cp -a "$build/dist" "$build/package.json" "$build/node_modules" "$new/"
+mkdir -p "$new/packaging"; cp -a "$build/packaging/." "$new/packaging/"
+rm -rf "$OPT.prev"; [ -d "$OPT" ] && mv "$OPT" "$OPT.prev"
+mv "$new" "$OPT"
+say "Installed to $OPT (the previous version, if any, is in $OPT.prev)"
+
+# ---------------------------------------------------------------- settings
+first_pw=""
+if [ ! -f "$ETC/flowscope.env" ]; then
+  first_pw="${FLOWSCOPE_ADMIN_PASSWORD:-$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 20)}"
+  [ "${#first_pw}" -ge 12 ] || die "FLOWSCOPE_ADMIN_PASSWORD must be at least 12 characters."
+  cat > "$ETC/flowscope.env" <<ENV
+# One KEY=value per line. See the README for every setting. Restart after a change: systemctl restart flowscope
+# Password of the "admin" account. It is only read the first time FlowScope starts; delete this line after you have signed in.
+FLOWSCOPE_ADMIN_PASSWORD=$first_pw
+# FLOWSCOPE_HTTPS_PORT=8443
+# FLOWSCOPE_FLOW_PORTS=2055,4739
+# FLOWSCOPE_TLS=off              # plain HTTP on 8080 behind your own reverse proxy
+# FLOWSCOPE_PUBLIC_URL=https://flows.example.com
+# FLOWSCOPE_CLICKHOUSE_URL=
+ENV
+fi
+chmod 640 "$ETC/flowscope.env"; chown root:flowscope "$ETC/flowscope.env"
+
+# ---------------------------------------------------------------- service
+unit="$UNIT_DIR/flowscope.service"
+install -d "$UNIT_DIR"
+sed -e "s#^ExecStart=.*#ExecStart=$NODE_BIN --disable-warning=ExperimentalWarning $OPT/dist/src/cli.js start#" -e "s#^WorkingDirectory=.*#WorkingDirectory=$OPT#" \
+    "$src/packaging/linux/flowscope.service" > "$unit"
+chmod 644 "$unit"
+# Inside an LXC container systemd cannot always set up the mount namespaces behind ProtectSystem, PrivateTmp and PrivateDevices
+# (the service then fails with status 226/NAMESPACE). The container is already the isolation boundary, so those are switched off here
+# and the remaining hardening (no new privileges, restricted address families, ...) stays.
+virt="$(systemd-detect-virt --container 2>/dev/null || true)"
+if [ "$virt" = "lxc" ] || [ "$virt" = "lxc-libvirt" ] || [ "$virt" = "openvz" ] || [ -n "${FLOWSCOPE_LXC:-}" ]; then
+  d="$UNIT_DIR/flowscope.service.d"; mkdir -p "$d"
+  cat > "$d/lxc.conf" <<'CONF'
+# Written by the FlowScope installer: running inside an LXC container.
+[Service]
+ProtectSystem=no
+ProtectHome=no
+PrivateTmp=no
+PrivateDevices=no
+ProtectKernelTunables=no
+ProtectKernelModules=no
+ProtectControlGroups=no
+CONF
+  say "LXC container detected: relaxed the systemd mount sandboxing (drop-in $d/lxc.conf)"
+fi
+
+# ---------------------------------------------------------------- helper command
+cat > "$BIN_DIR/flowscope-ctl" <<CTL
+#!/bin/sh
+# Small helper installed by FlowScope. Usage: flowscope-ctl status | logs | reset-password <user> | version
+case "\${1:-status}" in
+  status) systemctl status flowscope --no-pager ;;
+  logs) shift; exec journalctl -u flowscope --no-pager "\${@:--n 100}" ;;
+  reset-password) shift; exec runuser -u flowscope -- env FLOWSCOPE_DATA_DIR=$VAR $NODE_BIN --disable-warning=ExperimentalWarning $OPT/dist/src/cli.js reset-password "\$@" ;;
+  version) exec $NODE_BIN $OPT/dist/src/cli.js version ;;
+  *) echo "usage: flowscope-ctl status | logs | reset-password <user> | version" >&2; exit 2 ;;
+esac
+CTL
+chmod 755 "$BIN_DIR/flowscope-ctl"
+
+if command -v systemctl >/dev/null 2>&1 && [ -z "${FLOWSCOPE_SKIP_SYSTEMD:-}" ]; then
+  systemctl daemon-reload
+  systemctl enable flowscope >/dev/null 2>&1 || true
+  systemctl restart flowscope
+  say "Waiting for FlowScope to answer"
+  ok=0
+  for _ in $(seq 1 30); do
+    if FLOWSCOPE_DATA_DIR="$VAR" "$NODE_BIN" --disable-warning=ExperimentalWarning "$OPT/dist/src/cli.js" healthcheck >/dev/null 2>&1; then ok=1; break; fi
+    sleep 2
+  done
+  if [ "$ok" = 1 ]; then say "FlowScope is running"; else warn "FlowScope did not answer within a minute. Look at: journalctl -u flowscope -n 50"; fi
+fi
+
+echo
+if [ -n "$first_pw" ]; then
+  echo "  Sign in as:  admin"
+  echo "  Password:    $first_pw   (used once; change it after signing in)"
+fi
+[ "$MODE" = "update" ] && echo "  Updated. If something is wrong, the previous version is in $OPT.prev"
+echo "  Web console: https://$(hostname -I 2>/dev/null | awk '{print $1}'):8443/   (self-signed certificate until you install your own)"
+echo "  Send NetFlow v5/v9 or IPFIX to UDP 2055 or 4739 on this machine."

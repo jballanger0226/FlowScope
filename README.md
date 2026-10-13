@@ -36,14 +36,27 @@ docker compose --profile clickhouse up -d     # also starts ClickHouse (see "Cli
 ```
 
 or `docker build -t flowscope . && docker run -d -p 8443:8443 -p 2055:2055/udp -p 4739:4739/udp -v flowscope-data:/data flowscope`.
-The image runs as a non-root user, has a health check (`flowscope healthcheck`), and keeps everything in `/data`.
+The image has a health check (`flowscope healthcheck`), keeps everything in `/data`, and runs the server as the unprivileged `node` user (it starts as root only to make `/data` writable, then drops privileges; `--user 1000:1000` skips that).
 Behind a TLS-terminating proxy set `FLOWSCOPE_TLS=off` (serves HTTP on 8080), `FLOWSCOPE_TRUST_PROXY=1` and `FLOWSCOPE_PUBLIC_URL`.
+If every exporter shows up as the Docker bridge address, use `docker compose -f docker-compose.host.yml up -d`.
+
+### Proxmox VE
+
+On the Proxmox host, from a checkout of this repository:
+
+```sh
+packaging/proxmox/flowscope-lxc.sh            # creates an unprivileged Debian 12 LXC container and installs FlowScope in it
+packaging/proxmox/flowscope-lxc.sh update 210 # later: snapshot, then update container 210
+```
+
+Proxmox VE 9.1 and newer can also run the Docker image directly as an LXC application container. Both routes, with all options, are in **[docs/deployment.md](docs/deployment.md)**, together with Docker details, upgrades, backups and troubleshooting.
 
 ### As a service
 
 | OS | How |
 | --- | --- |
 | Linux | `sudo packaging/linux/install.sh` (systemd unit, dedicated user, settings in `/etc/flowscope/flowscope.env`, data in `/var/lib/flowscope`) |
+| Proxmox VE | `packaging/proxmox/flowscope-lxc.sh` on the host (see above); `packaging/proxmox/install.sh` is the installer it runs inside the container |
 | macOS | `sudo packaging/macos/install.sh` (launchd daemon, data in `/Library/Application Support/FlowScope`, log `/var/log/flowscope.log`) |
 | Windows | elevated PowerShell: `.\packaging\windows\install.ps1` (scheduled task at boot as SYSTEM, firewall rules, settings in `%ProgramData%\FlowScope\flowscope.env`) |
 
@@ -144,4 +157,4 @@ FLOWSCOPE_TEST_CLICKHOUSE=http://127.0.0.1:8123 node --test dist/test/clickhouse
 
 ## What has and has not been verified
 
-See [docs/verification.md](docs/verification.md). In short: developed and tested on Linux only; Windows, macOS and the container image are written but have not been run.
+See [docs/verification.md](docs/verification.md). In short: developed and tested on Linux only. The Docker image was run against a stand-in base image; Windows, macOS and the Proxmox scripts have not been run on real systems.

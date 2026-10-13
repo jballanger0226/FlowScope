@@ -1,5 +1,5 @@
-# syntax=docker/dockerfile:1
 # FlowScope container image. Multi-arch friendly: no native modules, only Node.js 22.
+# Runs under Docker, Podman, and as an OCI application container on Proxmox VE 9.1 or newer (see docs/deployment.md).
 FROM node:22-slim AS build
 WORKDIR /src
 COPY package.json ./
@@ -11,6 +11,10 @@ COPY web ./web
 RUN node tools/build.mjs && npm prune --omit=dev
 
 FROM node:22-slim
+LABEL org.opencontainers.image.title="FlowScope" \
+      org.opencontainers.image.description="NetFlow / IPFIX collector with SNMP link and QoS monitoring" \
+      org.opencontainers.image.source="https://github.com/jballanger0226/flowscope" \
+      org.opencontainers.image.licenses="MIT"
 ENV NODE_ENV=production \
     FLOWSCOPE_CONTAINER=1 \
     FLOWSCOPE_DATA_DIR=/data \
@@ -21,11 +25,13 @@ COPY --from=build /src/package.json ./
 COPY --from=build /src/node_modules ./node_modules
 COPY --from=build /src/dist/src ./dist/src
 COPY --from=build /src/dist/web ./dist/web
-RUN mkdir -p /data && chown node:node /data
-USER node
+COPY packaging/docker-entrypoint.sh /usr/local/bin/flowscope-entrypoint
+RUN mkdir -p /data && chown node:node /data && chmod 0755 /usr/local/bin/flowscope-entrypoint
+# The entrypoint starts as root only to make /data writable (Proxmox mount points and new bind mounts are owned by root),
+# then drops to the "node" user. Use `docker run --user 1000:1000` to skip that and never run as root.
 VOLUME /data
 # Web console (HTTPS, self-signed until you install your own certificate) and flow export ports.
 EXPOSE 8443/tcp 2055/udp 4739/udp
 HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 CMD ["node", "dist/src/cli.js", "healthcheck"]
-ENTRYPOINT ["node", "--disable-warning=ExperimentalWarning", "dist/src/cli.js"]
+ENTRYPOINT ["/usr/local/bin/flowscope-entrypoint"]
 CMD ["start"]
