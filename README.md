@@ -81,7 +81,7 @@ A stream is a 5-tuple seen in both directions (ICMP ignores ports). When several
 
 ## SNMP
 
-Reads standard MIB-II / IF-MIB (`ifDescr`, `ifName`, `ifAlias`, `ifHighSpeed`, `ifHC*Octets`, discards, errors, oper status), `ipAddrTable`, VLAN names from `Q-BRIDGE-MIB` (`dot1qVlanStaticName`) and Cisco `CISCO-VTP-MIB` (`vtpVlanName`), and per-class QoS from `CISCO-CLASS-BASED-QOS-MIB` (`cbQosPolicyDirection`, `cbQosIfIndex`, `cbQosConfigIndex`, `cbQosObjectsType`, `cbQosParentObjectsIndex`, `cbQosPolicyMapName`, plus the class-map, match-statement and queueing/police counters). SNMP v1, v2c and v3 (authNoPriv/authPriv) are supported through `net-snmp`. OIDs are listed in `src/snmp/oids.ts`.
+Reads standard MIB-II / IF-MIB (`ifDescr`, `ifName`, `ifAlias`, `ifHighSpeed`, `ifHC*Octets`, discards, errors, oper status), `ipAddrTable`, VLAN names from `Q-BRIDGE-MIB` (`dot1qVlanStaticName`) and Cisco `CISCO-VTP-MIB` (`vtpVlanName`), and per-class QoS from `CISCO-CLASS-BASED-QOS-MIB` (`cbQosPolicyDirection`, `cbQosIfIndex`, `cbQosConfigIndex`, `cbQosObjectsType`, `cbQosParentObjectsIndex`, `cbQosPolicyMapName`, plus class-map names, the 64-bit pre-policy packet/byte, post-policy byte and drop packet/byte counters, queueing bandwidth and current queue depth). SNMP v1, v2c and v3 (noAuthNoPriv, authNoPriv, authPriv) are supported through `net-snmp`. OIDs are listed in `src/snmp/oids.ts`.
 
 ## Security notes
 
