@@ -34,8 +34,8 @@ export function scenarios(label: string, mk: Mk): void {
         rec({ exporter: '10.255.0.1', bytes: 1000, pkts: 10 }),
         rec({ exporter: '10.255.0.2', inIf: 1, bytes: 1000, pkts: 10, ttlMin: 61, ttlMax: 61 }),
         rec({ exporter: '10.255.0.3', inIf: 2, bytes: 1000, pkts: 10, ttlMin: 60, ttlMax: 60 }),
-        // reverse direction
-        rec({ srcIp: '198.51.100.40', dstIp: '10.1.4.21', sport: 443, dport: 51522, bytes: 5000, pkts: 20 })
+        // reverse direction: the reply starts a moment after the request, so which side started the stream is not a tie
+        rec({ srcIp: '198.51.100.40', dstIp: '10.1.4.21', sport: 443, dport: 51522, bytes: 5000, pkts: 20, ts0: NOW - 29_000 })
       ]);
       const r = await t.s.searchStreams(q());
       assert.equal(r.total, 1);
@@ -123,6 +123,28 @@ export function scenarios(label: string, mk: Mk): void {
       assert.deepEqual(r.rows.map(x => x.bytes), [300, 50, 10]);
       const a = await t.s.searchStreams(q([], { sort: 'bytes', dir: 'asc' }));
       assert.deepEqual(a.rows.map(x => x.bytes), [10, 50, 300]);
+    } finally { await t.done(); }
+  });
+
+  test(label + ': report prefix: any length from /0 to /32 groups addresses on that boundary', async () => {
+    const t = await mk();
+    try {
+      await t.s.insertFlows([
+        rec({ srcIp: '10.1.4.21', dstIp: '198.51.100.40', sport: 1, bytes: 1000, pkts: 1 }),
+        rec({ srcIp: '10.1.15.9', dstIp: '198.51.100.40', sport: 2, bytes: 2000, pkts: 1 }),
+        rec({ srcIp: '10.1.16.9', dstIp: '198.51.100.40', sport: 3, bytes: 4000, pkts: 1 }),
+        rec({ srcIp: '10.1.4.130', dstIp: '198.51.100.40', sport: 4, bytes: 8000, pkts: 1 }),
+        rec({ srcIp: '192.0.2.1', dstIp: '198.51.100.40', sport: 5, bytes: 16000, pkts: 1 })
+      ]);
+      const by = async (prefix: number) => {
+        const r = await t.s.report({ range, tier: 'raw', dims: ['srcIp'], prefix, bidir: false, conds: [], sortBy: 'bytes', topN: 50 });
+        return Object.fromEntries(r.rows.map(x => [String(x.dims.srcIp), x.bytes]));
+      };
+      assert.deepEqual(await by(0), { '0.0.0.0/0': 31000 });
+      assert.deepEqual(await by(20), { '192.0.0.0/20': 16000, '10.1.0.0/20': 11000, '10.1.16.0/20': 4000 });
+      assert.deepEqual(await by(27), { '192.0.2.0/27': 16000, '10.1.4.128/27': 8000, '10.1.16.0/27': 4000, '10.1.15.0/27': 2000, '10.1.4.0/27': 1000 });
+      assert.equal(Object.keys(await by(32)).length, 5);
+      assert.equal((await by(32))['10.1.4.21'], 1000);
     } finally { await t.done(); }
   });
 

@@ -79,6 +79,19 @@ export function registerDevices(app: App): void {
     c.json({ device: d });
   });
 
+  // Reads the MAC address, ARP and neighbour tables now, and says what came back. Useful when a new switch model is added.
+  w.post('/api/devices/:id/read-hosts', 'snmp', async c => {
+    const id = int(c.params.id, 0, 0, 1e9);
+    const d = app.devices.row(id);
+    if (!d) throw new HttpError(404, 'No such device');
+    const cl = app.devices.open(d);
+    try {
+      const r = await app.hosts.refresh(d, cl);
+      app.log.audit(who(c), `Read host tables from ${d.name}: ${r.macs} MAC addresses, ${r.arp} ARP entries, ${r.neighbors} neighbours`);
+      c.json({ ...r, device: app.devices.list().find(x => x.id === id) });
+    } catch (e) { throw new HttpError(502, (e as Error).message); } finally { cl.close(); }
+  });
+
   w.del('/api/devices/:id', 'snmp', async c => {
     const id = int(c.params.id, 0, 0, 1e9);
     const d = app.devices.list().find(x => x.id === id);

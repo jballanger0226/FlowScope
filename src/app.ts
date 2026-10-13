@@ -13,6 +13,7 @@ import { CredentialStore } from './snmp/creds.js';
 import { DeviceService } from './snmp/devices.js';
 import { Discovery } from './snmp/discovery.js';
 import { Poller } from './snmp/poller.js';
+import { HostTracker } from './snmp/hosts.js';
 import { FlowCollector } from './collector/listener.js';
 import { SqliteStore } from './store/sqlite.js';
 import type { TsStore } from './store/types.js';
@@ -28,7 +29,7 @@ export const VERSION = '0.1.0';
 export class App {
   readonly startedAt = Date.now();
   cdb!: ConfigDb; secrets!: Secrets; settings!: Settings; log!: AppLog; auth!: AuthService; certs!: CertManager;
-  creds!: CredentialStore; devices!: DeviceService; discovery!: Discovery; poller!: Poller; collector!: FlowCollector; store!: SwitchableStore; web!: WebServer;
+  creds!: CredentialStore; devices!: DeviceService; discovery!: Discovery; poller!: Poller; hosts!: HostTracker; collector!: FlowCollector; store!: SwitchableStore; web!: WebServer;
   initialAdminPassword: string | null = null;
   saml = new SamlState();
   private timers: NodeJS.Timeout[] = [];
@@ -60,7 +61,8 @@ export class App {
     this.store = new SwitchableStore(await this.openStore(this.settings.get('backend')));
     this.devices = new DeviceService(this.cdb, this.creds, this.store, this.log);
     this.discovery = new Discovery(this.devices, this.creds, this.log);
-    this.poller = new Poller(this.devices, this.store, this.log, { isEnabled: () => this.collectCache.snmp });
+    this.hosts = new HostTracker(this.cdb, this.devices, this.log, () => this.settings.get('hosts'));
+    this.poller = new Poller(this.devices, this.store, this.log, { isEnabled: () => this.collectCache.snmp, hosts: () => this.settings.get('hosts') }, this.hosts);
     this.collector = new FlowCollector({
       bind: cfg.flowBind, ports: cfg.flowPorts, log: { info: (s, m) => this.log.info(s, m), warn: (s, m) => this.log.warn(s, m), error: (s, m) => this.log.error(s, m) },
       ingest: this.store, onExporter: ip => this.noteExporter(ip)

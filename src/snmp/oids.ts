@@ -30,8 +30,11 @@ export const OID = {
   // CISCO-VTP-MIB vtpVlanName, indexed by management domain then VLAN id
   vtpVlanName: '1.3.6.1.4.1.9.9.46.1.3.1.1.4',
   // CISCO-CLASS-BASED-QOS-MIB
+  cbQosIfType: '1.3.6.1.4.1.9.9.166.1.1.1.1.2',
   cbQosPolicyDirection: '1.3.6.1.4.1.9.9.166.1.1.1.1.3',
   cbQosIfIndex: '1.3.6.1.4.1.9.9.166.1.1.1.1.4',
+  cbQosVlanIndex: '1.3.6.1.4.1.9.9.166.1.1.1.1.9',
+  cbQosParentPolicyIndex: '1.3.6.1.4.1.9.9.166.1.1.1.1.12',
   cbQosConfigIndex: '1.3.6.1.4.1.9.9.166.1.5.1.1.2',
   cbQosObjectsType: '1.3.6.1.4.1.9.9.166.1.5.1.1.3',
   cbQosParentObjectsIndex: '1.3.6.1.4.1.9.9.166.1.5.1.1.4',
@@ -39,13 +42,54 @@ export const OID = {
   cbQosCMName: '1.3.6.1.4.1.9.9.166.1.7.1.1.1',
   cbQosQueueingCfgBandwidth: '1.3.6.1.4.1.9.9.166.1.9.1.1.1',
   cbQosQueueingCfgBandwidthUnits: '1.3.6.1.4.1.9.9.166.1.9.1.1.2',
+  cbQosCMPrePolicyPkt32: '1.3.6.1.4.1.9.9.166.1.15.1.1.2',
   cbQosCMPrePolicyPkt64: '1.3.6.1.4.1.9.9.166.1.15.1.1.3',
+  cbQosCMPrePolicyByte32: '1.3.6.1.4.1.9.9.166.1.15.1.1.5',
   cbQosCMPrePolicyByte64: '1.3.6.1.4.1.9.9.166.1.15.1.1.6',
+  cbQosCMPostPolicyByte32: '1.3.6.1.4.1.9.9.166.1.15.1.1.9',
   cbQosCMPostPolicyByte64: '1.3.6.1.4.1.9.9.166.1.15.1.1.10',
+  cbQosCMDropPkt32: '1.3.6.1.4.1.9.9.166.1.15.1.1.13',
   cbQosCMDropPkt64: '1.3.6.1.4.1.9.9.166.1.15.1.1.14',
+  cbQosCMDropByte32: '1.3.6.1.4.1.9.9.166.1.15.1.1.16',
   cbQosCMDropByte64: '1.3.6.1.4.1.9.9.166.1.15.1.1.17',
-  cbQosQueueingCurrentQDepth: '1.3.6.1.4.1.9.9.166.1.18.1.1.1'
+  cbQosQueueingCurrentQDepth: '1.3.6.1.4.1.9.9.166.1.18.1.1.1',
+  // Switch port VLANs. CISCO-VLAN-MEMBERSHIP-MIB (access VLAN, voice VLAN), CISCO-VTP-MIB (trunks) and Q-BRIDGE-MIB (port PVID); all checked against the MIB text.
+  vmVlan: '1.3.6.1.4.1.9.9.68.1.2.2.1.2',
+  vmVoiceVlanId: '1.3.6.1.4.1.9.9.68.1.5.1.1.1',
+  vlanTrunkPortNativeVlan: '1.3.6.1.4.1.9.9.46.1.6.1.1.5',
+  vlanTrunkPortDynamicStatus: '1.3.6.1.4.1.9.9.46.1.6.1.1.14',
+  vlanTrunkPortVlansEnabled: '1.3.6.1.4.1.9.9.46.1.6.1.1.4',
+  vlanTrunkPortVlansEnabled2k: '1.3.6.1.4.1.9.9.46.1.6.1.1.17',
+  vlanTrunkPortVlansEnabled3k: '1.3.6.1.4.1.9.9.46.1.6.1.1.18',
+  vlanTrunkPortVlansEnabled4k: '1.3.6.1.4.1.9.9.46.1.6.1.1.19',
+  dot1qPvid: '1.3.6.1.2.1.17.7.1.4.5.1.1',
+  dot1dBasePortIfIndex: '1.3.6.1.2.1.17.1.4.1.2',
+  // MAC address tables: Q-BRIDGE-MIB (indexed VLAN.MAC) and BRIDGE-MIB (indexed MAC)
+  dot1qTpFdbPort: '1.3.6.1.2.1.17.7.1.2.2.1.2',
+  dot1qTpFdbStatus: '1.3.6.1.2.1.17.7.1.2.2.1.3',
+  dot1dTpFdbPort: '1.3.6.1.2.1.17.4.3.1.2',
+  dot1dTpFdbStatus: '1.3.6.1.2.1.17.4.3.1.3',
+  // ARP / neighbour cache: IP-MIB ipNetToPhysicalTable (indexed ifIndex.type.len.address) and the older ipNetToMediaTable (indexed ifIndex.address)
+  ipNetToPhysicalPhysAddress: '1.3.6.1.2.1.4.35.1.4',
+  ipNetToPhysicalType: '1.3.6.1.2.1.4.35.1.6',
+  ipNetToPhysicalState: '1.3.6.1.2.1.4.35.1.7',
+  ipNetToMediaPhysAddress: '1.3.6.1.2.1.4.22.1.2',
+  ipNetToMediaType: '1.3.6.1.2.1.4.22.1.4',
+  // LLDP-MIB lldpRemTable (indexed timeMark.localPort.index) and CISCO-CDP-MIB cdpCacheTable (indexed ifIndex.deviceIndex)
+  lldpRemChassisId: '1.0.8802.1.1.2.1.4.1.1.5',
+  lldpRemPortId: '1.0.8802.1.1.2.1.4.1.1.7',
+  lldpRemPortDesc: '1.0.8802.1.1.2.1.4.1.1.8',
+  lldpRemSysName: '1.0.8802.1.1.2.1.4.1.1.9',
+  lldpRemSysCapEnabled: '1.0.8802.1.1.2.1.4.1.1.12',
+  lldpLocPortId: '1.0.8802.1.1.2.1.3.7.1.3',
+  lldpLocPortDesc: '1.0.8802.1.1.2.1.3.7.1.4',
+  cdpCacheAddress: '1.3.6.1.4.1.9.9.23.1.2.1.1.4',
+  cdpCacheDeviceId: '1.3.6.1.4.1.9.9.23.1.2.1.1.6',
+  cdpCacheDevicePort: '1.3.6.1.4.1.9.9.23.1.2.1.1.7',
+  cdpCachePlatform: '1.3.6.1.4.1.9.9.23.1.2.1.1.8',
+  cdpCacheCapabilities: '1.3.6.1.4.1.9.9.23.1.2.1.1.9'
 } as const;
 
 export const CBQOS_OBJ = { policymap: 1, classmap: 2, matchStatement: 3, queueing: 4 } as const;
-export const IF_TYPE_IGNORED = new Set([24 /* softwareLoopback */, 53 /* propVirtual */, 131 /* tunnel */, 135 /* l2vlan */, 136 /* l3ipvlan */, 161 /* ieee8023adLag */]);
+/** Interface types that are hidden unless they carry a description. Port-channels (161) are kept: they are the uplinks people watch. */
+export const IF_TYPE_IGNORED = new Set([24 /* softwareLoopback */, 53 /* propVirtual */, 131 /* tunnel */, 135 /* l2vlan */, 136 /* l3ipvlan */]);

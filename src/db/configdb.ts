@@ -123,6 +123,40 @@ const MIGRATIONS: string[] = [
     message TEXT NOT NULL
   );
   CREATE INDEX logs_ts ON logs(ts);
+  `,
+  `
+  -- port VLANs, input service policies, and why QoS data may be missing
+  ALTER TABLE interfaces ADD COLUMN if_type INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE interfaces ADD COLUMN port_mode TEXT NOT NULL DEFAULT '';
+  ALTER TABLE interfaces ADD COLUMN vlan INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE interfaces ADD COLUMN voice_vlan INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE interfaces ADD COLUMN vlan_list TEXT NOT NULL DEFAULT '';
+  ALTER TABLE interfaces ADD COLUMN policy_in TEXT;
+  ALTER TABLE devices ADD COLUMN qos_note TEXT;
+  ALTER TABLE devices ADD COLUMN hosts_at INTEGER;
+  ALTER TABLE devices ADD COLUMN hosts_note TEXT;
+  -- Which MAC address was learned on which port of which switch, and since when. One row per switch, MAC address and VLAN.
+  CREATE TABLE fdb (
+    dev_id INTEGER NOT NULL, mac TEXT NOT NULL, vlan INTEGER NOT NULL, if_index INTEGER NOT NULL,
+    first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, since INTEGER NOT NULL,
+    PRIMARY KEY (dev_id, mac, vlan)
+  );
+  CREATE INDEX fdb_mac ON fdb(mac);
+  CREATE INDEX fdb_port ON fdb(dev_id, if_index);
+  -- ARP / neighbour cache of the routers and Layer 3 switches: which IP address uses which MAC address
+  CREATE TABLE arp (
+    dev_id INTEGER NOT NULL, ip TEXT NOT NULL, mac TEXT NOT NULL, if_index INTEGER NOT NULL DEFAULT 0, last_seen INTEGER NOT NULL,
+    PRIMARY KEY (dev_id, ip, mac)
+  );
+  CREATE INDEX arp_ip ON arp(ip);
+  CREATE INDEX arp_mac ON arp(mac);
+  -- LLDP / CDP neighbours, so ports that lead to another switch or router are not mistaken for the port a host is plugged into
+  CREATE TABLE neighbors (
+    dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, proto TEXT NOT NULL, rem_key TEXT NOT NULL,
+    rem_name TEXT NOT NULL DEFAULT '', rem_port TEXT NOT NULL DEFAULT '', rem_ip TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'other', caps TEXT NOT NULL DEFAULT '',
+    seen_at INTEGER NOT NULL,
+    PRIMARY KEY (dev_id, if_index, proto, rem_key)
+  );
   `
 ];
 

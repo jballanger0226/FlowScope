@@ -16,6 +16,13 @@ export interface HopContext {
   localIps?: ReadonlySet<string>;
 }
 
+/** An IPv4 group (224.0.0.0/4) or an IPv6 multicast address (ff00::/8). */
+export function isMulticast(ip: string): boolean {
+  if (ip.includes(':')) return /^ff/i.test(ip);
+  const o = Number(ip.split('.')[0]);
+  return o >= 224 && o <= 239;
+}
+
 export type ObsKind = 'loss' | 'slow' | 'remark' | 'qdrop' | 'nat' | 'path' | 'ttl' | 'info';
 export interface Observation { kind: ObsKind; text: string; severity: 'info' | 'warn' | 'bad' }
 
@@ -25,6 +32,10 @@ export interface HopView {
   dev: string;
   role: string;
   inIf: string; outIf: string;
+  /** Every interface the traffic left through, busiest first. More than one on a multicast stream means the device replicated it. */
+  outIfs: string[];
+  /** Set on a multicast stream when SNMP data says the source host is plugged into this device: the port it is on, and whether the flow's ingress interface agrees. */
+  sourcePort?: string | null; sourceConfirmed?: boolean;
   frameSrc: string | null; frameDst: string | null;
   vlan: number | null; vlanName: string;
   ttl: number | null;
@@ -53,12 +64,14 @@ export interface StreamDetail {
   ttlExpired: boolean;
   totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number };
   note: string | null;
+  /** Present for a multicast stream: one source, many receivers, so the devices are branches of a tree, not a path. */
+  multicast: { group: string; source: string } | null;
 }
 
 interface Agg {
   exporter: string; recs: FlowRecord[]; pkts: number; bytes: number; t0: number; t1: number;
   ttl: number | null; tosIn: number; tosOut: number | null; inIf: number; outIf: number;
-  macS: string | null; macD: string | null; vlan: number | null; nat: FlowRecord | null; multiPath: boolean;
+  macS: string | null; macD: string | null; vlan: number | null; nat: FlowRecord | null; multiPath: boolean; outIfs: number[];
   ttlLow: number | null; ttlWhy: 'ttl' | 'icmp' | null;
 }
 
@@ -86,7 +99,8 @@ function aggregate(recs: FlowRecord[], local: ReadonlySet<string>): Agg[] {
     const post = rs.find(r => r.postTos !== null && r.postTos !== undefined);
     out.push({
       exporter, recs: rs, pkts, bytes, t0, t1, ttl, tosIn: main.tos >> 2, tosOut: post && post.postTos !== null ? post.postTos >> 2 : null,
-      inIf: ii, outIf: oo, macS: main.srcMac, macD: main.dstMac, vlan: main.vlan, nat, multiPath: ifBytes.size > 1, ttlLow, ttlWhy
+      inIf: ii, outIf: oo, macS: main.srcMac, macD: main.dstMac, vlan: main.vlan, nat, multiPath: ifBytes.size > 1, ttlLow, ttlWhy,
+      outIfs: [...ifBytes].sort((a, b) => b[1] - a[1]).map(([k]) => Number(k.split('>')[1]))
     });
   }
   return out;
@@ -100,16 +114,20 @@ function order(a: Agg[]): Agg[] {
   });
 }
 
-function buildHops(recs: FlowRecord[], ctx: HopContext): HopView[] {
+function buildHops(recs: FlowRecord[], ctx: HopContext, multicast = false): HopView[] {
   if (!recs.length) return [];
-  const aggs = order(aggregate(recs, ctx.localIps ?? new Set()));
+  // Multicast is one source and many receivers. Every device on the distribution tree sees the same packets, so they are not in series:
+  // there is no previous hop to compare with (loss, latency, DSCP change) and the TTL does not give an order across branches.
+  const aggs = multicast
+    ? aggregate(recs, ctx.localIps ?? new Set()).sort((x, y) => ctx.deviceName(x.exporter).localeCompare(ctx.deviceName(y.exporter)))
+    : order(aggregate(recs, ctx.localIps ?? new Set()));
   const dest = recs[0].dstIp;
   const slow = ctx.slowLinkMs ?? 30;
   const hops: HopView[] = [];
   let cum = 0;
   aggs.forEach((a, i) => {
-    const prev = i > 0 ? aggs[i - 1] : null;
-    const prevHop = i > 0 ? hops[i - 1] : null;
+    const prev = i > 0 && !multicast ? aggs[i - 1] : null;
+    const prevHop = i > 0 && !multicast ? hops[i - 1] : null;
     const obs: Observation[] = [];
     let linkMs: number | null = null;
     if (prev) {
@@ -118,7 +136,7 @@ function buildHops(recs: FlowRecord[], ctx: HopContext): HopView[] {
       if (d >= 0 && d < 5000) { linkMs = d; cum += d; }
       else if (d < 0 && d > -50) { linkMs = 0; }
     }
-    const cumMs = i === 0 ? 0 : (linkMs === null ? null : cum);
+    const cumMs = multicast ? null : i === 0 ? 0 : (linkMs === null ? null : cum);
     const dev = ctx.deviceName(a.exporter);
     const dscpOut = a.tosOut;
     const qosChanged = dscpOut !== null && dscpOut !== a.tosIn;
@@ -140,14 +158,15 @@ function buildHops(recs: FlowRecord[], ctx: HopContext): HopView[] {
     }
     if (a.ttlWhy === 'ttl') obs.push({ kind: 'ttl', severity: 'bad', text: `TTL expired at ${dev}: packets arrived with TTL ${a.ttlLow} and could not be forwarded, so they did not reach ${dest}` });
     else if (a.ttlWhy === 'icmp') obs.push({ kind: 'ttl', severity: 'bad', text: `${dev} exported an ICMP Time Exceeded message: a router reported that a packet's TTL ran out on its way to ${dest}` });
-    if (a.multiPath) obs.push({ kind: 'path', severity: 'info', text: 'Traffic used more than one interface pair on this device (load sharing or a path change)' });
+    if (a.multiPath && multicast) obs.push({ kind: 'path', severity: 'info', text: `Replicated to ${new Set(a.outIfs).size} interfaces: ${a.outIfs.slice(0, 6).map(x => ctx.ifName(a.exporter, x)).join(', ')}${a.outIfs.length > 6 ? ', …' : ''}` });
+    else if (a.multiPath) obs.push({ kind: 'path', severity: 'info', text: 'Traffic used more than one interface pair on this device (load sharing or a path change)' });
     const drops = ctx.classDrops?.(a.exporter, a.outIf, a.t0 - 120_000, a.t1 + 120_000, dscpOut ?? a.tosIn) ?? [];
     for (const d of drops) {
       if (d.dropPkts > 0) obs.push({ kind: 'qdrop', severity: d.dropPct >= 1 ? 'bad' : 'warn', text: `Egress queue drops on ${ctx.ifName(a.exporter, a.outIf)}: class ${d.cls} dropped ${d.dropPct.toFixed(2)}% (${d.dropPkts} packets) around this time` });
     }
     hops.push({
       n: i + 1, exporter: a.exporter, dev, role: ctx.deviceRole(a.exporter),
-      inIf: ctx.ifName(a.exporter, a.inIf), outIf: ctx.ifName(a.exporter, a.outIf),
+      inIf: ctx.ifName(a.exporter, a.inIf), outIf: ctx.ifName(a.exporter, a.outIf), outIfs: [...new Set(a.outIfs)].filter(x => x).map(x => ctx.ifName(a.exporter, x)),
       frameSrc: a.macS, frameDst: a.macD, vlan: a.vlan, vlanName: a.vlan && ctx.vlanName ? ctx.vlanName(a.vlan) : '',
       ttl: a.ttl, ttlExpired: a.ttlWhy, dscpIn: a.tosIn, dscpOut, dscpInS: dscpName(a.tosIn), dscpOutS: dscpOut === null ? 'not reported' : dscpName(dscpOut), qosChanged,
       pkts: a.pkts, bytes: a.bytes, firstSeen: a.t0, lastSeen: a.t1, linkMs, cumMs,
@@ -164,11 +183,13 @@ export function analyzeStream(skey: string, recs: (FlowRecord & { primary?: bool
   const first = recs.slice().sort((a, b) => a.ts0 - b.ts0)[0];
   const fwdRecs = recs.filter(r => r.srcIp === first.srcIp && r.sport === first.sport);
   const revRecs = recs.filter(r => !(r.srcIp === first.srcIp && r.sport === first.sport));
-  const forward = buildHops(fwdRecs, ctx);
-  const reverse = buildHops(revRecs, ctx);
+  const mcast = isMulticast(first.dstIp);
+  const forward = buildHops(fwdRecs, ctx, mcast);
+  const reverse = buildHops(revRecs, ctx, mcast);
   const sum = (rs: (FlowRecord & { primary?: boolean })[], k: 'bytes' | 'pkts') => rs.filter(r => r.primary !== false).reduce((a, r) => a + r[k], 0);
   let note: string | null = null;
-  if (!reverse.length) note = 'Only one direction was exported. Check that the exporters report both ingress and egress traffic.';
+  if (mcast) note = null;
+  else if (!reverse.length) note = 'Only one direction was exported. Check that the exporters report both ingress and egress traffic.';
   else if (reverse.length !== forward.length) note = 'The forward and reverse paths do not cross the same devices. The route may be asymmetric.';
   const all = [...forward, ...reverse];
   return {
@@ -178,6 +199,6 @@ export function analyzeStream(skey: string, recs: (FlowRecord & { primary?: bool
     forward, reverse, qosChanged: all.some(h => h.qosChanged || h.obs.some(o => o.kind === 'remark')),
     ttlExpired: all.some(h => h.ttlExpired !== null),
     totals: { fwdBytes: sum(fwdRecs, 'bytes'), revBytes: sum(revRecs, 'bytes'), fwdPkts: sum(fwdRecs, 'pkts'), revPkts: sum(revRecs, 'pkts') },
-    note
+    note, multicast: mcast ? { group: first.dstIp, source: first.srcIp } : null
   };
 }

@@ -81,12 +81,13 @@ export function registerFlows(app: App): void {
       if (seen.has(key)) continue; seen.add(key);
       const devId = app.devices.deviceIdForExporter(r.exporter);
       if (devId === null || !r.outIf) continue;
-      const defs = app.devices.interfaces(devId).find(i => i.ifIndex === r.outIf)?.classes ?? [];
+      // only the output policy queues the stream; classes of an input policy ("in:") act on traffic arriving at the port
+      const defs = (app.devices.interfaces(devId).find(i => i.ifIndex === r.outIf)?.classes ?? []).filter(c => !c.cls.startsWith('in:'));
       if (!defs.length) continue;
       try {
         const cs = await app.store.classSeries(devId, r.outIf, { from: t0, to: t1 }, app.settings.get('retention'), 1);
         const secs = Math.max(60, cs.step) / 1000;
-        drops.set(key, cs.classes.map(k => {
+        drops.set(key, cs.classes.filter(k => !k.cls.startsWith('in:')).map(k => {
           const pts = k.points; const pps = pts.length ? pts.reduce((a, p) => a + p.dropPps, 0) / pts.length : 0;
           const pct = pts.length ? Math.max(...pts.map(p => p.dropPct)) : 0;
           return { cls: k.cls, dropPct: pct, dropPkts: Math.round(pps * secs * Math.max(1, pts.length)), dscps: defs.find(d => d.cls === k.cls)?.dscps ?? [] };
@@ -100,6 +101,24 @@ export function registerFlows(app: App): void {
       classDrops: (ip, outIf, _a, _b, dscp) => (drops.get(`${ip}|${outIf}`) ?? []).filter(d => d.dscps.includes(dscp)).map(d => ({ cls: d.cls, dropPct: d.dropPct, dropPkts: d.dropPkts }))
     });
     if (!detail) throw new HttpError(404, 'No records for that stream');
-    c.json({ ...detail, activity: activity(recs, detail) });
+    let multicast: (NonNullable<typeof detail.multicast> & { location: ReturnType<typeof app.hosts.locate> | null }) | null = null;
+    if (detail.multicast) {
+      // The source of a multicast stream is not "behind" the first device that reported it: every switch on the tree reports the same packets.
+      // Ask the SNMP data (MAC tables, ARP, LLDP/CDP) which switch port the source host is plugged into.
+      const seen = new Map<string, number>();
+      for (const r of recs) if (r.srcMac && r.srcIp === detail.multicast.source && app.devices.deviceRole(r.exporter) === 'switch') seen.set(r.srcMac, (seen.get(r.srcMac) ?? 0) + 1);
+      const hint = [...seen].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+      let location: ReturnType<typeof app.hosts.locate> | null = null;
+      try { location = app.hosts.locate(detail.multicast.source, hint); } catch { /* host tracking is optional */ }
+      if (location?.attach) {
+        const at = location.attach;
+        for (const hp of detail.forward) {
+          if (hp.dev !== at.dev) continue;
+          hp.sourcePort = at.ifName; hp.sourceConfirmed = hp.inIf === at.ifName;
+        }
+      }
+      multicast = { ...detail.multicast, location };
+    }
+    c.json({ ...detail, multicast, activity: activity(recs, detail) });
   });
 }

@@ -71,7 +71,7 @@ export class SnmpClient {
   private s: any;
   closed = false;
 
-  constructor(target: SnmpTarget, cred: SnmpCredential) {
+  constructor(readonly target: SnmpTarget, readonly cred: SnmpCredential) {
     const transport = target.host.includes(':') ? 'udp6' : 'udp4';
     const opts: Record<string, unknown> = { port: target.port, retries: target.retries ?? 1, timeout: target.timeoutMs ?? 3000, transport, trapPort: 162, idBitsSize: 32 };
     if (cred.version === 'v3') {
@@ -131,6 +131,16 @@ export class SnmpClient {
     const pre = colOid + '.';
     for (const vb of vbs) if (vb.oid.startsWith(pre)) m.set(vb.oid.slice(pre.length), vb.value);
     return m;
+  }
+
+  /**
+   * A second session that reads one VLAN of a Cisco switch. These switches keep one MAC table per VLAN and pick it by the
+   * community ("public@140") for SNMPv1/v2c, or by the SNMPv3 context "vlan-140". The caller closes the session.
+   */
+  forVlan(vlan: number): SnmpClient {
+    const c = this.cred;
+    const cred: SnmpCredential = c.version === 'v3' ? { ...c, context: `vlan-${vlan}` } : { ...c, community: `${c.community || 'public'}@${vlan}` };
+    return new SnmpClient(this.target, cred);
   }
 
   close(): void { if (!this.closed) { this.closed = true; try { this.s.close(); } catch { /* ignore */ } } }

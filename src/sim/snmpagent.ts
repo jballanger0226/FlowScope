@@ -3,10 +3,16 @@ import { OID } from '../snmp/oids.js';
 
 export interface SimIface { index: number; name: string; alias?: string; speedMbps: number; oper?: number; inBps: number; outBps: number; discPct?: number; type?: number }
 export interface SimClass { name: string; dscps: number[]; queue: string; bw?: string; pps: number; pktBytes: number; dropPct: number; qBytes: number }
-export interface SimQos { ifIndex: number; policy: string; classes: SimClass[] }
+export interface SimQos { ifIndex: number; policy: string; classes: SimClass[]; direction?: 'input' | 'output'; ifType?: number; vlan?: number; parentPolicy?: number }
+export interface SimPort { ifIndex: number; mode: 'access' | 'trunk'; vlan: number; voice?: number; allowed?: number[] }
+export interface SimFdb { mac: string; vlan: number; ifIndex: number }
+export interface SimLldp { ifIndex: number; name: string; port: string; /** first octet of lldpRemSysCapEnabled, bit 0 = 0x80 (other) ... bit 7 = 0x01 (station) */ caps: number }
+export interface SimCdp { ifIndex: number; id: string; port: string; platform: string; caps: number; ip?: string }
 export interface SimDevice {
   name: string; descr: string; objectId?: string; address: string; port: number;
   ifaces: SimIface[]; ips: { ip: string; ifIndex: number }[]; vlans: { id: number; name: string }[]; qos: SimQos[];
+  /** Port VLANs (CISCO-VLAN-MEMBERSHIP-MIB, CISCO-VTP-MIB), the Q-BRIDGE MAC table, ARP (ipNetToMediaTable), LLDP and CDP neighbours. */
+  ports?: SimPort[]; fdb?: SimFdb[]; arp?: { ip: string; mac: string; ifIndex: number }[]; lldp?: SimLldp[]; cdp?: SimCdp[];
   auth: { community?: string; user?: { name: string; level: 'noAuthNoPriv' | 'authNoPriv' | 'authPriv'; authProto?: string; authKey?: string; privProto?: string; privKey?: string } };
 }
 
@@ -28,6 +34,7 @@ export class VirtualDevice {
   private octIn = new Map<number, bigint>(); private octOut = new Map<number, bigint>();
   private discIn = new Map<number, bigint>(); private discOut = new Map<number, bigint>();
   private cls = new Map<string, { pre: bigint; preB: bigint; postB: bigint; drop: bigint; dropB: bigint }>();
+  private qosKey = (q: SimQos, qi: number, cname: string) => `${qi}/${q.ifIndex}/${cname}`;
   /** Test hook: forced drop percentages by "ifIndex/class". */
   overrides = new Map<string, number>();
 
@@ -110,15 +117,17 @@ export class VirtualDevice {
     for (const v of s.vlans) this.mib.addTableRow('dot1qVlanStaticTable', [v.name, v.id]);
 
     if (s.qos.length) this.buildQos();
+    this.buildSwitching();
     this.tick();
   }
 
-  private qosIds: { policyIdx: number; ifIndex: number; policyObj: number; classObj: Map<string, number>; qObj: Map<string, number>; cfg: Map<string, number> }[] = [];
+  private qosIds: { qi: number; policyIdx: number; ifIndex: number; policyObj: number; classObj: Map<string, number>; qObj: Map<string, number>; cfg: Map<string, number> }[] = [];
 
   private buildQos(): void {
     const B = '1.3.6.1.4.1.9.9.166.1';
     this.table('cbQosServicePolicyTable', B + '.1.1.1', [
-      { number: 1, name: 'cbQosPolicyIndex', type: T.Integer, maxAccess: NA }, { number: 3, name: 'cbQosPolicyDirection', type: T.Integer }, { number: 4, name: 'cbQosIfIndex', type: T.Integer }
+      { number: 1, name: 'cbQosPolicyIndex', type: T.Integer, maxAccess: NA }, { number: 2, name: 'cbQosIfType', type: T.Integer }, { number: 3, name: 'cbQosPolicyDirection', type: T.Integer },
+      { number: 4, name: 'cbQosIfIndex', type: T.Integer }, { number: 9, name: 'cbQosVlanIndex', type: T.Integer }, { number: 12, name: 'cbQosParentPolicyIndex', type: T.Integer }
     ], ['cbQosPolicyIndex']);
     this.table('cbQosObjectsTable', B + '.5.1.1', [
       { number: 1, name: 'cbQosObjectsIndex', type: T.Integer, maxAccess: NA }, { number: 2, name: 'cbQosConfigIndex', type: T.Integer }, { number: 3, name: 'cbQosObjectsType', type: T.Integer },
@@ -141,8 +150,8 @@ export class VirtualDevice {
     let cfg = 100;
     this.spec.qos.forEach((q, qi) => {
       const policyIdx = 1000 + qi; let obj = 1;
-      const ids = { policyIdx, ifIndex: q.ifIndex, policyObj: obj, classObj: new Map<string, number>(), qObj: new Map<string, number>(), cfg: new Map<string, number>() };
-      this.mib.addTableRow('cbQosServicePolicyTable', [policyIdx, 2, q.ifIndex]);
+      const ids = { qi, policyIdx, ifIndex: q.ifIndex, policyObj: obj, classObj: new Map<string, number>(), qObj: new Map<string, number>(), cfg: new Map<string, number>() };
+      this.mib.addTableRow('cbQosServicePolicyTable', [policyIdx, q.ifType ?? 1, q.direction === 'input' ? 1 : 2, q.ifIndex, q.vlan ?? 0, q.parentPolicy ?? 0]);
       const pcfg = cfg++;
       this.mib.addTableRow('cbQosPolicyMapCfgTable', [q.policy, pcfg]);
       this.mib.addTableRow('cbQosObjectsTable', [ids.policyObj, pcfg, 1, 0, policyIdx]);
@@ -155,13 +164,64 @@ export class VirtualDevice {
         const qcfg = cfg++; const qobj = obj++;
         ids.qObj.set(c.name, qobj);
         this.mib.addTableRow('cbQosObjectsTable', [qobj, qcfg, 4, cobj, policyIdx]);
-        this.mib.addTableRow('cbQosQueueingCfgTable', [c.bw ? Number(c.bw.replace(/\D/g, '')) : 0, c.bw?.includes('%') ? 3 : 1, qcfg]);
+        this.mib.addTableRow('cbQosQueueingCfgTable', [c.bw ? Number(c.bw.replace(/\D/g, '')) : 0, c.bw?.includes('%') ? 2 : 1, qcfg]);
         this.mib.addTableRow('cbQosCMStatsTable', [u64(0n), u64(0n), u64(0n), u64(0n), u64(0n), policyIdx, cobj]);
         this.mib.addTableRow('cbQosQueueingStatsTable', [0, policyIdx, qobj]);
-        this.cls.set(`${q.ifIndex}/${c.name}`, { pre: 0n, preB: 0n, postB: 0n, drop: 0n, dropB: 0n });
+        this.cls.set(this.qosKey(q, qi, c.name), { pre: 0n, preB: 0n, postB: 0n, drop: 0n, dropB: 0n });
       }
       this.qosIds.push(ids);
     });
+  }
+
+  /** Port VLANs, the Q-BRIDGE MAC table, ARP, LLDP and CDP. Multi-part indexes are registered as separate integer columns, which gives the same OIDs as the real MIBs. */
+  private buildSwitching(): void {
+    const s = this.spec;
+    const mac = (m: string) => Buffer.from(m.replace(/[:-]/g, ''), 'hex');
+    if (s.ports?.length) {
+      this.table('vmMembershipTable', '1.3.6.1.4.1.9.9.68.1.2.2.1', [{ number: 2, name: 'vmVlan', type: T.Integer }, { number: 99, name: 'vmIf', type: T.Integer, maxAccess: NA }], ['vmIf']);
+      this.table('vmVoiceVlanTable', '1.3.6.1.4.1.9.9.68.1.5.1.1', [{ number: 1, name: 'vmVoiceVlanId', type: T.Integer }, { number: 99, name: 'vmvIf', type: T.Integer, maxAccess: NA }], ['vmvIf']);
+      this.table('vlanTrunkPortTable', '1.3.6.1.4.1.9.9.46.1.6.1.1', [
+        { number: 4, name: 'vlanTrunkPortVlansEnabled', type: T.OctetString }, { number: 5, name: 'vlanTrunkPortNativeVlan', type: T.Integer }, { number: 14, name: 'vlanTrunkPortDynamicStatus', type: T.Integer },
+        { number: 99, name: 'vtIf', type: T.Integer, maxAccess: NA }], ['vtIf']);
+      for (const p of s.ports) {
+        if (p.mode === 'access') this.mib.addTableRow('vmMembershipTable', [p.vlan, p.ifIndex]);
+        if (p.voice) this.mib.addTableRow('vmVoiceVlanTable', [p.voice, p.ifIndex]);
+        const bm = Buffer.alloc(128); for (const v of p.allowed ?? []) if (v >= 0 && v < 1024) bm[v >> 3] |= 0x80 >> (v & 7);
+        this.mib.addTableRow('vlanTrunkPortTable', [bm, p.vlan, p.mode === 'trunk' ? 1 : 2, p.ifIndex]);
+      }
+    }
+    if (s.fdb) {
+      // one bridge port per ifIndex, numbered the same
+      this.table('dot1dBasePortTable', '1.3.6.1.2.1.17.1.4.1', [{ number: 1, name: 'dot1dBasePort', type: T.Integer, maxAccess: NA }, { number: 2, name: 'dot1dBasePortIfIndex', type: T.Integer }], ['dot1dBasePort']);
+      for (const i of s.ifaces) this.mib.addTableRow('dot1dBasePortTable', [i.index, i.index]);
+      const idx = ['f', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6'];
+      this.table('dot1qTpFdbTable', '1.3.6.1.2.1.17.7.1.2.2.1', [
+        { number: 2, name: 'dot1qTpFdbPort', type: T.Integer }, { number: 3, name: 'dot1qTpFdbStatus', type: T.Integer },
+        ...idx.map((n, i) => ({ number: 90 + i, name: 'fdb_' + n, type: T.Integer, maxAccess: NA }))], idx.map(n => 'fdb_' + n));
+      for (const e of s.fdb) this.mib.addTableRow('dot1qTpFdbTable', [e.ifIndex, 3, e.vlan, ...mac(e.mac)]);
+    }
+    if (s.arp?.length) {
+      this.table('ipNetToMediaTable', '1.3.6.1.2.1.4.22.1', [
+        { number: 1, name: 'ipNetToMediaIfIndex', type: T.Integer }, { number: 2, name: 'ipNetToMediaPhysAddress', type: T.OctetString },
+        { number: 3, name: 'ipNetToMediaNetAddress', type: T.IpAddress }, { number: 4, name: 'ipNetToMediaType', type: T.Integer }], ['ipNetToMediaIfIndex', 'ipNetToMediaNetAddress']);
+      for (const a of s.arp) this.mib.addTableRow('ipNetToMediaTable', [a.ifIndex, mac(a.mac), a.ip, 3]);
+    }
+    if (s.lldp?.length) {
+      this.table('lldpLocPortTable', '1.0.8802.1.1.2.1.3.7.1', [{ number: 1, name: 'lldpLocPortNum', type: T.Integer, maxAccess: NA }, { number: 2, name: 'lldpLocPortIdSubtype', type: T.Integer }, { number: 3, name: 'lldpLocPortId', type: T.OctetString }, { number: 4, name: 'lldpLocPortDesc', type: T.OctetString }], ['lldpLocPortNum']);
+      for (const l of s.lldp) { const nm = s.ifaces.find(i => i.index === l.ifIndex)?.name ?? ''; this.mib.addTableRow('lldpLocPortTable', [l.ifIndex, 5, nm, nm]); }
+      this.table('lldpRemTable', '1.0.8802.1.1.2.1.4.1.1', [
+        { number: 1, name: 'lldpRemTimeMark', type: T.Integer, maxAccess: NA }, { number: 2, name: 'lldpRemLocalPortNum', type: T.Integer, maxAccess: NA }, { number: 3, name: 'lldpRemIndex', type: T.Integer, maxAccess: NA },
+        { number: 4, name: 'lldpRemChassisIdSubtype', type: T.Integer }, { number: 5, name: 'lldpRemChassisId', type: T.OctetString }, { number: 6, name: 'lldpRemPortIdSubtype', type: T.Integer }, { number: 7, name: 'lldpRemPortId', type: T.OctetString },
+        { number: 8, name: 'lldpRemPortDesc', type: T.OctetString }, { number: 9, name: 'lldpRemSysName', type: T.OctetString }, { number: 12, name: 'lldpRemSysCapEnabled', type: T.OctetString }], ['lldpRemTimeMark', 'lldpRemLocalPortNum', 'lldpRemIndex']);
+      s.lldp.forEach((l, i) => this.mib.addTableRow('lldpRemTable', [0, l.ifIndex, i + 1, 4, l.name, 5, l.port, l.port, l.name, Buffer.from([l.caps, 0])]));
+    }
+    if (s.cdp?.length) {
+      this.table('cdpCacheTable', '1.3.6.1.4.1.9.9.23.1.2.1.1', [
+        { number: 1, name: 'cdpCacheIfIndex', type: T.Integer, maxAccess: NA }, { number: 2, name: 'cdpCacheDeviceIndex', type: T.Integer, maxAccess: NA },
+        { number: 4, name: 'cdpCacheAddress', type: T.OctetString }, { number: 6, name: 'cdpCacheDeviceId', type: T.OctetString }, { number: 7, name: 'cdpCacheDevicePort', type: T.OctetString },
+        { number: 8, name: 'cdpCachePlatform', type: T.OctetString }, { number: 9, name: 'cdpCacheCapabilities', type: T.OctetString }], ['cdpCacheIfIndex', 'cdpCacheDeviceIndex']);
+      s.cdp.forEach((d, i) => this.mib.addTableRow('cdpCacheTable', [d.ifIndex, i + 1, Buffer.from((d.ip ?? '0.0.0.0').split('.').map(Number)), d.id, d.port, d.platform, Buffer.from([0, 0, 0, d.caps])]));
+    }
   }
 
   private tick(): void {
@@ -182,10 +242,10 @@ export class VirtualDevice {
       this.mib.setTableSingleCell('ifXTable', 10, [i.index], u64(oo));
     }
     for (const ids of this.qosIds) {
-      const q = this.spec.qos.find(x => x.ifIndex === ids.ifIndex)!;
+      const q = this.spec.qos[ids.qi];
       for (const c of q.classes) {
-        const k = `${q.ifIndex}/${c.name}`; const st = this.cls.get(k)!;
-        const dp = this.overrides.get(k) ?? c.dropPct;
+        const k = this.qosKey(q, ids.qi, c.name); const st = this.cls.get(k)!;
+        const dp = this.overrides.get(`${q.ifIndex}/${c.name}`) ?? c.dropPct;
         const pkts = BigInt(Math.round(c.pps * dt)); const bytes = pkts * BigInt(c.pktBytes);
         const drop = BigInt(Math.round(Number(pkts) * dp / 100)); const dropB = drop * BigInt(c.pktBytes);
         st.pre += pkts; st.preB += bytes; st.postB += bytes - dropB; st.drop += drop; st.dropB += dropB;

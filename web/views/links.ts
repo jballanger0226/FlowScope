@@ -3,24 +3,35 @@ import { get, qs } from '../api.js';
 import { redraw, go } from '../state.js';
 import { bar, btn, chip, empty, heading, lineChart, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
 import { ago, bps, bytes, clock, dayClock, dur, num, pct, debounce } from '../util.js';
+import { post } from '../api.js';
 
-interface Cls { cls: string; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
+interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
 interface Iface {
-  ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null;
+  ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
+  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number;
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; flagged: boolean;
 }
-interface Dev { id: number; name: string; ip: string; role: string; status: string; lastOk: number | null; lastError: string | null; profile: string; interfaces: Iface[] }
+interface Dev { id: number; name: string; ip: string; role: string; status: string; lastOk: number | null; lastError: string | null; profile: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; interfaces: Iface[] }
 interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number }; mibs: { name: string; what: string }[] }
 interface SeriesRes {
   util: { step: number; points: { ts: number; utilIn: number; utilOut: number; inBps: number; outBps: number; disc: number; err: number }[] };
   classes: { cls: string; dscps: number[]; bw: string | null; points: { ts: number; dropPct: number; dropBps: number; dropPps: number; sentBps: number; qdepth: number }[] }[];
   step: number; tier: string;
 }
+interface PortHost { mac: string; vlan: number; vlanName: string; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean }
+interface Neighbor { proto: string; name: string; port: string; ip: string; kind: string; caps: string }
+interface HostsRes { hosts: PortHost[]; neighbors: Neighbor[]; readAt: number | null; note: string; tracking: boolean }
+interface Attach { devId: number; dev: string; ifIndex: number; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; lastSeen: number; active: boolean; mac: string; confidence?: 'high' | 'medium' | 'low' }
+interface Located { query: string; ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
 interface StreamRow { id: string; srcIp: string; dstIp: string; sport: number; dport: number; app: string; protoName: string; bytes: number; qosChanged: boolean }
 
 let data: Overview | null = null; let loadError = ''; let loading = false;
 let search = '';
+let ifSearch = '';
+let hostsRes: HostsRes | null = null; let hostsLoading = false; let hostsError = '';
+let findQ = ''; let found: Located | null = null; let findError = ''; let finding = false;
+let readingHosts = false; let readMsg = '';
 let devId = 0; let ifIndex = 0;
 let graphRange = '6h';
 let dropThr = 1;
@@ -67,8 +78,9 @@ function resolvePending(): void {
 }
 
 function select_(d: number, i: number): void {
-  devId = d; ifIndex = i; series = null; streams = []; streamsTotal = 0; seriesError = '';
-  void loadSeries(); void loadStreams();
+  if (d !== devId) ifSearch = '';
+  devId = d; ifIndex = i; series = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
+  void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
 }
 
@@ -91,6 +103,33 @@ async function loadStreams(): Promise<void> {
     if (d === devId && i === ifIndex) { streams = r.rows; streamsTotal = r.total; }
   } catch { if (d === devId && i === ifIndex) { streams = []; streamsTotal = 0; } }
   streamsLoading = false; redraw();
+}
+
+let hseq = 0;
+async function loadHosts(): Promise<void> {
+  if (!devId || !ifIndex) return;
+  const my = ++hseq; hostsLoading = true; hostsError = ''; redraw();
+  try {
+    const r = await get<HostsRes>('/api/links/hosts' + qs({ dev: devId, if: ifIndex }));
+    if (my === hseq) hostsRes = r;
+  } catch (e) { if (my === hseq) { hostsRes = null; hostsError = (e as Error).message; } }
+  if (my === hseq) { hostsLoading = false; redraw(); }
+}
+async function readHostsNow(): Promise<void> {
+  if (!devId) return;
+  readingHosts = true; readMsg = ''; redraw();
+  try {
+    const r = await post<{ macs: number; arp: number; neighbors: number; note: string }>(`/api/devices/${devId}/read-hosts`, {});
+    readMsg = `Read ${num(r.macs)} MAC addresses, ${num(r.arp)} ARP entries and ${num(r.neighbors)} neighbours.${r.note ? ' ' + r.note : ''}`;
+    await load(true); await loadHosts();
+  } catch (e) { readMsg = (e as Error).message; }
+  readingHosts = false; redraw();
+}
+async function findHost(): Promise<void> {
+  const q = findQ.trim(); if (!q) return;
+  finding = true; findError = ''; redraw();
+  try { found = await get<Located>('/api/hosts/locate' + qs({ q })); } catch (e) { found = null; findError = (e as Error).message; }
+  finding = false; redraw();
 }
 
 const searchSoon = debounce(() => redraw(), 120);
@@ -136,6 +175,7 @@ function sidebar(): VNode {
       attn.length ? h('div', { class: 'cards' }, attn.slice(0, 8).map(a => h('button', { key: a.dev.id + '/' + a.itf.ifIndex, type: 'button', class: 'cardbtn', 'aria-pressed': a.dev.id === devId && a.itf.ifIndex === ifIndex, onclick: () => select_(a.dev.id, a.itf.ifIndex) },
         h('span', { class: 't' }, `${a.dev.name} · ${a.itf.name}`),
         h('span', { class: 's' }, [a.itf.worstDropPct !== null && a.itf.worstDropPct >= d.thresholds.drop ? `drops ${pct(a.itf.worstDropPct, 2)}` : null, `util ${pct(Math.max(a.itf.utilIn ?? 0, a.itf.utilOut ?? 0), 0)}`].filter(Boolean).join(' · '))))) : h('span', { class: 'dim' }, 'Nothing is over its threshold right now.')),
+    locator(),
     h('div', { class: 'panel col', style: 'gap:8px' },
       h('h3', null, 'What is polled'),
       h('p', { class: 'muted' }, 'FlowScope reads these SNMP tables every minute from each device it can.'),
@@ -144,19 +184,65 @@ function sidebar(): VNode {
 
 /* ------------------------------------------------------------------ interface & class tables */
 
+const vlanIn = (list: string, v: number) => !!list && (list === 'all' || list.split(',').some(p => { const [lo, hi] = p.split('-').map(Number); return hi === undefined ? lo === v : v >= lo && v <= hi; }));
+const vlanLabel = (id: number | null, name: string) => (id ? (name ? `${id} ${name}` : String(id)) : '');
+
+/** Words describing the VLAN(s) of a port, shown in the table and searched by the box above it. */
+function vlanCell(i: Iface): VNode {
+  if (i.isVlanIf || i.portMode === 'svi') return h('span', { class: 'muted' }, i.vlan ? `SVI for VLAN ${vlanLabel(i.vlan, i.vlanName)}` : 'SVI');
+  if (i.portMode === 'trunk') return h('span', { class: 'col', style: 'gap:1px' }, h('span', null, h('span', { class: 'tag' }, 'trunk'), i.vlan ? ` native ${vlanLabel(i.vlan, i.vlanName)}` : ''), i.vlanList ? h('span', { class: 'dim mono', style: 'font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: `Allowed VLANs: ${i.vlanList}` }, `allowed ${i.vlanList}`) : null);
+  if (i.portMode === 'routed') return h('span', { class: 'muted' }, 'routed port');
+  if (i.vlan) return h('span', { class: 'col', style: 'gap:1px' }, h('span', { style: 'font-weight:600' }, vlanLabel(i.vlan, i.vlanName)), i.voiceVlan ? h('span', { class: 'dim', style: 'font-size:11px' }, `voice ${vlanLabel(i.voiceVlan, i.voiceVlanName)}`) : null);
+  return h('span', { class: 'dim' }, '—');
+}
+
+/** One search term against one interface. A bare number means a VLAN id (access, voice, native or allowed on a trunk) or a number in the port name. */
+function termMatches(i: Iface, raw: string): boolean {
+  let t = raw.toLowerCase();
+  const vlanOnly = /^v(?:lan)?:/.test(t);
+  if (vlanOnly) t = t.replace(/^v(?:lan)?:/, '');
+  if (!t) return true;
+  if (/^\d{1,4}$/.test(t)) {
+    const n = Number(t);
+    if (i.vlan === n || i.voiceVlan === n || (i.portMode === 'trunk' && vlanIn(i.vlanList, n))) return true;
+    if (vlanOnly) return false;
+    return i.name.split(/\D+/).includes(t) || i.alias.split(/\D+/).includes(t);
+  }
+  const vtext = `${vlanLabel(i.vlan, i.vlanName)} ${vlanLabel(i.voiceVlan, i.voiceVlanName)} ${i.vlanName} ${i.voiceVlanName}`.toLowerCase();
+  if (vlanOnly) return vtext.includes(t) || (t === 'trunk' && i.portMode === 'trunk');
+  return `${i.name} ${i.alias} ${vtext} ${i.portMode} ${i.policy ?? ''} ${i.policyIn ?? ''}`.toLowerCase().includes(t);
+}
+function filterIfaces(list: Iface[]): Iface[] {
+  const terms = ifSearch.trim().split(/\s+/).filter(Boolean);
+  return terms.length ? list.filter(i => terms.every(t => termMatches(i, t))) : list;
+}
+
+function policyCell(i: Iface): VNode {
+  if (!i.policy && !i.policyIn) return h('span', { class: 'muted', style: 'font-size:12px' }, '—');
+  return h('span', { class: 'col', style: 'gap:1px;font-size:12px' }, i.policy ? h('span', { class: 'muted', title: 'Policy applied to traffic leaving the port' }, 'out ', h('b', null, i.policy)) : null, i.policyIn ? h('span', { class: 'muted', title: 'Policy applied to traffic entering the port' }, 'in ', h('b', null, i.policyIn)) : null);
+}
+
 function ifTable(dev: Dev): VNode {
-  const cols = 'minmax(120px,1fr) minmax(140px,1.2fr) 80px 70px 150px 150px 90px 120px';
-  return h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:960px` },
-    h('div', { class: 'tr head' }, ...['Interface', 'Description', 'Speed', 'State', 'In', 'Out', 'Discards', 'Queue policy'].map(t => h('span', null, t))),
-    h('div', { class: 'scroll' }, dev.interfaces.map(i => h('button', { key: i.ifIndex, type: 'button', class: 'tr', 'aria-pressed': i.ifIndex === ifIndex, onclick: () => select_(dev.id, i.ifIndex) },
-      h('span', { style: 'font-weight:600' }, i.name, i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
-      h('span', { class: 'muted' }, i.alias || '—'),
-      h('span', { class: 'mono', style: 'font-size:12px' }, i.speedMbps ? (i.speedMbps >= 1000 ? i.speedMbps / 1000 + ' G' : i.speedMbps + ' M') : '—'),
-      h('span', null, i.oper === 'up' ? statusEl('ok', 'up') : statusEl(i.oper === 'down' ? 'bad' : 'off', i.oper)),
-      utilCell(i.utilIn, i.inBps), utilCell(i.utilOut, i.outBps),
-      h('span', { class: 'mono', style: 'font-size:12px' }, num(i.disc + i.err)),
-      h('span', { class: 'muted', style: 'font-size:12px' }, i.policy ?? '—'))),
-      !dev.interfaces.length ? empty('This device has not reported any interfaces yet.') : null)));
+  const cols = 'minmax(88px,0.8fr) minmax(120px,1fr) minmax(140px,1.1fr) 52px 58px 118px 118px 64px minmax(84px,0.8fr)';
+  const rows = filterIfaces(dev.interfaces);
+  return h('div', { class: 'col', style: 'gap:8px' },
+    h('div', { class: 'row', style: 'gap:10px' },
+      h('div', { style: 'flex:1 1 320px;max-width:460px' }, textInput(ifSearch, v => { ifSearch = v; }, { placeholder: 'Search interface, description or VLAN', aria: 'Search interfaces', width: '100%' })),
+      ifSearch.trim() ? btn('Clear', { kind: 'ghost', small: true, onclick: () => { ifSearch = ''; redraw(); } }) : null,
+      h('span', { class: 'muted', role: 'status', 'aria-live': 'polite' }, ifSearch.trim() ? `${rows.length} of ${dev.interfaces.length} interfaces` : `${dev.interfaces.length} interfaces`),
+      h('span', { class: 'dim', style: 'font-size:12px' }, 'Words must all match. A number is a VLAN id; vlan:20 matches only VLANs.')),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1000px` },
+      h('div', { class: 'tr head' }, ...['Interface', 'Description', 'VLAN', 'Speed', 'State', 'In', 'Out', 'Discards', 'Service policy'].map(t => h('span', null, t))),
+      h('div', { class: 'scroll' }, rows.map(i => h('button', { key: i.ifIndex, type: 'button', class: 'tr', 'aria-pressed': i.ifIndex === ifIndex, onclick: () => select_(dev.id, i.ifIndex) },
+        h('span', { style: 'font-weight:600' }, i.name, i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
+        h('span', { class: 'muted' }, i.alias || '—'),
+        vlanCell(i),
+        h('span', { class: 'mono', style: 'font-size:12px' }, i.speedMbps ? (i.speedMbps >= 1000 ? i.speedMbps / 1000 + ' G' : i.speedMbps + ' M') : '—'),
+        h('span', null, i.oper === 'up' ? statusEl('ok', 'up') : statusEl(i.oper === 'down' ? 'bad' : 'off', i.oper)),
+        utilCell(i.utilIn, i.inBps), utilCell(i.utilOut, i.outBps),
+        h('span', { class: 'mono', style: 'font-size:12px' }, num(i.disc + i.err)),
+        policyCell(i))),
+        !dev.interfaces.length ? empty('This device has not reported any interfaces yet.') : !rows.length ? empty('No interface matches that search.') : null))));
 }
 function utilCell(u: number | null, b: number | null): VNode {
   return h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, u === null ? h('span', { class: 'dim' }, 'no data') : [bar(u), h('span', { class: 'mono', style: 'font-size:12px' }, pct(u, 0) + ' ', h('span', { class: 'dim' }, bps(b)))]);
@@ -167,12 +253,57 @@ function classTable(itf: Iface): VNode {
   return h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:780px` },
     h('div', { class: 'tr head' }, ...['Class', 'DSCP values', 'Guaranteed', 'Sent', 'Drop %', 'Dropped', 'Queue depth'].map(t => h('span', null, t))),
     itf.classes.map(c => h('div', { key: c.cls, class: 'tr' },
-      h('span', { style: 'font-weight:600' }, c.cls), h('span', { class: 'mono muted', style: 'font-size:12px' }, dscpText(c.dscps)),
+      h('span', { style: 'font-weight:600' }, c.label, ' ', c.dir === 'in' ? h('span', { class: 'tag', title: 'This class belongs to the input service policy' }, 'in') : null), h('span', { class: 'mono muted', style: 'font-size:12px' }, dscpText(c.dscps)),
       h('span', { class: 'mono', style: 'font-size:12px' }, c.bw ?? '—'), h('span', { class: 'mono', style: 'font-size:12px' }, bps(c.sentBps)),
       h('span', { class: 'mono', style: `font-size:12px;color:${(c.dropPct ?? 0) >= (data?.thresholds.drop ?? 1) ? 'var(--bad)' : 'inherit'}` }, c.dropPct === null ? '—' : pct(c.dropPct, 2)),
       h('span', { class: 'mono', style: 'font-size:12px' }, c.dropPkts ? `${num(c.dropPkts)} pkts · ${bytes(c.dropBytes)}` : '0'),
       h('span', { class: 'mono', style: 'font-size:12px' }, c.qdepth === null ? '—' : num(c.qdepth)))),
-    !itf.classes.length ? h('div', { class: 'empty' }, itf.policy ? 'No class statistics have been read from this interface yet.' : 'No output queue policy is attached to this interface, or the device does not publish CISCO-CLASS-BASED-QOS-MIB.') : null));
+    !itf.classes.length ? h('div', { class: 'empty' }, itf.policy || itf.policyIn ? 'No class statistics have been read from this interface yet.' : 'No service policy was found on this interface, or the device does not publish CISCO-CLASS-BASED-QOS-MIB.') : null));
+}
+
+/* ------------------------------------------------------------------ hosts on a port */
+
+const KIND_TEXT: Record<string, string> = { infra: 'switch or router', phone: 'IP phone', ap: 'wireless access point', host: 'end host', unknown: 'unknown device' };
+
+function hostsPanel(dev: Dev, itf: Iface): VNode {
+  const r = hostsRes;
+  const head = h('div', { class: 'row', style: 'justify-content:space-between' },
+    h('div', { class: 'col', style: 'gap:2px' }, h('b', null, `Hosts on ${itf.name}`),
+      h('span', { class: 'muted', style: 'font-size:12px' }, dev.hostsAt ? `From the MAC address, ARP and LLDP/CDP tables of ${dev.name}, last read ${ago(dev.hostsAt)}.` : 'From the MAC address, ARP and LLDP/CDP tables. Not read yet from this device.')),
+    h('div', { class: 'row' }, readMsg ? h('span', { class: 'muted', style: 'font-size:12px', role: 'status' }, readMsg) : null, btn(readingHosts ? 'Reading…' : 'Read tables now', { small: true, kind: 'ghost', disabled: readingHosts, title: 'Ask the device for its MAC, ARP and neighbour tables right now', onclick: () => void readHostsNow() })));
+  return h('div', { class: 'col', style: 'gap:8px' }, head,
+    dev.hostsNote ? note(dev.hostsNote, 'warn') : null,
+    hostsLoading && !r ? spinner('Loading hosts…') : hostsError ? note(hostsError, 'bad', true) : null,
+    r && !r.tracking ? note('Host tracking is turned off, so no tables are being read automatically. Tables can still be read with the button above.', 'info') : null,
+    r && r.neighbors.length ? h('div', { class: 'row', style: 'gap:8px' }, r.neighbors.map(n => h('span', { key: n.proto + n.name + n.port, class: 'chip ' + (n.kind === 'infra' ? 'info' : 'default'), title: `${n.proto.toUpperCase()} neighbour${n.ip ? ' ' + n.ip : ''}` },
+      `${n.proto.toUpperCase()}: ${n.name || n.ip || 'unnamed'}${n.port ? ' · ' + n.port : ''} (${KIND_TEXT[n.kind] ?? n.kind})`))) : null,
+    r && r.neighbors.some(n => n.kind === 'infra') ? h('span', { class: 'dim', style: 'font-size:12px' }, 'This port leads to another switch or router. Addresses below are just what that device has forwarded, not hosts plugged in here.') : null,
+    r && r.hosts.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1fr) minmax(130px,1fr) minmax(140px,1fr) 110px 110px;--w:700px' },
+      h('div', { class: 'tr head' }, ...['MAC address', 'IP address', 'VLAN', 'First seen', 'Last seen'].map(t => h('span', null, t))),
+      h('div', { class: 'scroll', style: 'max-height:240px' }, r.hosts.slice(0, 100).map(x => h('div', { key: x.mac + x.vlan, class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.mac), h('span', { class: 'mono', style: 'font-size:12px' }, x.ips.join(', ') || '—'),
+        h('span', null, vlanLabel(x.vlan, x.vlanName) || '—'), h('span', { class: 'muted', style: 'font-size:12px' }, dayClock(x.firstSeen)),
+        h('span', { class: x.active ? 'muted' : 'dim', style: 'font-size:12px' }, x.active ? ago(x.lastSeen) : 'gone ' + ago(x.lastSeen))))))) : null,
+    r && !r.hosts.length && r.tracking && !hostsError ? h('span', { class: 'dim' }, dev.hostsAt ? 'No MAC addresses have been learned on this port.' : 'Nothing read yet. The first read happens within a few minutes of adding the device, or press Read tables now.') : null,
+    r && r.hosts.length > 100 ? h('span', { class: 'dim' }, `${num(r.hosts.length)} addresses; the newest 100 are shown.`) : null);
+}
+
+/** Sidebar box: type an IP or MAC address to see which switch port it is plugged in to. */
+function locator(): VNode {
+  const f = found;
+  return h('div', { class: 'panel col', style: 'gap:10px' },
+    h('h3', null, 'Find a host'),
+    h('p', { class: 'muted' }, 'Where is an IP or MAC address plugged in? Answered from the switches\' MAC address and ARP tables.'),
+    h('div', { class: 'row', style: 'flex-wrap:nowrap' }, textInput(findQ, v => { findQ = v; }, { placeholder: '10.1.20.5 or aa:bb:cc:dd:ee:ff', aria: 'IP or MAC address to find', mono: true, onenter: () => void findHost() }), btn(finding ? '…' : 'Find', { kind: 'primary', disabled: finding || !findQ.trim(), onclick: () => void findHost() })),
+    findError ? note(findError, 'bad', true) : null,
+    f ? h('div', { class: 'col', style: 'gap:6px' },
+      f.attach ? h('button', { type: 'button', class: 'cardbtn', onclick: () => select_(f.attach!.devId, f.attach!.ifIndex) },
+        h('span', { class: 't' }, `${f.attach.dev} · ${f.attach.ifName}`),
+        h('span', { class: 's' }, [f.attach.vlan ? `VLAN ${f.attach.vlan}` : null, `${f.attach.macCount} address${f.attach.macCount === 1 ? '' : 'es'} on the port`, f.attach.confidence ? `${f.attach.confidence} confidence` : null].filter(Boolean).join(' · '))) : null,
+      f.macs.length ? h('span', { class: 'muted', style: 'font-size:12px' }, 'MAC ', h('span', { class: 'mono' }, f.macs.join(', ')), f.ip ? ` · IP ${f.ip}` : '') : null,
+      f.note ? h('span', { class: 'muted', style: 'font-size:12px' }, f.note) : null,
+      f.others.length ? h('details', null, h('summary', { class: 'muted' }, `Also seen on ${f.others.length} other port${f.others.length === 1 ? '' : 's'}`),
+        h('div', { class: 'col', style: 'gap:2px;padding-top:4px' }, f.others.map(o => h('span', { key: o.devId + '/' + o.ifIndex, class: 'muted', style: 'font-size:12px' }, `${o.dev} · ${o.ifName}${o.edge ? '' : ' (uplink)'}`)))) : null) : null);
 }
 
 /* ------------------------------------------------------------------ graphs */
@@ -261,9 +392,13 @@ export function render(): VNode {
         ifTable(dev)) : null,
       dev && itf ? h('section', { 'aria-label': 'Selected interface', class: 'panel col', style: 'gap:16px' },
         h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, `${itf.name}${itf.alias ? ' · ' + itf.alias : ''}`),
-          h('span', { class: 'muted' }, `${itf.speedMbps ? (itf.speedMbps >= 1000 ? itf.speedMbps / 1000 + ' Gbps' : itf.speedMbps + ' Mbps') : 'speed unknown'}${itf.policy ? ' · output policy ' + itf.policy : ''}`)),
+          h('span', { class: 'muted' }, [itf.speedMbps ? (itf.speedMbps >= 1000 ? itf.speedMbps / 1000 + ' Gbps' : itf.speedMbps + ' Mbps') : 'speed unknown',
+            itf.portMode === 'trunk' ? `trunk, native VLAN ${vlanLabel(itf.vlan, itf.vlanName) || 'unknown'}${itf.vlanList ? ', allowed ' + itf.vlanList : ''}` : itf.vlan ? `${itf.isVlanIf ? 'SVI for ' : ''}VLAN ${vlanLabel(itf.vlan, itf.vlanName)}${itf.voiceVlan ? ', voice VLAN ' + vlanLabel(itf.voiceVlan, itf.voiceVlanName) : ''}` : null,
+            itf.policy ? 'output policy ' + itf.policy : null, itf.policyIn ? 'input policy ' + itf.policyIn : null].filter(Boolean).join(' · '))),
           h('div', { class: 'row' }, itf.flagged ? chip('Needs attention', 'warn') : chip('Within thresholds', 'ok'))),
+        dev.qosNote ? note(dev.qosNote, 'warn') : null,
         classTable(itf),
+        itf.isVlanIf ? null : hostsPanel(dev, itf),
         seriesLoading && !series ? spinner('Loading the graphs…') : seriesError ? note(seriesError, 'bad', true) : series ? graphs(series, itf) : null,
         streamsPanel(dev, itf)) : dev ? h('div', { class: 'panel' }, empty('Select an interface to see its queues and graphs.')) : null)));
 }

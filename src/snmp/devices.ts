@@ -2,7 +2,8 @@ import net from 'node:net';
 import type { ConfigDb } from '../db/configdb.js';
 import type { CredentialStore } from './creds.js';
 import { SnmpClient, type SnmpTarget } from './client.js';
-import { guessDscps, probe, type Probe } from './collect.js';
+import { classLabel, guessDscps, perInterface, policyText, probe, type Probe } from './collect.js';
+import type { PortVlan } from './ports.js';
 import type { TsStore } from '../store/types.js';
 import type { AppLog } from '../logger.js';
 
@@ -11,15 +12,20 @@ export class DeviceError extends Error { constructor(m: string, readonly status 
 export interface DeviceRow {
   id: number; name: string; ip: string; port: number; cred_id: number; interval_sec: number; polling: number; src: string; added_at: number;
   sys_name: string | null; sys_descr: string | null; sys_object_id: string | null; role: string | null; profile: string | null;
-  last_poll: number | null; last_ok: number | null; last_error: string | null;
+  last_poll: number | null; last_ok: number | null; last_error: string | null; qos_note: string | null; hosts_at: number | null; hosts_note: string | null;
 }
 export interface DeviceView {
   id: number; name: string; ip: string; port: number; credId: number; credName: string; intervalSec: number; polling: boolean; source: string; addedAt: number;
   sysName: string; sysDescr: string; role: string; profile: string; lastPoll: number | null; lastOk: number | null; lastError: string | null;
   status: 'ok' | 'error' | 'paused' | 'pending'; interfaces: number; policies: number; classes: number; addresses: string[];
+  /** What the last discovery found in the QoS tables (or why they could not be read). */
+  qosNote: string; hostsAt: number | null; hostsNote: string;
 }
 export interface InterfaceView {
   devId: number; ifIndex: number; name: string; descr: string; alias: string; speedMbps: number; oper: number; policy: string | null; direction: string | null;
+  /** Policy applied to incoming traffic; `policy` is the one for outgoing traffic. */
+  policyIn: string | null;
+  ifType: number; portMode: string; vlan: number; voiceVlan: number; vlanList: string;
   classes: { cls: string; queue: string | null; dscps: number[]; bw: string | null }[];
 }
 
@@ -80,7 +86,7 @@ export class DeviceService {
 
   list(): DeviceView[] {
     const creds = new Map(this.creds.list().map(c => [c.id, c.name]));
-    const ifc = new Map((this.cdb.db.prepare('SELECT dev_id, COUNT(*) AS n, COUNT(DISTINCT policy) AS p FROM interfaces GROUP BY dev_id').all() as unknown as { dev_id: number; n: number; p: number }[]).map(r => [r.dev_id, r]));
+    const ifc = new Map((this.cdb.db.prepare('SELECT dev_id, COUNT(*) AS n, COUNT(DISTINCT policy) + COUNT(DISTINCT policy_in) AS p FROM interfaces GROUP BY dev_id').all() as unknown as { dev_id: number; n: number; p: number }[]).map(r => [r.dev_id, r]));
     const cls = new Map((this.cdb.db.prepare('SELECT dev_id, COUNT(*) AS n FROM class_defs GROUP BY dev_id').all() as unknown as { dev_id: number; n: number }[]).map(r => [r.dev_id, r.n]));
     const addr = new Map<number, string[]>();
     for (const r of this.cdb.db.prepare('SELECT dev_id, ip FROM device_ips ORDER BY ip').all() as unknown as { dev_id: number; ip: string }[]) { const a = addr.get(r.dev_id); if (a) a.push(r.ip); else addr.set(r.dev_id, [r.ip]); }
@@ -89,31 +95,40 @@ export class DeviceService {
       source: d.src, addedAt: d.added_at, sysName: d.sys_name ?? '', sysDescr: d.sys_descr ?? '', role: d.role ?? 'device', profile: d.profile ?? 'generic',
       lastPoll: d.last_poll, lastOk: d.last_ok, lastError: d.last_error,
       status: d.polling !== 1 ? 'paused' : d.last_poll === null ? 'pending' : d.last_error ? 'error' : 'ok',
-      interfaces: ifc.get(d.id)?.n ?? 0, policies: ifc.get(d.id)?.p ?? 0, classes: cls.get(d.id) ?? 0, addresses: addr.get(d.id) ?? []
+      interfaces: ifc.get(d.id)?.n ?? 0, policies: ifc.get(d.id)?.p ?? 0, classes: cls.get(d.id) ?? 0, addresses: addr.get(d.id) ?? [],
+      qosNote: d.qos_note ?? '', hostsAt: d.hosts_at, hostsNote: d.hosts_note ?? ''
     }));
   }
 
   interfaces(devId: number): InterfaceView[] {
-    const ifs = this.cdb.db.prepare('SELECT * FROM interfaces WHERE dev_id = ? ORDER BY if_index').all(devId) as unknown as { dev_id: number; if_index: number; name: string; descr: string | null; alias: string | null; speed_mbps: number; oper_status: number; policy: string | null }[];
+    const ifs = this.cdb.db.prepare('SELECT * FROM interfaces WHERE dev_id = ? ORDER BY if_index').all(devId) as unknown as { dev_id: number; if_index: number; name: string; descr: string | null; alias: string | null; speed_mbps: number; oper_status: number; policy: string | null; policy_in: string | null; if_type: number; port_mode: string; vlan: number; voice_vlan: number; vlan_list: string }[];
     const cls = this.cdb.db.prepare('SELECT * FROM class_defs WHERE dev_id = ? ORDER BY if_index, rowid').all(devId) as unknown as { if_index: number; cls: string; queue: string | null; dscps: string; bw: string | null }[];
     return ifs.map(i => ({
-      devId, ifIndex: i.if_index, name: i.name, descr: i.descr ?? '', alias: i.alias ?? '', speedMbps: i.speed_mbps, oper: i.oper_status, policy: i.policy, direction: i.policy ? 'output' : null,
+      devId, ifIndex: i.if_index, name: i.name, descr: i.descr ?? '', alias: i.alias ?? '', speedMbps: i.speed_mbps, oper: i.oper_status, policy: i.policy, policyIn: i.policy_in, direction: i.policy ? 'output' : null,
+      ifType: i.if_type, portMode: i.port_mode, vlan: i.vlan, voiceVlan: i.voice_vlan, vlanList: i.vlan_list,
       classes: cls.filter(c => c.if_index === i.if_index).map(c => ({ cls: c.cls, queue: c.queue, dscps: JSON.parse(c.dscps) as number[], bw: c.bw }))
     }));
   }
 
-  /** Applies a probe result: interfaces, addresses, VLAN names and QoS classes. Admin edits to class DSCP lists are kept. */
+  /** Applies a probe result: interfaces, addresses, VLAN names, port VLANs and QoS classes. Admin edits to class DSCP lists are kept. */
   private apply(id: number, p: Probe): void {
     this.cdb.tx(() => {
       const db = this.cdb.db;
       const seen = new Set<number>();
-      const polByIf = new Map<number, { name: string }>();
-      for (const q of p.qos) if (q.direction === 'output') polByIf.set(q.ifIndex, { name: q.policyName });
+      // names of the policies attached to each interface, one list per direction
+      const polOut = new Map<number, string[]>(), polIn = new Map<number, string[]>();
+      for (const q of p.qos) {
+        if (!perInterface(q)) continue;
+        const m = q.direction === 'output' ? polOut : polIn;
+        const a = m.get(q.ifIndex) ?? []; if (!a.includes(policyText(q))) a.push(policyText(q)); m.set(q.ifIndex, a);
+      }
       for (const i of p.ifaces) {
         seen.add(i.index);
-        db.prepare(`INSERT INTO interfaces(dev_id, if_index, name, descr, alias, speed_mbps, oper_status, policy) VALUES (?,?,?,?,?,?,?,?)
-          ON CONFLICT(dev_id, if_index) DO UPDATE SET name=excluded.name, descr=excluded.descr, alias=excluded.alias, speed_mbps=excluded.speed_mbps, oper_status=excluded.oper_status, policy=excluded.policy`)
-          .run(id, i.index, i.name, i.descr, i.alias, i.speedMbps, i.oper, polByIf.get(i.index)?.name ?? null);
+        const pv = p.ports.get(i.index);
+        db.prepare(`INSERT INTO interfaces(dev_id, if_index, name, descr, alias, speed_mbps, oper_status, policy, policy_in, if_type, port_mode, vlan, voice_vlan, vlan_list) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(dev_id, if_index) DO UPDATE SET name=excluded.name, descr=excluded.descr, alias=excluded.alias, speed_mbps=excluded.speed_mbps, oper_status=excluded.oper_status, policy=excluded.policy, policy_in=excluded.policy_in,
+            if_type=excluded.if_type, port_mode=excluded.port_mode, vlan=excluded.vlan, voice_vlan=excluded.voice_vlan, vlan_list=excluded.vlan_list`)
+          .run(id, i.index, i.name, i.descr, i.alias, i.speedMbps, i.oper, polOut.get(i.index)?.join(', ') ?? null, polIn.get(i.index)?.join(', ') ?? null, i.type, pv?.mode ?? '', pv?.vlan ?? 0, pv?.voice ?? 0, pv?.allowed ?? '');
       }
       for (const r of db.prepare('SELECT if_index FROM interfaces WHERE dev_id = ?').all(id) as unknown as { if_index: number }[]) {
         if (!seen.has(r.if_index)) { db.prepare('DELETE FROM interfaces WHERE dev_id = ? AND if_index = ?').run(id, r.if_index); db.prepare('DELETE FROM class_defs WHERE dev_id = ? AND if_index = ?').run(id, r.if_index); }
@@ -122,14 +137,13 @@ export class DeviceService {
       for (const a of p.ips) db.prepare('INSERT OR REPLACE INTO device_ips(dev_id, ip, if_index) VALUES (?,?,?)').run(id, a.ip, a.ifIndex);
       const keep = new Set<string>();
       for (const q of p.qos) {
-        if (q.direction !== 'output') continue;
+        if (!perInterface(q)) continue;
         for (const c of q.classes) {
-          const key = `${q.ifIndex}/${c.name}`; keep.add(key);
-          const label = c.parentName && c.parentName !== 'class-default' ? `${c.parentName}/${c.name}` : c.name;
-          void label;
+          const label = classLabel(q, c.name);
+          const key = `${q.ifIndex}/${label}`; keep.add(key);
           db.prepare(`INSERT INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)
             ON CONFLICT(dev_id, if_index, cls) DO UPDATE SET queue=excluded.queue, bw=excluded.bw`)
-            .run(id, q.ifIndex, c.name, null, JSON.stringify(guessDscps(c.name)), c.bandwidth);
+            .run(id, q.ifIndex, label, null, JSON.stringify(guessDscps(c.name)), c.bandwidth);
         }
       }
       for (const r of db.prepare('SELECT if_index, cls FROM class_defs WHERE dev_id = ?').all(id) as unknown as { if_index: number; cls: string }[]) {
@@ -140,10 +154,18 @@ export class DeviceService {
         if (!ex) db.prepare("INSERT INTO vlans(id, name, source) VALUES (?,?,'snmp')").run(v.id, v.name);
         else if (ex.source === 'snmp') db.prepare('UPDATE vlans SET name = ? WHERE id = ?').run(v.name, v.id);
       }
-      db.prepare('UPDATE devices SET sys_name=?, sys_descr=?, sys_object_id=?, role=?, profile=? WHERE id=?')
-        .run(p.info.sysName, p.info.sysDescr, p.info.sysObjectId, guessRole(p.info.sysDescr, p.info.sysName), p.profile, id);
+      db.prepare('UPDATE devices SET sys_name=?, sys_descr=?, sys_object_id=?, role=?, profile=?, qos_note=? WHERE id=?')
+        .run(p.info.sysName, p.info.sysDescr, p.info.sysObjectId, guessRole(p.info.sysDescr, p.info.sysName), p.profile, p.qosNote, id);
     });
     this.invalidate();
+  }
+
+  /** Updates only the VLAN of each port. Used by the host-table cycle, which reads these anyway and needs them current. */
+  applyPorts(id: number, ports: Map<number, PortVlan>): void {
+    this.cdb.tx(() => {
+      const st = this.cdb.db.prepare('UPDATE interfaces SET port_mode = ?, vlan = ?, voice_vlan = ?, vlan_list = ? WHERE dev_id = ? AND if_index = ?');
+      for (const [ifx, v] of ports) st.run(v.mode, v.vlan, v.voice, v.allowed, id, ifx);
+    });
   }
 
   /** Contacts a device with the given credential set and returns what it reports. Nothing is stored. */
@@ -215,7 +237,7 @@ export class DeviceService {
     const d = this.row(id);
     if (!d) throw new DeviceError('No such device', 404);
     this.cdb.tx(() => {
-      for (const t of ['interfaces', 'class_defs', 'device_ips']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
+      for (const t of ['interfaces', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
       this.cdb.db.prepare('UPDATE exporters SET device_id = NULL WHERE device_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM devices WHERE id = ?').run(id);
     });

@@ -14,10 +14,14 @@ interface Hop {
   n: number; exporter: string; dev: string; role: string; inIf: string; outIf: string; frameSrc: string | null; frameDst: string | null; vlan: number | null; vlanName: string;
   ttl: number | null; ttlExpired: 'ttl' | 'icmp' | null; dscpInS: string; dscpOutS: string; qosChanged: boolean; pkts: number; bytes: number; linkMs: number | null; cumMs: number | null; policy: string | null;
   obs: { kind: string; text: string; severity: 'info' | 'warn' | 'bad' }[]; firstSeen: number; lastSeen: number;
+  outIfs?: string[]; sourcePort?: string | null; sourceConfirmed?: boolean;
 }
+interface Attach { dev: string; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; confidence?: 'high' | 'medium' | 'low' }
+interface Located { ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
+interface Multicast { group: string; source: string; location: Located | null }
 interface Detail {
   skey: string; initiator: { ip: string; port: number }; responder: { ip: string; port: number }; proto: number; protoName: string; app: string; t0: number; t1: number;
-  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null;
+  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null; multicast: Multicast | null;
   activity: { t0: number; t1: number; fwd: number[]; rev: number[] };
 }
 
@@ -229,6 +233,59 @@ function strip(hops: Hop[], d: Detail): VNode {
   return h('div', { class: 'panel flush' }, h('div', { class: 'strip', role: 'img', 'aria-label': `Path: ${[src.ip, ...hops.map(x => x.dev), dst.ip].join(' to ')}` }, items));
 }
 
+/**
+ * A multicast stream is one source and many receivers. Every switch on the tree sees the same packets, so the devices below are not ordered
+ * and none of them is "the" first hop. Where the source host is plugged in comes from the switches' MAC address tables, not from the flow records.
+ */
+function multicastStrip(hops: Hop[], d: Detail, m: Multicast): VNode {
+  const at = m.location?.attach ?? null;
+  const conf = at?.confidence;
+  const sourceCard = h('div', { class: 'node edge', style: 'min-width:220px' },
+    h('b', { class: 'mono' }, m.source), h('span', null, 'source host'),
+    at ? [h('span', { style: 'color:var(--text)' }, `Plugged in to ${at.dev} ${at.ifName}`), h('span', null, [at.vlan ? `VLAN ${at.vlan}` : null, conf ? `${conf} confidence` : null].filter(Boolean).join(' · '))]
+      : h('span', { style: 'color:var(--warn)' }, 'Location not known'));
+  const groupCard = h('div', { class: 'node edge', style: 'min-width:170px' }, h('b', { class: 'mono' }, m.group), h('span', null, 'multicast group'), h('span', { class: 'mono' }, d.responder.port ? ':' + d.responder.port : ''), h('span', null, d.app));
+  return h('div', { class: 'panel flush' }, h('div', { class: 'mctree', role: 'group', 'aria-label': `Multicast group ${m.group} from ${m.source}, seen by ${hops.length} device${hops.length === 1 ? '' : 's'}` },
+    sourceCard, h('div', { class: 'mclink', 'aria-hidden': 'true' }, h('i')), groupCard, h('div', { class: 'mclink', 'aria-hidden': 'true' }, h('i')),
+    h('div', { class: 'mcset' },
+      h('span', { class: 'eyebrow' }, `Seen by ${hops.length} device${hops.length === 1 ? '' : 's'} (in no particular order)`),
+      h('div', { class: 'mcgrid' }, hops.map((hp, i) => {
+        const here = !!hp.sourcePort;
+        return h('div', { key: i, class: 'node' + (here ? ' here' : '') + (hp.qosChanged ? ' remark' : '') },
+          h('b', null, hp.dev), h('span', null, hp.role),
+          h('span', { class: 'mono' }, `in ${hp.inIf || '—'}`),
+          h('span', { class: 'mono' }, hp.outIfs && hp.outIfs.length > 1 ? `out ${hp.outIfs.length} interfaces` : `out ${hp.outIf || '—'}`),
+          hp.outIfs && hp.outIfs.length > 1 ? h('span', { class: 'mono', title: hp.outIfs.join(', ') }, hp.outIfs.slice(0, 3).join(', ') + (hp.outIfs.length > 3 ? ', …' : '')) : null,
+          here ? h('span', { style: 'color:var(--accent);font-weight:600' }, hp.sourceConfirmed ? `Source host is on ${hp.sourcePort}` : `Source host is on ${hp.sourcePort} (this switch's flow data shows ${hp.inIf})`) : null,
+          hp.qosChanged ? h('span', { style: 'color:var(--bad)' }, `${hp.dscpInS} → ${hp.dscpOutS}`) : null);
+      })))));
+}
+
+function multicastExplain(d: Detail, m: Multicast): VNode {
+  const loc = m.location;
+  return h('div', { class: 'note info' },
+    h('b', null, 'This is a multicast stream: one source, many receivers'),
+    h('div', null, 'Every switch and router that forwards the group reports the same packets, so each one appears once, side by side. They are not hops in a line, and no delay or loss is worked out between them. The receivers themselves are not listed because multicast flow data only shows the sending side.'),
+    loc?.attach ? h('div', { style: 'margin-top:6px' }, `The source ${m.source} was found plugged in to ${loc.attach.dev} ${loc.attach.ifName}${loc.attach.vlan ? ' (VLAN ' + loc.attach.vlan + ')' : ''} by reading the MAC address tables${loc.macSource === 'arp' ? ' and ARP' : ''}, ${loc.attach.confidence} confidence.${loc.attach.confidence !== 'high' && loc.note ? ' ' + loc.note : ''}`)
+      : h('div', { style: 'margin-top:6px' }, `The switch that ${m.source} is plugged in to is not known${loc?.note ? ': ' + loc.note : '. Host tracking has not learned this address yet, or its switch is not polled over SNMP.'} It is not guessed from the flow data.`));
+}
+
+function multicastTable(hops: Hop[]): VNode {
+  const cols = 'minmax(140px,1.1fr) minmax(170px,1.3fr) minmax(150px,1.2fr) 110px 44px 110px 70px 70px minmax(200px,1.6fr)';
+  return h('div', { class: 'tbl hops' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1100px` },
+    h('div', { class: 'tr head' }, ...['Device', 'Interfaces', 'Frame in (L2)', 'VLAN', 'TTL', 'DSCP', 'Packets', 'Bytes', 'Observations'].map(t => h('span', null, t))),
+    hops.map((hp, i) => h('div', { key: i, class: 'tr' },
+      h('div', null, h('div', { style: 'font-weight:600' }, hp.dev), h('div', { class: 'dim', style: 'font-size:12px' }, hp.role), h('div', { class: 'dim mono', style: 'font-size:11.5px' }, hp.exporter)),
+      h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'in '), hp.inIf || '—'), h('div', null, h('span', { class: 'dim' }, 'out '), (hp.outIfs && hp.outIfs.length ? hp.outIfs : [hp.outIf]).join(', ') || '—'),
+        hp.sourcePort ? h('div', { style: 'color:var(--accent)' }, `source host on ${hp.sourcePort}`) : null),
+      h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'src '), hp.frameSrc ?? '—'), h('div', null, h('span', { class: 'dim' }, 'dst '), hp.frameDst ?? '—')),
+      h('span', { class: 'mono', style: 'font-size:12px' }, hp.vlan ? String(hp.vlan) : '—', ' ', h('span', { class: 'dim' }, hp.vlanName)),
+      h('span', { class: 'mono', style: 'font-size:12px' }, hp.ttl === null ? '—' : String(hp.ttl)),
+      h('span', { style: 'font-size:12px' }, hp.qosChanged ? h('span', { class: 'tag bad' }, `${hp.dscpInS} → ${hp.dscpOutS}`) : hp.dscpInS),
+      h('span', { class: 'mono', style: 'font-size:12px' }, num(hp.pkts)), h('span', { class: 'mono', style: 'font-size:12px' }, bytes(hp.bytes)),
+      h('div', { class: 'obs' }, hp.obs.length ? hp.obs.map((o, k) => h('span', { key: k, class: 'ob ' + o.severity }, o.text)) : h('span', { class: 'dim' }, 'Nominal'))))));
+}
+
 function hopsTable(hops: Hop[]): VNode {
   const cols = '36px minmax(130px,1.1fr) minmax(110px,1fr) minmax(150px,1.2fr) 110px 44px 110px 70px 70px 56px 56px minmax(200px,1.6fr)';
   return h('div', { class: 'tbl hops' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1310px` },
@@ -286,7 +343,8 @@ function followed(): VNode | null {
   const d = detail;
   if (!d) return null;
   const row = rows.find(r => r.id === d.skey);
-  const hops = reverse ? d.reverse : d.forward;
+  const mc = d.multicast;
+  const hops = mc ? d.forward : reverse ? d.reverse : d.forward;
   const all = [...d.forward, ...d.reverse];
   const lat = d.forward.length ? d.forward[d.forward.length - 1].cumMs : null;
   const worst = all.flatMap(x => x.obs).find(o => o.severity === 'bad') ?? all.flatMap(x => x.obs).find(o => o.severity === 'warn');
@@ -296,20 +354,22 @@ function followed(): VNode | null {
     h('div', { class: 'row', style: 'justify-content:space-between;align-items:flex-start' },
       h('div', { class: 'col', style: 'gap:6px' },
         h('span', { class: 'eyebrow' }, 'Following stream'),
-        h('h2', { class: 'mono', style: 'font-size:18px;font-weight:600' }, `${d.initiator.ip}${d.initiator.port ? ':' + d.initiator.port : ''} → ${d.responder.ip}${d.responder.port ? ':' + d.responder.port : ''}`),
+        mc ? h('h2', { class: 'mono', style: 'font-size:18px;font-weight:600' }, `${mc.source}${d.initiator.port ? ':' + d.initiator.port : ''} → group ${mc.group}${d.responder.port ? ':' + d.responder.port : ''}`) : h('h2', { class: 'mono', style: 'font-size:18px;font-weight:600' }, `${d.initiator.ip}${d.initiator.port ? ':' + d.initiator.port : ''} → ${d.responder.ip}${d.responder.port ? ':' + d.responder.port : ''}`),
         h('div', { class: 'row', style: 'gap:8px 16px;color:var(--muted)' },
-          h('span', null, `${d.protoName} · ${d.app}`), h('span', null, `${d.forward.length} hop${d.forward.length === 1 ? '' : 's'} forward, ${d.reverse.length} back`),
-          lat !== null ? h('span', null, `about ${ms(lat)} end to end`) : null,
+          h('span', null, `${d.protoName} · ${d.app}`), mc ? chip('Multicast', 'violet') : null,
+          h('span', null, mc ? `seen by ${d.forward.length} device${d.forward.length === 1 ? '' : 's'}` : `${d.forward.length} hop${d.forward.length === 1 ? '' : 's'} forward, ${d.reverse.length} back`),
+          !mc && lat !== null ? h('span', null, `about ${ms(lat)} end to end`) : null,
           h('span', null, `Started ${stamp(d.t0)} · lasted ${dur(d.t1 - d.t0)}`),
           worst ? statusEl(worst.severity === 'bad' ? 'bad' : 'warn', worst.text.length > 70 ? worst.text.slice(0, 68) + '…' : worst.text) : statusEl('ok', 'Healthy'))),
-      seg('Path direction', [{ id: 'f', label: 'Initiator → responder', on: !reverse }, { id: 'r', label: 'Responder → initiator', on: reverse, disabled: !d.reverse.length, title: d.reverse.length ? undefined : 'No exporter reported the return direction' }], id => { reverse = id === 'r'; redraw(); })),
+      mc ? null : seg('Path direction', [{ id: 'f', label: 'Initiator → responder', on: !reverse }, { id: 'r', label: 'Responder → initiator', on: reverse, disabled: !d.reverse.length, title: d.reverse.length ? undefined : 'No exporter reported the return direction' }], id => { reverse = id === 'r'; redraw(); })),
     d.note ? note(d.note, 'info') : null,
     qm ? h('div', { class: 'note bad row', style: 'justify-content:space-between' },
       h('div', null, h('b', null, 'QoS changed in transit'), h('div', null, qm.text)),
       qm.dev ? btn('Open egress queue', { kind: 'danger', onclick: () => go('links', { dev: qm.dev, if: qm.ifName }) }) : null) : null,
     tm ? h('div', { class: 'note bad' }, h('b', null, 'TTL expired before the destination'), h('div', null, tm.text)) : null,
-    hops.length ? [strip(hops, d), hopsTable(hops)] : note('No exporter reported this direction.', 'info'),
-    h('div', { class: 'split' }, h('div', { class: 'mainp', style: 'flex-basis:520px' }, layers(d, row, d.forward[0])), h('div', { class: 'side', style: 'flex-basis:420px' }, activity(d))));
+    mc ? multicastExplain(d, mc) : null,
+    mc ? (hops.length ? [multicastStrip(hops, d, mc), multicastTable(hops)] : note('No exporter reported this stream.', 'info')) : hops.length ? [strip(hops, d), hopsTable(hops)] : note('No exporter reported this direction.', 'info'),
+    h('div', { class: 'split' }, h('div', { class: 'mainp', style: 'flex-basis:520px' }, layers(d, row, (mc ? d.forward.find(x => x.sourcePort) : undefined) ?? d.forward[0])), h('div', { class: 'side', style: 'flex-basis:420px' }, activity(d))));
 }
 
 export function render(): VNode {

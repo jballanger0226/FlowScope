@@ -92,7 +92,38 @@ Traffic that is built to have a TTL of 1 is ignored: multicast, broadcast and li
 
 ## SNMP
 
-Reads standard MIB-II / IF-MIB (`ifDescr`, `ifName`, `ifAlias`, `ifHighSpeed`, `ifHC*Octets`, discards, errors, oper status), `ipAddrTable`, VLAN names from `Q-BRIDGE-MIB` (`dot1qVlanStaticName`) and Cisco `CISCO-VTP-MIB` (`vtpVlanName`), and per-class QoS from `CISCO-CLASS-BASED-QOS-MIB` (`cbQosPolicyDirection`, `cbQosIfIndex`, `cbQosConfigIndex`, `cbQosObjectsType`, `cbQosParentObjectsIndex`, `cbQosPolicyMapName`, plus class-map names, the 64-bit pre-policy packet/byte, post-policy byte and drop packet/byte counters, queueing bandwidth and current queue depth). SNMP v1, v2c and v3 (noAuthNoPriv, authNoPriv, authPriv) are supported through `net-snmp`. OIDs are listed in `src/snmp/oids.ts`.
+Reads standard MIB-II / IF-MIB (`ifDescr`, `ifName`, `ifAlias`, `ifHighSpeed`, `ifHC*Octets`, discards, errors, oper status), `ipAddrTable`, VLAN names from `Q-BRIDGE-MIB` (`dot1qVlanStaticName`) and Cisco `CISCO-VTP-MIB` (`vtpVlanName`), and per-class QoS from `CISCO-CLASS-BASED-QOS-MIB` (`cbQosPolicyDirection`, `cbQosIfIndex`, `cbQosConfigIndex`, `cbQosObjectsType`, `cbQosParentObjectsIndex`, `cbQosPolicyMapName`, plus class-map names, the 64-bit pre-policy packet/byte, post-policy byte and drop packet/byte counters, queueing bandwidth and current queue depth). SNMP v1, v2c and v3 (noAuthNoPriv, authNoPriv, authPriv) are supported through `net-snmp`. OIDs are listed in `src/snmp/oids.ts`. The Report builder can aggregate addresses to /32, /24, /16 or any prefix length from /0 to /32 (custom).
+
+### Service policies (Cisco class-based QoS)
+
+Both directions are read: the output policy that queues traffic on an interface and the input policy that marks or polices it. Input classes are listed with an `in` tag. Bandwidth guarantees use the MIB's units (percent, percent of remaining, kbps). Counters fall back from 64-bit to 32-bit when a device only implements the 32-bit ones, and per-VLAN policies are labelled with their VLAN. Control-plane policies are skipped because they do not belong to an interface. The poller re-reads the policy structure every hour so a policy attached later is picked up, and if a device returns nothing the reason is shown on the Links and QoS page (it is also stored in `devices.qos_note`) rather than the policy silently going missing.
+
+### Ports, VLANs and finding hosts
+
+For each switch FlowScope also reads which VLAN every port is in and, every five minutes (configurable), which MAC addresses are plugged into which port. This is what the VLAN column, the VLAN search, the "Hosts on this port" table and the "Find a host" box use, and it is how a multicast stream's source host is placed on a switch.
+
+| What | Where it comes from |
+| --- | --- |
+| Access and voice VLAN | `CISCO-VLAN-MEMBERSHIP-MIB` (`vmVlan`, `vmVoiceVlanId`) |
+| Trunk native VLAN and allowed VLANs | `CISCO-VTP-MIB` trunk table |
+| Port VLAN on other vendors | `Q-BRIDGE-MIB` `dot1qPvid`, mapped through `dot1dBasePortIfIndex` |
+| SVI / VLAN interfaces | the interface name (`Vlan140`, `Vl140`, `BDI140`, `irb.140`, `Vlan-interface140`) or ifType 53/135/136 |
+| MAC address table | `Q-BRIDGE-MIB` `dot1qTpFdbPort`; on Cisco Catalyst, `BRIDGE-MIB` `dot1dTpFdbPort` read once per VLAN |
+| IP to MAC | `ipNetToPhysicalTable` (IPv4 and IPv6), falling back to `ipNetToMediaTable`; read from every polled router or Layer 3 switch |
+| Which ports are uplinks | LLDP (`lldpRem*`, with capability bits) and CDP (`cdpCache*`) |
+
+How a host is placed: its MAC address comes from ARP (or, for a multicast source, from the flow records as a hint). It is then looked up in every switch's MAC table. A port that leads to another switch or router (LLDP/CDP says bridge or router, it is a routed port or SVI, or it has learned a large number of addresses) is an uplink and is never the answer. Of the remaining ports, the one with the fewest addresses wins. The answer carries a confidence: **high** when the switch reports LLDP/CDP neighbours and exactly one host port matches, **medium** when the switch reports no neighbours (so uplinks were judged by address count) or the MAC came from flow records, **low** when several host ports match. If the address was only seen on uplinks the answer is "not found on any polled switch" and the nearest uplink is named; nothing is guessed.
+
+Things to know:
+
+* **Cisco Catalyst switches keep one MAC table per VLAN.** To read them FlowScope uses the VLAN community (`community@vlan`) for SNMPv1/v2c, or the context `vlan-N` for SNMPv3. The SNMPv3 user must be allowed to use those contexts (`snmp-server group ... context vlan- match prefix` on IOS), and the device must accept VLAN-indexed communities. If the first three VLANs fail, FlowScope stops and says how many VLANs could not be read instead of waiting out a timeout for each.
+* A switch has to be in the device list for its ports to be known; a host behind an unmanaged switch is shown on the uplink side as "not found" or on the nearest managed port with a lower confidence.
+* The reads add SNMP load (one table walk per VLAN on Catalyst). Host tracking can be turned off or slowed down with `PUT /api/hosts/settings` (SNMP admin role; there is no screen for it yet) with `enabled`, `intervalSec` 60 to 86400 and `keepDays` 1 to 365. Addresses that disappear from a table are kept, marked as gone, for `keepDays`.
+* Interfaces that are VLANs or SVIs are left out of "Needs attention" on Links and QoS, since they carry routed traffic for a whole subnet and not a physical link.
+
+### Multicast streams
+
+A multicast stream has one source and many receivers, and every switch and router on the distribution tree reports the same packets. The stream view therefore does not draw a path. It shows the source host, the group, and the devices that saw the stream as an unordered set (sorted by name), each with the interface it came in on and the interfaces it replicated to. No latency, loss or marking comparison is made between devices. The switch port the source is plugged into is looked up from the MAC tables as described above; it is marked on the matching device, and it is shown as unknown (not guessed from the flow data) when host tracking cannot place it.
 
 ## Security notes
 

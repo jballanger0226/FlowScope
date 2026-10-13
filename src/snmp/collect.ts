@@ -1,11 +1,17 @@
 import { SnmpClient, toBigInt, toNum, toStr, type SnmpValue } from './client.js';
 import { OID, CBQOS_OBJ, IF_TYPE_IGNORED } from './oids.js';
+import { readPortVlans, type PortVlan } from './ports.js';
 
 export interface DeviceInfo { sysName: string; sysDescr: string; sysObjectId: string; uptimeSec: number }
 export interface IfaceInfo { index: number; name: string; descr: string; alias: string; speedMbps: number; oper: number; type: number }
 export interface QosClass { name: string; objIdx: number; queueObjIdx: number | null; parentName: string | null; bandwidth: string | null }
-export interface QosPolicy { policyIdx: number; ifIndex: number; direction: 'input' | 'output'; policyName: string; classes: QosClass[] }
-export interface Probe { info: DeviceInfo; ifaces: IfaceInfo[]; ips: { ip: string; ifIndex: number }[]; vlans: { id: number; name: string }[]; qos: QosPolicy[]; profile: string }
+/** cbQosIfType: 1 main interface, 2 sub-interface, 5 control plane, 6 one VLAN of a trunk (cbQosVlanIndex), 7 EVC, 8 tunnel, 9 wireless. */
+export interface QosPolicy { policyIdx: number; ifIndex: number; direction: 'input' | 'output'; policyName: string; classes: QosClass[]; ifType: number; vlan: number; parentPolicyIdx: number }
+export interface Probe {
+  info: DeviceInfo; ifaces: IfaceInfo[]; ips: { ip: string; ifIndex: number }[]; vlans: { id: number; name: string }[]; qos: QosPolicy[]; profile: string;
+  /** Why no QoS data could be read, or a short summary of what was found. */
+  qosNote: string; ports: Map<number, PortVlan>;
+}
 
 export async function readInfo(c: SnmpClient): Promise<DeviceInfo> {
   const m = await c.get([OID.sysName, OID.sysDescr, OID.sysObjectID, OID.sysUpTime]);
@@ -52,53 +58,107 @@ export async function readVlans(c: SnmpClient): Promise<{ id: number; name: stri
   return [...out].map(([id, name]) => ({ id, name })).filter(v => v.name).sort((a, b) => a.id - b.id);
 }
 
-/** Reads the Cisco class-based QoS structure: which policy is attached where, and which classes it has. Returns [] when the MIB is not supported. */
+/** Bandwidth units of cbQosQueueingCfgBandwidthUnits (QueueingBandwidthUnits in CISCO-CLASS-BASED-QOS-MIB). */
+export function bandwidthText(b: number, unit: number): string | null {
+  if (!(b > 0)) return null;
+  switch (unit) {
+    case 1: return `${b} kbps`;
+    case 2: return `${b}%`;
+    case 3: return `${b}% remaining`;
+    case 4: return `${b} (ratio of remaining)`;
+    case 5: return `${b / 10}%`;
+    case 6: return `${b / 10000}%`;
+    default: return `${b}`;
+  }
+}
+
+/** Reads the Cisco class-based QoS structure: which policy is attached where (both directions), and which classes it has. Returns [] when the MIB is not supported. */
 export async function readQosStructure(c: SnmpClient): Promise<QosPolicy[]> {
-  const pol = await c.column(OID.cbQosIfIndex).catch(() => new Map<string, SnmpValue>());
+  const empty = () => new Map<string, SnmpValue>();
+  const pol = await c.column(OID.cbQosPolicyDirection);
   if (!pol.size) return [];
-  const dir = await c.column(OID.cbQosPolicyDirection);
+  const [ifIdx, ifType, vlanIdx, parentIdx] = await Promise.all([
+    c.column(OID.cbQosIfIndex).catch(empty), c.column(OID.cbQosIfType).catch(empty), c.column(OID.cbQosVlanIndex).catch(empty), c.column(OID.cbQosParentPolicyIndex).catch(empty)
+  ]);
   const [cfgIdx, objType, parent, pmName, cmName, qBw, qUnits] = await Promise.all([
     c.column(OID.cbQosConfigIndex), c.column(OID.cbQosObjectsType), c.column(OID.cbQosParentObjectsIndex),
-    c.column(OID.cbQosPolicyMapName), c.column(OID.cbQosCMName), c.column(OID.cbQosQueueingCfgBandwidth).catch(() => new Map<string, SnmpValue>()),
-    c.column(OID.cbQosQueueingCfgBandwidthUnits).catch(() => new Map<string, SnmpValue>())
+    c.column(OID.cbQosPolicyMapName), c.column(OID.cbQosCMName), c.column(OID.cbQosQueueingCfgBandwidth).catch(empty),
+    c.column(OID.cbQosQueueingCfgBandwidthUnits).catch(empty)
   ]);
+  // group the objects by policy once, instead of scanning the whole table for every policy
+  const byPolicy = new Map<number, { idx: number; cfg: string; type: number; parent: number }[]>();
+  for (const [k, t] of objType) {
+    const [p, o] = k.split('.');
+    const a = byPolicy.get(Number(p)) ?? []; byPolicy.set(Number(p), a);
+    a.push({ idx: Number(o), cfg: String(num(cfgIdx.get(k))), type: num(t), parent: num(parent.get(k)) });
+  }
   const out: QosPolicy[] = [];
-  for (const [pk, ifv] of pol) {
+  for (const [pk, dv] of pol) {
     const policyIdx = Number(pk);
-    const direction = num(dir.get(pk)) === 1 ? 'input' : 'output';
-    const objs: { idx: number; cfg: string; type: number; parent: number }[] = [];
-    for (const [k, t] of objType) {
-      const [p, o] = k.split('.');
-      if (Number(p) !== policyIdx) continue;
-      objs.push({ idx: Number(o), cfg: String(num(cfgIdx.get(k))), type: num(t), parent: num(parent.get(k)) });
-    }
+    const direction = num(dv) === 1 ? 'input' : 'output';
+    const objs = byPolicy.get(policyIdx) ?? [];
     const pmap = objs.find(o => o.type === CBQOS_OBJ.policymap);
     const byIdx = new Map(objs.map(o => [o.idx, o]));
+    const nameOf = (o: { cfg: string; idx: number }) => toStr(cmName.get(o.cfg) ?? null) || `class-${o.idx}`;
+    // a hierarchical policy (for example a port shaper with a queueing child policy) can have the same class name at two levels
+    const path = (o: { parent: number; cfg: string; idx: number }): string[] => {
+      const names = [nameOf(o)];
+      for (let p = byIdx.get(o.parent), n = 0; p && n < 8; p = byIdx.get(p.parent), n++) if (p.type === CBQOS_OBJ.classmap) names.unshift(nameOf(p));
+      return names;
+    };
+    const maps = objs.filter(x => x.type === CBQOS_OBJ.classmap);
+    const count = new Map<string, number>();
+    for (const o of maps) count.set(nameOf(o), (count.get(nameOf(o)) ?? 0) + 1);
     const classes: QosClass[] = [];
-    for (const o of objs.filter(x => x.type === CBQOS_OBJ.classmap)) {
-      const name = toStr(cmName.get(o.cfg) ?? null) || `class-${o.idx}`;
+    for (const o of maps) {
+      const name = (count.get(nameOf(o)) ?? 0) > 1 ? path(o).join('/') : nameOf(o);
       const q = objs.find(x => x.type === CBQOS_OBJ.queueing && x.parent === o.idx) ?? null;
-      let bw: string | null = null;
-      if (q) {
-        const b = num(qBw.get(q.cfg), -1), u = num(qUnits.get(q.cfg), 0);
-        if (b > 0) bw = u === 3 ? `${b}%` : u === 2 ? `${b}% remaining` : `${b} kbps`;
-      }
+      const bw = q ? bandwidthText(num(qBw.get(q.cfg), -1), num(qUnits.get(q.cfg), 0)) : null;
       const par = byIdx.get(o.parent);
-      const parentName = par && par.type === CBQOS_OBJ.classmap ? toStr(cmName.get(par.cfg) ?? null) : null;
+      const parentName = par && par.type === CBQOS_OBJ.classmap ? nameOf(par) : null;
       classes.push({ name, objIdx: o.idx, queueObjIdx: q ? q.idx : null, parentName, bandwidth: bw });
     }
-    out.push({ policyIdx, ifIndex: num(ifv), direction, policyName: pmap ? toStr(pmName.get(pmap.cfg) ?? null) : '', classes });
+    out.push({
+      policyIdx, ifIndex: num(ifIdx.get(pk)), direction, policyName: pmap ? toStr(pmName.get(pmap.cfg) ?? null) : '', classes,
+      ifType: num(ifType.get(pk), 1), vlan: num(vlanIdx.get(pk)), parentPolicyIdx: num(parentIdx.get(pk))
+    });
   }
   return out;
 }
 
+/** Name shown for a policy on an interface; a policy bound to one VLAN of a trunk says which. */
+export function policyText(p: Pick<QosPolicy, 'policyName' | 'vlan'>): string { return (p.policyName || 'unnamed policy') + (p.vlan > 0 ? ` (VLAN ${p.vlan})` : ''); }
+/**
+ * Class name as stored with the statistics. Output classes keep their plain name; classes of an input policy are prefixed "in:" so
+ * the same class name in both directions stays two series. The screens strip the prefix and show an "in" tag.
+ */
+export function classLabel(p: Pick<QosPolicy, 'direction' | 'vlan'>, name: string): string { return (p.direction === 'input' ? 'in:' : '') + name + (p.vlan > 0 ? ` (VLAN ${p.vlan})` : ''); }
+/** Policies that belong to an interface, as opposed to the control plane or an entry without a usable ifIndex. */
+export const perInterface = (p: Pick<QosPolicy, 'ifType' | 'ifIndex'>): boolean => p.ifType !== 5 && p.ifIndex > 0;
+
+/** A plain-language summary of what the QoS tables returned, kept so an admin can see why a policy is missing. */
+export function qosSummary(policies: QosPolicy[], ifaces: Pick<IfaceInfo, 'index'>[]): string {
+  if (!policies.length) return 'The device returned no service policies (cbQosServicePolicyTable is empty). Either no policy is attached, or it does not publish CISCO-CLASS-BASED-QOS-MIB.';
+  const known = new Set(ifaces.map(i => i.index));
+  const inp = policies.filter(p => p.direction === 'input').length, outp = policies.length - inp;
+  const parts = [`${policies.length} service polic${policies.length === 1 ? 'y' : 'ies'} found (${outp} output, ${inp} input)`];
+  const cp = policies.filter(p => p.ifType === 5).length; if (cp) parts.push(`${cp} on the control plane (not shown per interface)`);
+  const vp = policies.filter(p => p.ifType === 6 || p.vlan > 0).length; if (vp) parts.push(`${vp} attached to one VLAN of a trunk (shown on the port)`);
+  const orphan = policies.filter(p => p.ifType !== 5 && p.ifIndex > 0 && !known.has(p.ifIndex));
+  if (orphan.length) parts.push(`${orphan.length} attached to interfaces missing from the interface list (ifIndex ${[...new Set(orphan.map(p => p.ifIndex))].slice(0, 6).join(', ')})`);
+  const noCls = policies.filter(p => !p.classes.length).length; if (noCls) parts.push(`${noCls} with no class statistics`);
+  return parts.join('; ') + '.';
+}
+
 export async function probe(c: SnmpClient): Promise<Probe> {
   const info = await readInfo(c);
-  const [ifaces, ips, vlans, qos] = await Promise.all([
-    readInterfaces(c), readIps(c).catch(() => []), readVlans(c).catch(() => []), readQosStructure(c).catch(() => [] as QosPolicy[])
-  ]);
+  const [ifaces, ips, vlans] = await Promise.all([readInterfaces(c), readIps(c).catch(() => []), readVlans(c).catch(() => [])]);
+  // A failure here is kept as a note instead of being hidden, so "no policy" can be told apart from "the device did not answer in time"
+  let qos: QosPolicy[] = []; let qosNote: string;
+  try { qos = await readQosStructure(c); qosNote = qosSummary(qos, ifaces); } catch (e) { qosNote = `The QoS tables could not be read: ${(e as Error).message}`; }
+  const ports = await readPortVlans(c, ifaces, ips).catch(() => new Map<number, PortVlan>());
   const profile = qos.length ? 'cisco-cbqos' : 'generic';
-  return { info, ifaces, ips, vlans, qos, profile };
+  return { info, ifaces, ips, vlans, qos, profile, qosNote, ports };
 }
 
 export interface IfCounters { inOct: bigint; outOct: bigint; inDisc: bigint; outDisc: bigint; inErr: bigint; outErr: bigint; oper: number; speedMbps: number; hc: boolean }
@@ -130,21 +190,25 @@ export async function pollIfCounters(c: SnmpClient): Promise<Map<number, IfCount
 }
 
 export interface ClassCounters { pre: bigint; preB: bigint; postB: bigint; drop: bigint; dropB: bigint }
-export interface QosCounters { classes: Map<string, ClassCounters>; queueDepth: Map<string, number> }
+export interface QosCounters { classes: Map<string, ClassCounters>; queueDepth: Map<string, number>; /** false when only the 32-bit counters exist */ wide: boolean }
 
-/** Reads class counters keyed "policyIdx.objIdx". Queue depth is keyed by the class's queueing object (see QosClass.queueObjIdx). */
+/** Reads class counters keyed "policyIdx.objIdx". Queue depth is keyed by the class's queueing object (see QosClass.queueObjIdx). Falls back to the 32-bit counters on devices without the 64-bit ones. */
 export async function pollQosCounters(c: SnmpClient): Promise<QosCounters> {
   const empty = new Map<string, SnmpValue>();
-  const [pre, preB, postB, drop, dropB, qd] = await Promise.all([
-    c.column(OID.cbQosCMPrePolicyPkt64), c.column(OID.cbQosCMPrePolicyByte64), c.column(OID.cbQosCMPostPolicyByte64),
-    c.column(OID.cbQosCMDropPkt64), c.column(OID.cbQosCMDropByte64), c.column(OID.cbQosQueueingCurrentQDepth).catch(() => empty)
-  ]);
+  const rd = (o: string) => c.column(o).catch(() => empty);
+  let [pre, preB, postB, drop, dropB] = await Promise.all([rd(OID.cbQosCMPrePolicyPkt64), rd(OID.cbQosCMPrePolicyByte64), rd(OID.cbQosCMPostPolicyByte64), rd(OID.cbQosCMDropPkt64), rd(OID.cbQosCMDropByte64)]);
+  const qd = await rd(OID.cbQosQueueingCurrentQDepth);
+  let wide = true;
+  if (!pre.size) {
+    wide = false;
+    [pre, preB, postB, drop, dropB] = await Promise.all([rd(OID.cbQosCMPrePolicyPkt32), rd(OID.cbQosCMPrePolicyByte32), rd(OID.cbQosCMPostPolicyByte32), rd(OID.cbQosCMDropPkt32), rd(OID.cbQosCMDropByte32)]);
+  }
   const classes = new Map<string, ClassCounters>();
   const b = (m: Map<string, SnmpValue>, k: string) => (m.has(k) ? toBigInt(m.get(k)!) ?? 0n : 0n);
   for (const k of pre.keys()) classes.set(k, { pre: b(pre, k), preB: b(preB, k), postB: b(postB, k), drop: b(drop, k), dropB: b(dropB, k) });
   const queueDepth = new Map<string, number>();
   for (const [k, v] of qd) queueDepth.set(k, num(v));
-  return { classes, queueDepth };
+  return { classes, queueDepth, wide };
 }
 
 /** Counter difference with wraparound for 32-bit counters. Returns null when the counter went backwards on a 64-bit counter (device reset). */

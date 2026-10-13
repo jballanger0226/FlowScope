@@ -96,6 +96,7 @@ main { padding: 24px 32px 0; display: flex; flex-direction: column; gap: 20px; }
 textarea.input { height: auto; padding: 10px 12px; line-height: 1.4; width: 100%; resize: vertical; }
 select.input { padding-right: 8px; }
 .input::placeholder { color: var(--dim); }
+.input.bad, .input[aria-invalid="true"] { border-color: var(--bad); }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--muted); min-width: 0; }
 .field .input { width: 100%; }
 .flabel { font-weight: 500; }
@@ -171,6 +172,11 @@ button.tr { cursor: pointer; } button.tr:hover { background: var(--field); } but
 .node { flex: none; min-width: 130px; padding: 10px 14px; border-radius: 10px; background: var(--field); border: 1px solid var(--line3); }
 .node b { display: block; font-size: 13.5px; } .node span { display: block; font-size: 11.5px; color: var(--muted); }
 .node.edge { background: var(--raised); }
+.node.here { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.mctree { display: flex; align-items: center; gap: 0; padding: 16px; overflow-x: auto; }
+.mclink { flex: none; width: 40px; display: flex; align-items: center; } .mclink i { display: block; width: 100%; height: 2px; background: var(--line3); }
+.mcset { flex: 1 1 auto; min-width: 280px; display: flex; flex-direction: column; gap: 8px; }
+.mcgrid { display: flex; flex-wrap: wrap; gap: 10px; }
 .node.remark { border-color: var(--bad-line); background: var(--bad-bg); }
 .link { flex: none; min-width: 90px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
 .link i { display: block; width: 100%; height: 2px; background: var(--line3); position: relative; }

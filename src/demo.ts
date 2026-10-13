@@ -14,16 +14,20 @@ interface Dev { name: string; ip: string; role: Role; descr: string; secs: numbe
 const DEVS: Dev[] = [
   { name: 'dist-sw-01', ip: '10.255.0.2', role: 'switch', descr: 'Distribution switch', secs: 60, mac: '00:1c:73:00:00:02', ifs: [
     ['Vl140', 'VLAN 140 CAMPUS-USERS (SVI)', 10000, null, 12, 9], ['Vl150', 'VLAN 150 CAMPUS-WIFI (SVI)', 10000, null, 7, 6],
-    ['Te1/0/1', 'Uplink to core-rtr-01', 10000, 'CORE-OUT', 31, 28], ['Te1/0/2', 'Uplink to core-rtr-01 (DC path)', 10000, 'CORE-OUT', 22, 35]] },
+    ['Te1/0/1', 'Uplink to core-rtr-01', 10000, 'CORE-OUT', 31, 28], ['Te1/0/2', 'Uplink to core-rtr-01 (DC path)', 10000, 'CORE-OUT', 22, 35],
+    ['Gi1/0/12', 'Desk 4-21 (PC and phone)', 1000, null, 4, 2], ['Gi1/0/14', 'Desk 4-33', 1000, null, 3, 1], ['Gi1/0/15', 'Lab bench 60', 1000, null, 2, 1],
+    ['Gi1/0/16', 'Printer room', 1000, null, 1, 1], ['Gi1/0/20', 'Wireless AP, floor 4', 1000, null, 9, 6], ['Gi1/0/24', 'Meeting room 4B (video)', 1000, null, 6, 1]] },
   { name: 'core-rtr-01', ip: '10.255.0.1', role: 'router', descr: 'Core router', secs: 60, mac: '00:1c:73:00:00:01', ifs: [
     ['Te0/0/0', 'Downlink to dist-sw-01', 10000, 'CORE-OUT', 38, 33], ['Te0/0/1', 'Link to DC fabric', 10000, 'CORE-OUT', 44, 41],
     ['Te0/0/2', 'Link to fw-edge-01', 10000, 'CORE-OUT', 27, 30], ['Te0/0/3', 'Link to wan-rtr-01', 1000, 'WAN-OUT', 71, 64], ['Lo0', 'Loopback', 0, null, 0, 0]] },
   { name: 'fw-edge-01', ip: '10.255.0.5', role: 'firewall', descr: 'Edge firewall', secs: 60, mac: '00:1c:73:00:00:05', ifs: [
     ['Eth1/1', 'Inside, to core-rtr-01', 10000, null, 27, 30], ['Eth1/2', 'Outside, to ISP', 1000, 'FW-OUT', 58, 49]] },
   { name: 'dc-leaf-07', ip: '10.255.1.7', role: 'switch', descr: 'Data center leaf', secs: 60, mac: '00:1c:73:00:01:07', ifs: [
-    ['Vl310', 'VLAN 310 DC-APPS (SVI)', 10000, null, 40, 36], ['Eth1/49', 'Uplink to core-rtr-01', 40000, 'DC-FABRIC-OUT', 52, 47], ['Eth1/52', 'Uplink to dc-spine-01', 40000, 'DC-FABRIC-OUT', 61, 58]] },
+    ['Vl310', 'VLAN 310 DC-APPS (SVI)', 10000, null, 40, 36], ['Eth1/49', 'Uplink to core-rtr-01', 40000, 'DC-FABRIC-OUT', 52, 47], ['Eth1/52', 'Uplink to dc-spine-01', 40000, 'DC-FABRIC-OUT', 61, 58],
+    ['Eth1/10', 'db-prod-05', 10000, null, 12, 14], ['Eth1/11', 'app-prod-12', 10000, null, 8, 9], ['Eth1/12', 'media-enc-30 (multicast source)', 10000, null, 18, 2]] },
   { name: 'dc-leaf-11', ip: '10.255.1.11', role: 'switch', descr: 'Data center leaf', secs: 60, mac: '00:1c:73:00:01:0b', ifs: [
-    ['Eth1/49', 'Uplink to dc-spine-01', 40000, 'DC-FABRIC-OUT', 33, 36], ['Vl320', 'VLAN 320 DC-DATABASE (SVI)', 10000, null, 22, 25]] },
+    ['Eth1/49', 'Uplink to dc-spine-01', 40000, 'DC-FABRIC-OUT', 33, 36], ['Vl320', 'VLAN 320 DC-DATABASE (SVI)', 10000, null, 22, 25],
+    ['Eth1/10', 'queue-svc-30', 10000, null, 6, 7], ['Eth1/20', 'Multicast receivers', 10000, null, 9, 1]] },
   { name: 'dc-spine-01', ip: '10.255.1.1', role: 'switch', descr: 'Data center spine', secs: 60, mac: '00:1c:73:00:01:01', ifs: [
     ['Eth1/7', 'Downlink to dc-leaf-07', 40000, 'DC-FABRIC-OUT', 59, 62], ['Eth1/9', 'Downlink to dc-leaf-11', 40000, 'DC-FABRIC-OUT', 35, 33]] },
   { name: 'wan-rtr-01', ip: '10.255.0.9', role: 'router', descr: 'WAN aggregation router', secs: 60, mac: '00:1c:73:00:00:09', ifs: [
@@ -46,7 +50,41 @@ const OVERRIDE: Record<string, { drop: number; depth: number; mode: 'burst' | 'r
   'br-rtr-02|Tu100|CRITICAL': { drop: 0.3, depth: 148, mode: 'burst' },
   'br-rtr-02|Tu100|DEFAULT': { drop: 0.6, depth: 74, mode: 'burst' }
 };
-const VLANS: [number, string][] = [[140, 'CAMPUS-USERS'], [150, 'CAMPUS-WIFI'], [200, 'BRANCH-LAN'], [310, 'DC-APPS'], [320, 'DC-DATABASE']];
+const VLANS: [number, string][] = [[140, 'CAMPUS-USERS'], [150, 'CAMPUS-WIFI'], [160, 'CAMPUS-VOICE'], [200, 'BRANCH-LAN'], [310, 'DC-APPS'], [320, 'DC-DATABASE']];
+
+// Switch port settings that SNMP would report: "dev|interface" -> mode, VLAN (access or native), voice VLAN and the VLANs a trunk allows
+const PORTINFO: Record<string, { mode: 'access' | 'trunk' | 'routed'; vlan: number; voice?: number; list?: string }> = {
+  'dist-sw-01|Te1/0/1': { mode: 'trunk', vlan: 1, list: '140,150,160' }, 'dist-sw-01|Te1/0/2': { mode: 'trunk', vlan: 1, list: '140,150,160' },
+  'dist-sw-01|Gi1/0/12': { mode: 'access', vlan: 140, voice: 160 }, 'dist-sw-01|Gi1/0/14': { mode: 'access', vlan: 140 }, 'dist-sw-01|Gi1/0/15': { mode: 'access', vlan: 140 },
+  'dist-sw-01|Gi1/0/16': { mode: 'access', vlan: 140 }, 'dist-sw-01|Gi1/0/20': { mode: 'access', vlan: 150 }, 'dist-sw-01|Gi1/0/24': { mode: 'access', vlan: 140 },
+  'dc-leaf-07|Eth1/49': { mode: 'trunk', vlan: 1, list: '310,320' }, 'dc-leaf-07|Eth1/52': { mode: 'trunk', vlan: 1, list: '310,320' },
+  'dc-leaf-07|Eth1/10': { mode: 'access', vlan: 310 }, 'dc-leaf-07|Eth1/11': { mode: 'access', vlan: 310 }, 'dc-leaf-07|Eth1/12': { mode: 'access', vlan: 310 },
+  'dc-leaf-11|Eth1/49': { mode: 'trunk', vlan: 1, list: '310,320' }, 'dc-leaf-11|Eth1/10': { mode: 'access', vlan: 320 }, 'dc-leaf-11|Eth1/20': { mode: 'access', vlan: 320 },
+  'dc-spine-01|Eth1/7': { mode: 'routed', vlan: 0 }, 'dc-spine-01|Eth1/9': { mode: 'routed', vlan: 0 }
+};
+/** Input service policies (class names carry the "in:" prefix the collector uses). */
+const POLICY_IN: Record<string, string> = { 'dist-sw-01|Gi1/0/12': 'ACCESS-IN', 'dist-sw-01|Gi1/0/24': 'ACCESS-IN' };
+const IN_POLICIES: Record<string, [string, number[], string][]> = { 'ACCESS-IN': [['VOICE-MARK', [46], 'police 1 Mbps'], ['VIDEO-MARK', [34], 'police 20 Mbps'], ['class-default', [], 'remainder']] };
+
+// Hosts plugged in to switch ports: the MAC address tables, ARP and LLDP data that host tracking reads
+const HOSTS: { ip: string; dev: string; port: string; vlan: number; l3: string; name?: string }[] = [
+  { ip: '10.1.4.21', dev: 'dist-sw-01', port: 'Gi1/0/12', vlan: 140, l3: 'dist-sw-01' }, { ip: '10.1.8.21', dev: 'dist-sw-01', port: 'Gi1/0/12', vlan: 160, l3: 'dist-sw-01', name: 'SEP00505601080015' },
+  { ip: '10.1.4.33', dev: 'dist-sw-01', port: 'Gi1/0/14', vlan: 140, l3: 'dist-sw-01' }, { ip: '10.1.4.60', dev: 'dist-sw-01', port: 'Gi1/0/15', vlan: 140, l3: 'dist-sw-01' },
+  { ip: '10.1.4.50', dev: 'dist-sw-01', port: 'Gi1/0/16', vlan: 140, l3: 'dist-sw-01' }, { ip: '10.1.7.88', dev: 'dist-sw-01', port: 'Gi1/0/20', vlan: 150, l3: 'dist-sw-01' },
+  { ip: '10.1.7.19', dev: 'dist-sw-01', port: 'Gi1/0/20', vlan: 150, l3: 'dist-sw-01' },
+  { ip: '10.9.0.5', dev: 'dc-leaf-07', port: 'Eth1/10', vlan: 310, l3: 'dc-leaf-07' }, { ip: '10.9.0.12', dev: 'dc-leaf-07', port: 'Eth1/11', vlan: 310, l3: 'dc-leaf-07' },
+  { ip: '10.9.0.30', dev: 'dc-leaf-07', port: 'Eth1/12', vlan: 310, l3: 'dc-leaf-07' }, { ip: '10.9.2.30', dev: 'dc-leaf-11', port: 'Eth1/10', vlan: 320, l3: 'dc-leaf-11' }
+];
+// LLDP / CDP neighbours: "dev|interface" -> [protocol, remote name, remote port, kind, capabilities]
+const NEIGHBORS: Record<string, [string, string, string, string, string]> = {
+  'dist-sw-01|Te1/0/1': ['lldp', 'core-rtr-01', 'Te0/0/0', 'infra', 'bridge,router'], 'dist-sw-01|Te1/0/2': ['lldp', 'core-rtr-01', 'Te0/0/4', 'infra', 'bridge,router'],
+  'dist-sw-01|Gi1/0/12': ['lldp', 'SEP00505601080015', 'Port 1', 'phone', 'telephone'], 'dist-sw-01|Gi1/0/20': ['lldp', 'ap-4f-02', 'Gi0', 'ap', 'wlan-ap'],
+  'dc-leaf-07|Eth1/49': ['lldp', 'core-rtr-01', 'Te0/0/1', 'infra', 'bridge,router'], 'dc-leaf-07|Eth1/52': ['lldp', 'dc-spine-01', 'Eth1/7', 'infra', 'bridge,router'],
+  'dc-leaf-11|Eth1/49': ['lldp', 'dc-spine-01', 'Eth1/9', 'infra', 'bridge,router'],
+  'dc-spine-01|Eth1/7': ['lldp', 'dc-leaf-07', 'Eth1/52', 'infra', 'bridge,router'], 'dc-spine-01|Eth1/9': ['lldp', 'dc-leaf-11', 'Eth1/49', 'infra', 'bridge,router']
+};
+// Addresses a switch has learned through an uplink rather than on a host port: [learning switch, uplink, host IP]
+const LEARNED_VIA: [string, string, string][] = [['dc-leaf-07', 'Eth1/52', '10.9.2.30'], ['dc-leaf-11', 'Eth1/49', '10.9.0.30'], ['dc-leaf-11', 'Eth1/49', '10.9.0.5'], ['dc-leaf-11', 'Eth1/49', '10.9.0.12']];
 
 // path hop: [device, ingress interface ('@v' = the VLAN's SVI), egress interface, link latency in ms from the previous hop]
 type Hop = [string, string, string, number];
@@ -57,6 +95,9 @@ const PATHS: Record<string, Hop[]> = {
   D: [['dc-leaf-07', 'Vl310', 'Eth1/52', 0], ['dc-spine-01', 'Eth1/7', 'Eth1/9', 0.2], ['dc-leaf-11', 'Eth1/49', 'Vl320', 0.2]],
   E: [['dc-leaf-07', 'Vl310', 'Eth1/49', 0], ['core-rtr-01', 'Te0/0/1', 'Te0/0/2', 0.6], ['fw-edge-01', 'Eth1/1', 'Eth1/2', 0.3]],
   F: [['dist-sw-01', '@v', 'Te1/0/1', 0], ['core-rtr-01', 'Te0/0/0', 'Lo0', 0.4]],
+  // multicast: the same stream seen on both branches of the tree (dc-leaf-07 replicates it to two uplinks)
+  M1: [['dc-leaf-07', 'Eth1/12', 'Eth1/49', 0], ['core-rtr-01', 'Te0/0/1', 'Te0/0/0', 0.6], ['dist-sw-01', 'Te1/0/2', 'Gi1/0/24', 0.4]],
+  M2: [['dc-leaf-07', 'Eth1/12', 'Eth1/52', 0], ['dc-spine-01', 'Eth1/7', 'Eth1/9', 0.2], ['dc-leaf-11', 'Eth1/49', 'Eth1/20', 0.2]],
   G: [['br-rtr-02', 'Gi0/0/1', 'Tu100', 0], ['wan-rtr-01', 'Tu100', 'Gi0/0/0', 18.2], ['core-rtr-01', 'Te0/0/3', 'Te0/0/2', 0.5], ['fw-edge-01', 'Eth1/1', 'Eth1/2', 0.3]]
 };
 
@@ -106,6 +147,9 @@ const SAMPLE: Spec[] = [
   { src: '10.1.4.50', dst: '224.0.0.251', proto: UDP, sport: 5353, dport: 5353, vlan: 140, fB: 2400, rB: 0, fP: 24, rP: 0, path: 'F', rev: false, agoMin: 4, durSec: 120, flags: '', dscp: 0, ttl0: 2, hops: 1 },
   { src: '10.1.4.52', dst: '239.255.255.250', proto: UDP, sport: 51900, dport: 1900, vlan: 140, fB: 1300, rB: 0, fP: 6, rP: 0, path: 'F', rev: false, agoMin: 3, durSec: 60, flags: '', dscp: 0, ttl0: 2, hops: 1 },
   { src: '10.1.4.61', dst: '10.255.0.1', proto: TCP, sport: 50881, dport: 22, vlan: 140, fB: 5200, rB: 0, fP: 44, rP: 0, path: 'F', rev: false, agoMin: 4, durSec: 90, flags: 'SYN ACK PSH', dscp: 16, ttl0: 2 },
+  // multicast video from media-enc-30: every device on the tree reports the same packets; the source host is on dc-leaf-07 Eth1/12
+  { src: '10.9.0.30', dst: '239.10.20.30', proto: UDP, sport: 40500, dport: 5004, vlan: 310, fB: 84000000, rB: 0, fP: 64000, rP: 0, path: 'M1', rev: false, agoMin: 12, durSec: 540, flags: '', dscp: 34, ttl0: 16 },
+  { src: '10.9.0.30', dst: '239.10.20.30', proto: UDP, sport: 40500, dport: 5004, vlan: 310, fB: 84000000, rB: 0, fP: 64000, rP: 0, path: 'M2', rev: false, agoMin: 12, durSec: 540, flags: '', dscp: 34, ttl0: 16 },
   { src: '10.20.3.14', dst: '10.9.0.12', proto: TCP, sport: 55880, dport: 445, vlan: 200, fB: 1100000, rB: 22000000, fP: 1400, rP: 16000, path: 'C', rev: false, agoMin: 11, durSec: 95, flags: 'SYN ACK PSH FIN', dscp: 10, slow: [1, 38] }
 ];
 
@@ -117,7 +161,7 @@ function rng(seed: number): () => number {
 
 function hostMac(ip: string): string {
   const p = ip.split('.').map(Number);
-  return ['00', '50', '56', ...p.map(n => n.toString(16).padStart(2, '0'))].slice(0, 6).join(':');
+  return ['00', '50', '56', ...p.slice(1).map(n => n.toString(16).padStart(2, '0'))].join(':');
 }
 
 class Net {
@@ -236,6 +280,17 @@ class SnmpModel {
             cls.push({ ts: now, dev, ifIndex, cls: cname, dt, prePkts: Math.round(prePkts), preBytes: Math.round(preBytes), postBytes: Math.round(preBytes - dropBytes), dropPkts, dropBytes, qdepth: depth });
           }
         }
+        const polIn = POLICY_IN[`${d.name}|${name}`];
+        if (polIn) {
+          const defs = IN_POLICIES[polIn];
+          for (const [cname] of defs) {
+            const share = cname === 'VOICE-MARK' ? 0.1 : cname === 'VIDEO-MARK' ? 0.25 : 0.65;
+            const preBytes = inBps * share * dt / 8, prePkts = preBytes / 500;
+            const pct = cname === 'VIDEO-MARK' && this.r() < 0.1 ? 0.5 : 0;   // policer drops, now and then
+            const dropBytes = Math.round(preBytes * pct / 100);
+            cls.push({ ts: now, dev, ifIndex, cls: 'in:' + cname, dt, prePkts: Math.round(prePkts), preBytes: Math.round(preBytes), postBytes: Math.round(preBytes - dropBytes), dropPkts: Math.round(prePkts * pct / 100), dropBytes, qdepth: 0 });
+          }
+        }
         ifs.push({ ts: now, dev, ifIndex, dt, inBps, outBps, utilIn: inUtil, utilOut: outUtil, inDisc: 0, outDisc: discPkts, inErr: 0, outErr: 0, oper: 1 });
       }
     }
@@ -264,21 +319,53 @@ function seedConfig(app: App, net: Net): void {
         VALUES (?,?,161,?,?,1,'Demo network',?,?,?,?,?,?,?,?)`)
         .run(d.name, d.ip, cred, d.secs, now - 14 * 86400000, d.name, d.descr + ' (simulated)', '1.3.6.1.4.1.9.1.0', d.role, hasPol ? 'cisco-cbqos' : 'generic', now, now);
       row = { id: Number(r.lastInsertRowid) };
-      d.ifs.forEach((ifc, i) => {
-        db.prepare('INSERT INTO interfaces(dev_id, if_index, name, descr, alias, speed_mbps, oper_status, policy) VALUES (?,?,?,?,?,?,?,?)').run(row!.id, i + 1, ifc[0], ifc[1], ifc[1], ifc[2], 1, ifc[3]);
-        if (ifc[3]) for (const c of POLICIES[ifc[3]]) db.prepare('INSERT INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)').run(row!.id, i + 1, c[0], c[1], JSON.stringify(c[2]), c[3]);
-      });
+      // interfaces are written below, for new and existing demo databases alike
       db.prepare('INSERT OR REPLACE INTO device_ips(dev_id, ip, if_index) VALUES (?,?,NULL)').run(row.id, d.ip);
       db.prepare('INSERT OR REPLACE INTO exporters(ip, name, device_id, first_seen, last_seen, flows, version) VALUES (?,?,?,?,?,0,?)').run(d.ip, d.name, row.id, now - 14 * 86400000, now, d.name === 'fw-edge-01' ? 'IPFIX' : 'v9');
     }
     net.ids.set(d.name, row.id);
+    // interfaces: every row is inserted if missing, so a demo database made by an earlier version gains the new ports
+    d.ifs.forEach((ifc, i) => {
+      const ifx = i + 1, key = `${d.name}|${ifc[0]}`, pi = PORTINFO[key];
+      const svi = /^Vl(\d+)$/.exec(ifc[0]);
+      const ifType = svi ? 53 : ifc[0].startsWith('Lo') ? 24 : ifc[0].startsWith('Tu') ? 131 : 6;
+      const mode = svi ? 'svi' : pi?.mode ?? '', vlan = svi ? Number(svi[1]) : pi?.vlan ?? 0;
+      db.prepare('INSERT OR IGNORE INTO interfaces(dev_id, if_index, name, descr, alias, speed_mbps, oper_status, policy) VALUES (?,?,?,?,?,?,?,?)').run(row!.id, ifx, ifc[0], ifc[1], ifc[1], ifc[2], 1, ifc[3]);
+      db.prepare('UPDATE interfaces SET if_type = ?, port_mode = ?, vlan = ?, voice_vlan = ?, vlan_list = ?, policy_in = ? WHERE dev_id = ? AND if_index = ?').run(ifType, mode, vlan, pi?.voice ?? 0, pi?.list ?? '', POLICY_IN[key] ?? null, row!.id, ifx);
+      if (ifc[3]) for (const c of POLICIES[ifc[3]]) db.prepare('INSERT OR IGNORE INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)').run(row!.id, ifx, c[0], c[1], JSON.stringify(c[2]), c[3]);
+      if (POLICY_IN[key]) for (const c of IN_POLICIES[POLICY_IN[key]]) db.prepare('INSERT OR IGNORE INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)').run(row!.id, ifx, 'in:' + c[0], '', JSON.stringify(c[1]), c[2]);
+    });
     const ifs = db.prepare('SELECT if_index, name FROM interfaces WHERE dev_id = ?').all(row.id) as unknown as { if_index: number; name: string }[];
     for (const i of ifs) net.ifIdx.set(d.name + '|' + i.name, i.if_index);
   }
+  seedHosts(app, net);
   for (const [id, name] of VLANS) db.prepare("INSERT OR IGNORE INTO vlans(id, name, source) VALUES (?,?,'manual')").run(id, name);
   app.devices.invalidate();
   const have = new Set(app.auth.listUsers().map(u => u.username));
   for (const u of DEMO_LOGINS.slice(1)) if (!have.has(u.user)) app.auth.createUser('demo', { username: u.user, password: u.password, role: u.role === 'SNMP admin' ? 'snmp' : 'ro', mustChange: false });
+}
+
+/** Writes (and keeps fresh) what host tracking would have read from the switches: MAC address tables, ARP and LLDP neighbours. */
+function seedHosts(app: App, net: Net): void {
+  const db = app.cdb.db; const now = Date.now(), first = now - 6 * 3600_000;
+  const fdb = db.prepare(`INSERT INTO fdb(dev_id, mac, vlan, if_index, first_seen, last_seen, since) VALUES (?,?,?,?,?,?,?)
+    ON CONFLICT(dev_id, mac, vlan) DO UPDATE SET last_seen = excluded.last_seen, if_index = excluded.if_index`);
+  const arp = db.prepare(`INSERT INTO arp(dev_id, ip, mac, if_index, last_seen) VALUES (?,?,?,?,?) ON CONFLICT(dev_id, ip, mac) DO UPDATE SET last_seen = excluded.last_seen`);
+  const nb = db.prepare(`INSERT OR REPLACE INTO neighbors(dev_id, if_index, proto, rem_key, rem_name, rem_port, rem_ip, kind, caps, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  const ix = (dev: string, port: string) => net.idx(dev, port);
+  app.cdb.tx(() => {
+    for (const x of HOSTS) {
+      const mac = hostMac(x.ip);
+      fdb.run(net.ids.get(x.dev)!, mac, x.vlan, ix(x.dev, x.port), first, now, first);
+      arp.run(net.ids.get(x.l3)!, x.ip, mac, ix(x.l3, 'Vl' + x.vlan), now);
+    }
+    for (const [sw, port, ip] of LEARNED_VIA) fdb.run(net.ids.get(sw)!, hostMac(ip), HOSTS.find(h => h.ip === ip)!.vlan, ix(sw, port), first, now, first);
+    for (const [key, [proto, name, port, kind, caps]] of Object.entries(NEIGHBORS)) {
+      const [dev, ifn] = key.split('|');
+      nb.run(net.ids.get(dev)!, ix(dev, ifn), proto, name + '/' + port, name, port, '', kind, caps, now);
+    }
+    for (const d of DEVS) db.prepare('UPDATE devices SET hosts_at = ?, hosts_note = NULL, qos_note = NULL WHERE id = ?').run(now, net.ids.get(d.name)!);
+  });
 }
 
 export async function startDemo(app: App): Promise<void> {
@@ -334,6 +421,7 @@ export async function startDemo(app: App): Promise<void> {
     await app.store.insertSnmp(p.ifs, p.cls);
     for (const d of DEVS) if (only.has(d.name)) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
   });
+  every(60_000, async () => { seedHosts(app, net); });
   for (const d of DEVS) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
   void dscpName;
   console.log(' Demo sign-ins:  ' + DEMO_LOGINS.map(l => `${l.user} / ${l.password} (${l.role})`).join('   '));

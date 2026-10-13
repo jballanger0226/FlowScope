@@ -3,12 +3,16 @@ import { HttpError } from '../server/http.js';
 import { int, parseRange } from './util.js';
 import type { ClassLatest, IfLatest } from '../store/types.js';
 import { streamView } from './flows.js';
+import { isVlanInterface } from '../snmp/ports.js';
+import { DEFAULTS } from '../settings.js';
 
 export const MIBS = [
   { name: 'IF-MIB · ifXTable, ifTable', what: 'Interface names, speed, status, 64-bit octet counters and discards.' },
   { name: 'IP-MIB · ipAddrTable', what: 'The addresses of each device, so flow exporters are matched to the right device.' },
   { name: 'Q-BRIDGE-MIB · dot1qVlanStaticName', what: 'VLAN numbers and their names, so flows and interfaces can be searched by either.' },
-  { name: 'CISCO-CLASS-BASED-QOS-MIB', what: 'Output service-policy structure, per-class packets, bytes and drops, and queue depth. Used for devices that implement it.' }
+  { name: 'CISCO-CLASS-BASED-QOS-MIB', what: 'Input and output service policies, per-class packets, bytes and drops, and queue depth (64-bit counters, or 32-bit where a device has no others). Used for devices that implement it.' },
+  { name: 'CISCO-VLAN-MEMBERSHIP-MIB · CISCO-VTP-MIB · Q-BRIDGE-MIB', what: 'The VLAN of each port: access and voice VLAN, trunk native and allowed VLANs, or the standard port VLAN id.' },
+  { name: 'BRIDGE-MIB · Q-BRIDGE-MIB · IP-MIB · LLDP-MIB · CISCO-CDP-MIB', what: 'MAC address tables, ARP, and LLDP/CDP neighbours every few minutes, to show which port a host is plugged into. Cisco switches are read one VLAN at a time.' }
 ];
 
 interface Event { ts0: number; ts1: number; devId: number; dev: string; ifIndex: number; ifName: string; kind: 'drop' | 'util' | 'errors'; cls?: string; peak: number; text: string; severity: 'warn' | 'bad' }
@@ -26,23 +30,61 @@ export function registerLinks(app: App): void {
     const clBy = new Map<string, ClassLatest[]>();
     for (const k of cll) { const key = `${k.dev}/${k.ifIndex}`; const a = clBy.get(key); if (a) a.push(k); else clBy.set(key, [k]); }
     const al = alerts();
+    const counts = app.hosts.portCounts();
     const devices = app.devices.list().map(d => ({
       id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
+      qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote,
       interfaces: app.devices.interfaces(d.id).map(i => {
         const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
+        // VLAN and SVI interfaces carry routed traffic for a whole subnet and are never listed under "needs attention"
+        const vlanIf = isVlanInterface(i);
         return {
-          ifIndex: i.ifIndex, name: i.name, alias: i.alias, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy,
+          ifIndex: i.ifIndex, name: i.name, alias: i.alias, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
+          portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList,
+          isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0,
           utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
           classes: i.classes.map(def => {
             const k = cls.find(x => x.cls === def.cls);
-            return { cls: def.cls, dscps: def.dscps, bw: def.bw, queue: def.queue, dropPct: k?.dropPct ?? null, dropPkts: k?.dropPkts ?? 0, dropBytes: k?.dropBytes ?? 0, sentBps: k?.sentBps ?? null, qdepth: k?.qdepth ?? null };
+            return { cls: def.cls, label: def.cls.replace(/^in:/, ''), dir: def.cls.startsWith('in:') ? 'in' : 'out', dscps: def.dscps, bw: def.bw, queue: def.queue, dropPct: k?.dropPct ?? null, dropPkts: k?.dropPkts ?? 0, dropBytes: k?.dropBytes ?? 0, sentBps: k?.sentBps ?? null, qdepth: k?.qdepth ?? null };
           }),
           worstDropPct: cls.length ? Math.max(...cls.map(x => x.dropPct)) : null,
-          flagged: (l && Math.max(l.utilIn, l.utilOut) >= al.util) || cls.some(x => x.dropPct >= al.drop)
+          flagged: !vlanIf && ((!!l && Math.max(l.utilIn, l.utilOut) >= al.util) || cls.some(x => x.dropPct >= al.drop))
         };
       })
     }));
     c.json({ devices, windowMinutes: minutes, thresholds: al, mibs: MIBS });
+  });
+
+  // Hosts learned on one port (from the switch's MAC address table, with IP addresses from ARP) and what LLDP/CDP says is at the other end
+  w.get('/api/links/hosts', 'ro', c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9), ifx = int(c.query.get('if'), 0, 0, 1e9);
+    const d = app.devices.row(dev);
+    if (!d) throw new HttpError(404, 'No such device');
+    c.json({
+      hosts: app.hosts.portHosts(dev, ifx, 300).map(h => ({ ...h, vlanName: h.vlan ? app.vlanName(h.vlan) : '' })), neighbors: app.hosts.neighborsOf(dev, ifx),
+      readAt: d.hosts_at, note: d.hosts_note ?? '', tracking: app.settings.get('hosts').enabled
+    });
+  });
+
+  // Where is this host plugged in? q is an IP address or a MAC address.
+  w.get('/api/hosts/locate', 'ro', c => {
+    const q = (c.query.get('q') ?? '').trim().slice(0, 64);
+    if (!q) throw new HttpError(400, 'Enter an IP address or a MAC address');
+    c.json(app.hosts.locate(q));
+  });
+
+  w.get('/api/hosts/settings', 'ro', c => c.json({ ...app.settings.get('hosts'), defaults: DEFAULTS.hosts }));
+  w.put('/api/hosts/settings', 'snmp', async c => {
+    const b = await c.body<{ enabled?: boolean; intervalSec?: number; keepDays?: number }>(2000);
+    const cur = app.settings.get('hosts');
+    const interval = b.intervalSec === undefined ? cur.intervalSec : Math.floor(Number(b.intervalSec));
+    const keep = b.keepDays === undefined ? cur.keepDays : Math.floor(Number(b.keepDays));
+    if (!Number.isFinite(interval) || interval < 60 || interval > 86_400) throw new HttpError(400, 'The read interval must be between 60 seconds and 24 hours');
+    if (!Number.isFinite(keep) || keep < 1 || keep > 365) throw new HttpError(400, 'Keep host records for 1 to 365 days');
+    const next = { enabled: b.enabled === undefined ? cur.enabled : !!b.enabled, intervalSec: interval, keepDays: keep };
+    app.settings.set('hosts', next);
+    app.log.audit(c.user().username, `Host tracking ${next.enabled ? `on, every ${next.intervalSec} s, kept ${next.keepDays} days` : 'turned off'}`);
+    c.json(next);
   });
 
   // Streams that left through one interface (found from the exporter and outgoing interface in the flow records)
@@ -75,6 +117,7 @@ export function registerLinks(app: App): void {
     let scanned = 0;
     for (const d of app.devices.list()) {
       for (const i of app.devices.interfaces(d.id)) {
+        if (isVlanInterface(i)) continue;
         if (scanned++ >= maxIfs) break;
         const [u, k] = await Promise.all([app.store.ifSeries(d.id, i.ifIndex, range, ret, 288), i.classes.length ? app.store.classSeries(d.id, i.ifIndex, range, ret, 288) : Promise.resolve(null)]);
         const merge = (pts: { ts: number; v: number }[], limit: number, step: number, mk: (peak: number) => Pick<Event, 'kind' | 'text' | 'cls'>) => {

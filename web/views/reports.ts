@@ -19,7 +19,7 @@ const LAYERS: { tag: 'L2' | 'L3' | 'L4'; name: string; key: 'f2' | 'f3' | 'f4'; 
 let title = 'Top conversations';
 let dims = new Set<string>(['srcIp', 'dstIp', 'dport']);
 const filt: Record<'f2' | 'f3' | 'f4', string> = { f2: '', f3: '', f4: '' };
-let prefix = 32; let bidir = false; let range = '24h'; let sortBy = 'bytes'; let topN = '25';
+let prefix = 32; let customOn = false; let customText = '24'; let bidir = false; let range = '24h'; let sortBy = 'bytes'; let topN = '25';
 let res: Res | null = null; let error = ''; let busy = false;
 let fmt: 'csv' | 'json' = 'csv'; let copied = ''; let dlMsg = '';
 
@@ -39,6 +39,20 @@ async function run(): Promise<void> {
   } catch (e) { if (my === seq) { error = (e as Error).message; res = null; } }
   if (my === seq) { busy = false; redraw(); }
 }
+/** The prefix typed into the custom box: a whole number from 0 to 32, with or without a leading slash. */
+function parseCustom(t: string): number | null {
+  const m = /^\/?\s*(\d{1,2})$/.exec(t.trim());
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n >= 0 && n <= 32 ? n : null;
+}
+const customBad = () => customOn && parseCustom(customText) === null;
+function pickPrefix(id: string): void {
+  if (id === 'custom') { customOn = true; customText = String(prefix); const n = parseCustom(customText); if (n !== null) prefix = n; }
+  else { customOn = false; prefix = Number(id); void run(); }
+  redraw();
+}
+const customSoon = debounce(() => { const n = parseCustom(customText); if (n !== null) { prefix = n; void run(); } }, 400);
 const runSoon = debounce(() => void run(), 500);
 
 function toggleDim(id: string): void { if (dims.has(id)) dims.delete(id); else dims.add(id); void run(); redraw(); }
@@ -101,7 +115,11 @@ export function render(): VNode {
       h('div', { class: 'layers', 'aria-label': 'Layer selection' }, LAYERS.map(layerPanel)),
       h('div', { class: 'panel row end', 'aria-label': 'Combine options', style: 'gap:16px 28px' },
         h('div', { class: 'col', style: 'gap:6px' }, h('span', { class: 'flabel muted' }, 'Aggregate IPs to'),
-          seg('IP prefix length', [['32', '/32 host'], ['24', '/24'], ['16', '/16'], ['8', '/8']].map(([id, label]) => ({ id, label, on: String(prefix) === id })), id => { prefix = Number(id); void run(); redraw(); })),
+          h('div', { class: 'row', style: 'gap:10px;flex-wrap:nowrap' },
+            seg('IP prefix length', [['32', '/32 host'], ['24', '/24'], ['16', '/16'], ['custom', 'Custom']].map(([id, label]) => ({ id, label, on: id === 'custom' ? customOn : !customOn && String(prefix) === id })), pickPrefix),
+            customOn ? h('label', { class: 'row', style: 'gap:6px;flex-wrap:nowrap' }, h('span', { class: 'mono muted' }, '/'),
+              h('input', { class: 'input mono' + (customBad() ? ' bad' : ''), type: 'number', inputmode: 'numeric', min: 0, max: 32, step: 1, value: customText, 'aria-label': 'Prefix length, 0 to 32', 'aria-invalid': customBad(), style: 'width:76px', oninput: (e: Event) => { customText = (e.target as HTMLInputElement).value; customSoon(); redraw(); } })) : null),
+          customOn ? (customBad() ? h('span', { class: 'msg bad', role: 'alert' }, 'Enter a whole number from 0 to 32.') : h('span', { class: 'dim', style: 'font-size:12px' }, prefix === 0 ? '/0 puts every address in one group.' : prefix === 32 ? '/32 keeps each host separate.' : `Addresses are grouped into /${prefix} networks.`)) : null),
         btn('Combine A ↔ B (merge both directions of a host pair)', { pressed: bidir, onclick: () => { bidir = !bidir; void run(); redraw(); } }),
         field('Time range', select(range, RANGES, v => { range = v; void run(); redraw(); }, { aria: 'Time range', width: '176px' })),
         field('Rank by', select(sortBy, [['bytes', 'Bytes'], ['pkts', 'Packets'], ['flows', 'Flows']], v => { sortBy = v; void run(); redraw(); }, { aria: 'Rank by', width: '130px' })),

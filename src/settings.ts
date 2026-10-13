@@ -27,6 +27,8 @@ export const DEFAULTS = {
   backend: 'sqlite' as 'sqlite' | 'clickhouse',
   logDays: 90,
   alerts: { util: 90, drop: 1 },
+  /** Reading MAC address tables, ARP and LLDP/CDP from the polled devices to find which port a host is on. */
+  hosts: { enabled: true, intervalSec: 300, keepDays: 14 },
   aaa: {
     services: { web: 'local', api: 'local', cli: 'local' },
     fallback: true,
