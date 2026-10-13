@@ -207,17 +207,18 @@ export function registerAdmin(app: App): void {
 
   /* ---- VLAN names ---- */
   w.put('/api/admin/vlans/:id', 'admin', async c => {
-    const id = int(c.params.id, 0, 0, 4094);
+    const id = Number(c.params.id);
     const b = await c.body<{ name?: string }>(1000);
     const name = str(b.name, 64).trim();
-    if (id < 1 || id > 4094) throw new HttpError(400, 'A VLAN ID is 1 to 4094');
+    if (!Number.isInteger(id) || id < 1 || id > 4094) throw new HttpError(400, 'A VLAN ID is 1 to 4094');
     if (!name) throw new HttpError(400, 'Enter a name');
     app.cdb.db.prepare("INSERT INTO vlans(id, name, source) VALUES (?,?,'manual') ON CONFLICT(id) DO UPDATE SET name = excluded.name, source = 'manual'").run(id, name);
     app.log.audit(who(c), `VLAN ${id} named "${name}"`);
     c.json({ vlans: app.cdb.db.prepare('SELECT id, name, source FROM vlans ORDER BY id').all() });
   });
   w.del('/api/admin/vlans/:id', 'admin', c => {
-    const id = int(c.params.id, 0, 0, 4094);
+    const id = Number(c.params.id);
+    if (!Number.isInteger(id) || id < 1 || id > 4094) throw new HttpError(400, 'A VLAN ID is 1 to 4094');
     app.cdb.db.prepare('DELETE FROM vlans WHERE id = ?').run(id);
     app.log.audit(who(c), `VLAN ${id} name removed`);
     c.json({ vlans: app.cdb.db.prepare('SELECT id, name, source FROM vlans ORDER BY id').all() });

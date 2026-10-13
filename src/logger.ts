@@ -22,7 +22,8 @@ export class AppLog {
 
   private add(level: Level, source: string, message: string, user = 'system'): void {
     const lv = level.toLowerCase();
-    if (ORDER[lv] < ORDER[this.minLevel]) return;
+    // the audit trail is never filtered out by the log level
+    if (source !== 'audit' && ORDER[lv] < ORDER[this.minLevel]) return;
     const ts = Date.now();
     this.queue.push({ ts, level, source, user, message });
     if (!this.quiet) {
