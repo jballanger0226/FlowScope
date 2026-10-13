@@ -253,6 +253,15 @@ export class DeviceService {
   }
   policyOf(exporterIp: string, ifIndex: number): string | null { const l = this.build(); const id = l.ipToDev.get(exporterIp); return id === undefined ? null : l.policies.get(`${id}/${ifIndex}`) ?? null; }
 
+  /** Every address a device may use as the source of its flow exports. */
+  exporterIpsForDevice(id: number): string[] {
+    const d = this.row(id);
+    if (!d) return [];
+    const ips = new Set<string>([d.ip]);
+    for (const r of this.cdb.db.prepare('SELECT ip FROM device_ips WHERE dev_id = ?').all(id) as unknown as { ip: string }[]) ips.add(r.ip);
+    return [...ips];
+  }
+
   /** Exporter addresses of devices whose name or address contains the text. Exporter IPs that are not in the device list match on the address. */
   exporterIpsByName(text: string, knownExporters: Iterable<string> = []): string[] {
     const t = text.toLowerCase();

@@ -225,6 +225,7 @@ export class SqliteOps {
       case 'vlan': return this.numIn(t.vlan, c.ids, args);
       case 'mac': { const p = '%' + likeEsc(c.text.toLowerCase()) + '%'; args.push(p, p); return `(${t.srcMac} LIKE ? ESCAPE '\\' OR ${t.dstMac} LIKE ? ESCAPE '\\')`; }
       case 'exporter': if (!c.ips.length) return '0'; args.push(...c.ips); return `${t.exporter} IN (${c.ips.map(() => '?').join(',')})`;
+      case 'outif': if (!t.outIf || !c.ips.length) return t.outIf ? '0' : '1'; args.push(...c.ips, c.ifIndex); return `(${t.exporter} IN (${c.ips.map(() => '?').join(',')}) AND ${t.outIf} = ?)`;
       case 'qos': return '1';
       case 'dscp': { const a: SqlArg[] = []; const x = this.numIn(t.dscp, c.values, a); args.push(...a); return x; }
       case 'text': {
@@ -625,15 +626,15 @@ export class SqliteOps {
 
 interface ColMap {
   srcIp: string; dstIp: string; srcN: string; dstN: string; sport: string | null; dport: string; proto: string; vlan: string;
-  srcMac: string; dstMac: string; exporter: string; inIf: string; dscp: string; postDscp: string; flags: string | null; svc: string;
+  srcMac: string; dstMac: string; exporter: string; inIf: string; dscp: string; postDscp: string; flags: string | null; svc: string; outIf: string | null;
 }
 const RAW_COLS: ColMap = {
   srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'src_n', dstN: 'dst_n', sport: 'sport', dport: 'dport', proto: 'proto', vlan: 'vlan',
-  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: '(tos >> 2)', postDscp: '(CASE WHEN post_tos IS NULL THEN NULL ELSE post_tos >> 2 END)', flags: 'flags', svc: 'MIN(COALESCE(sport, 0), COALESCE(dport, 0))'
+  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: '(tos >> 2)', postDscp: '(CASE WHEN post_tos IS NULL THEN NULL ELSE post_tos >> 2 END)', flags: 'flags', svc: 'MIN(COALESCE(sport, 0), COALESCE(dport, 0))', outIf: 'out_if'
 };
 const ROLLUP_MAP: ColMap = {
   srcIp: 'src_ip', dstIp: 'dst_ip', srcN: 'src_n', dstN: 'dst_n', sport: null, dport: 'dport', proto: 'proto', vlan: 'vlan',
-  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: 'dscp', postDscp: 'post_dscp', flags: null, svc: 'svc'
+  srcMac: 'src_mac', dstMac: 'dst_mac', exporter: 'exporter', inIf: 'in_if', dscp: 'dscp', postDscp: 'post_dscp', flags: null, svc: 'svc', outIf: null
 };
 
 function likeEsc(s: string): string { return s.replace(/[\\%_]/g, m => '\\' + m); }

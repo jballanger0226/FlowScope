@@ -104,8 +104,8 @@ export function registerDevices(app: App): void {
 
   /* ---- discovery ---- */
   w.post('/api/discovery', 'snmp', async c => {
-    const b = await c.body<{ spec?: string; credId?: number }>(5000);
-    const j = await guard(() => app.discovery.start(str(b.spec, 2000), who(c), b.credId === undefined ? undefined : Number(b.credId)));
+    const b = await c.body<{ spec?: string; credId?: number; tryOthers?: boolean }>(5000);
+    const j = await guard(() => app.discovery.start(str(b.spec, 2000), who(c), b.credId === undefined ? undefined : Number(b.credId), b.tryOthers === true));
     c.json({ job: j }, 202);
   });
   w.get('/api/discovery/:id', 'snmp', c => {

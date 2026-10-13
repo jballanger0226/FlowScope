@@ -15,6 +15,22 @@ export function streamView(app: App, r: StreamRow) {
   };
 }
 
+/** Bytes per time bucket for each direction, using the first exporter's records only so nothing is counted twice. */
+function activity(recs: { ts0: number; ts1: number; bytes: number; srcIp: string; sport: number; primary?: boolean }[], d: { initiator: { ip: string; port: number }; t0: number; t1: number }, n = 24) {
+  const span = Math.max(1000, d.t1 - d.t0), step = span / n;
+  const fwd = new Array<number>(n).fill(0), rev = new Array<number>(n).fill(0);
+  for (const r of recs) {
+    if (r.primary === false) continue;
+    const arr = r.srcIp === d.initiator.ip && r.sport === d.initiator.port ? fwd : rev;
+    const a = r.ts0, b = Math.max(r.ts1, r.ts0 + 1);
+    for (let i = Math.max(0, Math.floor((a - d.t0) / step)); i < n && d.t0 + i * step < b; i++) {
+      const lo = Math.max(a, d.t0 + i * step), hi = Math.min(b, d.t0 + (i + 1) * step);
+      if (hi > lo) arr[i] += r.bytes * (hi - lo) / (b - a);
+    }
+  }
+  return { t0: d.t0, t1: d.t0 + span, fwd: fwd.map(Math.round), rev: rev.map(Math.round) };
+}
+
 export function registerFlows(app: App): void {
   const w = app.web;
 
@@ -65,6 +81,6 @@ export function registerFlows(app: App): void {
       classDrops: (ip, outIf, _a, _b, dscp) => (drops.get(`${ip}|${outIf}`) ?? []).filter(d => d.dscps.includes(dscp)).map(d => ({ cls: d.cls, dropPct: d.dropPct, dropPkts: d.dropPkts }))
     });
     if (!detail) throw new HttpError(404, 'No records for that stream');
-    c.json(detail);
+    c.json({ ...detail, activity: activity(recs, detail) });
   });
 }

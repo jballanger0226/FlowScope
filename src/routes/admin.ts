@@ -9,6 +9,7 @@ import { CertError } from '../tls/manager.js';
 import type { KeyType } from '../tls/x509.js';
 import type { AaaSettings, Provider, Role, Service } from '../settings.js';
 import { inContainer } from '../config.js';
+import { randomToken } from '../secrets.js';
 import { attachment, int, parseRange, stamp, str, toCsv } from './util.js';
 
 const PROVIDERS: Provider[] = ['local', 'radius', 'ldap', 'ad', 'saml'];
@@ -192,8 +193,11 @@ export function registerAdmin(app: App): void {
   w.post('/api/admin/users', 'admin', async c => {
     const b = await c.body<{ username?: string; password?: string; role?: Role; mustChange?: boolean }>(5000);
     if (!b.role || !ROLE_RANK[b.role]) throw new HttpError(400, 'Choose a role');
-    await guard(() => app.auth.createUser(who(c), { username: str(b.username, 128), password: str(b.password, 1024), role: b.role!, mustChange: b.mustChange }));
-    c.json({ users: app.auth.listUsers() }, 201);
+    // without a password, a temporary one is generated, shown once, and must be changed at first sign-in
+    const generated = !b.password;
+    const password = generated ? randomToken(12).replace(/[-_]/g, 'x') : str(b.password, 1024);
+    await guard(() => app.auth.createUser(who(c), { username: str(b.username, 128), password, role: b.role!, mustChange: generated ? true : b.mustChange }));
+    c.json({ users: app.auth.listUsers(), temporaryPassword: generated ? password : undefined }, 201);
   });
   w.patch('/api/admin/users/:id', 'admin', async c => {
     const b = await c.body<{ role?: Role; disabled?: boolean; password?: string; unlock?: boolean }>(5000);

@@ -2,6 +2,14 @@ import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { int, parseRange } from './util.js';
 import type { ClassLatest, IfLatest } from '../store/types.js';
+import { streamView } from './flows.js';
+
+export const MIBS = [
+  { name: 'IF-MIB · ifXTable, ifTable', what: 'Interface names, speed, status, 64-bit octet counters and discards.' },
+  { name: 'IP-MIB · ipAddrTable', what: 'The addresses of each device, so flow exporters are matched to the right device.' },
+  { name: 'Q-BRIDGE-MIB · dot1qVlanStaticName', what: 'VLAN numbers and their names, so flows and interfaces can be searched by either.' },
+  { name: 'CISCO-CLASS-BASED-QOS-MIB', what: 'Output service-policy structure, per-class packets, bytes and drops, and queue depth. Used for devices that implement it.' }
+];
 
 interface Event { ts0: number; ts1: number; devId: number; dev: string; ifIndex: number; ifName: string; kind: 'drop' | 'util' | 'errors'; cls?: string; peak: number; text: string; severity: 'warn' | 'bad' }
 
@@ -34,7 +42,16 @@ export function registerLinks(app: App): void {
         };
       })
     }));
-    c.json({ devices, windowMinutes: minutes, thresholds: al });
+    c.json({ devices, windowMinutes: minutes, thresholds: al, mibs: MIBS });
+  });
+
+  // Streams that left through one interface (found from the exporter and outgoing interface in the flow records)
+  w.get('/api/links/streams', 'ro', async c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9), ifx = int(c.query.get('if'), 0, 0, 1e9);
+    if (!app.devices.row(dev)) throw new HttpError(404, 'No such device');
+    const range = parseRange(c.query, '1h');
+    const page = await app.store.searchStreams({ range, conds: [{ kind: 'outif', ips: app.devices.exporterIpsForDevice(dev), ifIndex: ifx }], sort: 'bytes', dir: 'desc', limit: int(c.query.get('limit'), 8, 1, 50) });
+    c.json({ rows: page.rows.map(r => streamView(app, r)), total: page.total });
   });
 
   // Time series for one interface: utilisation plus drop % and dropped bytes for each class

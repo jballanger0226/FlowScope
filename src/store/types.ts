@@ -17,6 +17,7 @@ export type Cond =
   | { kind: 'vlan'; ids: number[] }
   | { kind: 'mac'; text: string }
   | { kind: 'exporter'; ips: string[] }
+  | { kind: 'outif'; ips: string[]; ifIndex: number }
   | { kind: 'qos'; mode: 'changed' | 'unchanged' }
   | { kind: 'dscp'; values: number[] }
   | { kind: 'text'; text: string; ips: string[]; vlans: number[]; ports: number[] };
