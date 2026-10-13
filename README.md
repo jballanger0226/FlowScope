@@ -15,7 +15,7 @@ One Node.js 22 process, one data folder. Runs on Linux, macOS, Windows and as a 
 
 ## Quick start
 
-Needs Node.js 22.13 or newer.
+Needs Node.js 22.13 or newer. Run the commands from the folder that contains `package.json` (see [Getting the files](#getting-the-files-read-this-first-if-npm-says-it-cannot-find-packagejson) if you downloaded a ZIP). On Windows, follow the [Windows](#windows) steps.
 
 ```sh
 npm install
@@ -27,6 +27,41 @@ npm start             # real use
 The certificate is self-signed until you install your own (Admin → HTTPS certificate), so the browser warns on first visit.
 On first start the `admin` account is created. Set `FLOWSCOPE_ADMIN_PASSWORD` (12+ characters) beforehand, or read the generated password from the log.
 Point your routers' NetFlow v5/v9 or IPFIX export at this host, UDP **2055** or **4739**.
+
+### Getting the files (read this first if `npm` says it cannot find `package.json`)
+
+Every `npm` command below must be run **inside the folder that directly contains `package.json`**. Check with `dir package.json` (Windows) or `ls package.json` (macOS/Linux); if it says the file is not found, you are in the wrong folder.
+
+The usual cause is the downloaded ZIP: GitHub's **Code → Download ZIP** gives `flowscope-main.zip`, and Windows' **Extract All** puts a folder named after the zip around the folder that is already inside it, so you end up with `...\FlowScope-main\FlowScope-main\package.json`. Go one level down:
+
+```powershell
+cd "C:\Users\you\Downloads\FlowScope-main\FlowScope-main"     # adjust to your path; use dir to see what is inside
+dir package.json                                                  # must list the file
+```
+
+Cloning with `git clone https://github.com/jballanger0226/flowscope` avoids this (it creates one folder), and is easier to update later with `git pull`.
+
+### Windows
+
+1. Install Node.js 22.13 or newer (the LTS installer from nodejs.org; tick the option that adds it to PATH), then open a **new** PowerShell window.
+2. Get the files as above, and `cd` into the folder that contains `package.json`.
+3. Build and try it:
+
+   ```powershell
+   npm install
+   npm run build
+   npm run demo        # simulated network; sign in as admin / flowscope-demo-admin at https://localhost:8443/  (stop with Ctrl+C)
+   ```
+
+4. To run it for real, as a service that starts at boot, open an **elevated** PowerShell (Run as administrator), `cd` to the same folder and run:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\packaging\windows\install.ps1
+   ```
+
+   This is needed (rather than just `.\packaging\windows\install.ps1`) when scripts are blocked, which is the default for files that came from a ZIP download. It copies the program to `C:\Program Files\FlowScope`, keeps data and the log in `C:\ProgramData\FlowScope`, and opens the firewall for TCP 8443 and UDP 2055/4739. Set `FLOWSCOPE_ADMIN_PASSWORD` in `C:\ProgramData\FlowScope\flowscope.env` before the first start, or read the generated password from `flowscope.log` in the same folder.
+
+Windows Defender Firewall may also ask about Node.js the first time it runs by hand; allow it on the networks your exporters are on. The program can be run without installing it with `npm start`.
 
 ### Container
 

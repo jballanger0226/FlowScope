@@ -180,7 +180,7 @@ For a machine where you do not want containers:
 | macOS | `sudo packaging/macos/install.sh` |
 | Windows | elevated PowerShell: `.\packaging\windows\install.ps1` |
 
-These need Node.js 22.13 or newer. Details are in the README.
+These need Node.js 22.13 or newer. Step-by-step Windows instructions, including how to avoid the `Could not read package.json` error you get when you run `npm` in the wrong folder after unzipping a download, are in the README under "Getting the files" and "Windows".
 
 ## After installing
 
@@ -201,4 +201,5 @@ These need Node.js 22.13 or newer. Details are in the README.
 | Service fails in an LXC with `status=226/NAMESPACE` | The sandboxing drop-in is missing; re-run the installer (`flowscope-lxc.sh update <CTID>`) |
 | `pct create` fails with a template error | Run `pveam update`, or set `TEMPLATE=` to a template you already have under **CT Templates** |
 | Container has no network during install | Check the bridge, gateway and DNS; the installer needs to reach deb.debian.org and nodejs.org |
+| `npm error ... Could not read package.json` (Windows or anywhere) | `npm` was run in the wrong folder, usually one level above the real project folder after unzipping. `cd` into the folder that contains `package.json` (README: "Getting the files") |
 | Forgot the admin password | Docker: `docker exec -it -u node flowscope node /app/dist/src/cli.js reset-password admin` (`-u node` keeps the database files owned by the right user). LXC: `pct exec <CTID> -- flowscope-ctl reset-password admin` |
