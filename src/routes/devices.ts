@@ -115,9 +115,9 @@ export function registerDevices(app: App): void {
   });
   w.post('/api/discovery/:id/cancel', 'snmp', c => { app.discovery.cancel(c.params.id); c.json({ ok: true }); });
   w.post('/api/discovery/:id/add', 'snmp', async c => {
-    const b = await c.body<{ ips?: string[] }>(100_000);
+    const b = await c.body<{ ips?: string[]; intervalSec?: number }>(100_000);
     if (!Array.isArray(b.ips) || !b.ips.length) throw new HttpError(400, 'Choose at least one device');
-    c.json(await guard(() => app.discovery.addFound(c.params.id, b.ips!.map(s => str(s, 64)), who(c))));
+    c.json(await guard(() => app.discovery.addFound(c.params.id, b.ips!.map(s => str(s, 64)), who(c), b.intervalSec === undefined ? undefined : Number(b.intervalSec))));
   });
 
   /* ---- credential sets: readable by the SNMP admin, changed only by the full admin ---- */

@@ -2,7 +2,7 @@ import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { parseQuery } from '../query/tokens.js';
 import { appName, dscpName, protoName } from '../query/apps.js';
-import { analyzeStream } from '../analysis/hops.js';
+import { analyzeStream, type HopContext } from '../analysis/hops.js';
 import type { StreamRow } from '../store/types.js';
 import { int, parseRange, str } from './util.js';
 
@@ -43,8 +43,23 @@ export function registerFlows(app: App): void {
     const limit = int(c.query.get('limit'), 200, 1, 2000);
     const page = await app.store.searchStreams({ range, conds: parsed.conds, sort, dir, limit });
     const user = c.user().username;
+    // health of the first rows: a quick hop analysis of each stream (loss between hops, slow links) without the SNMP lookups
+    const quick: HopContext = { deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i) };
+    const health = new Map<string, { kind: 'ok' | 'warn' | 'bad'; text: string }>();
+    await Promise.all(page.rows.slice(0, 100).map(async r => {
+      try {
+        const recs = await app.store.streamRecords(r.skey, range);
+        const d = analyzeStream(r.skey, recs, quick);
+        if (!d) return;
+        const obs = [...d.forward, ...d.reverse].flatMap(h => h.obs);
+        const loss = obs.filter(o => o.kind === 'loss').map(o => Number(/^([\d.]+)%/.exec(o.text)?.[1] ?? 0));
+        if (loss.length) health.set(r.skey, { kind: Math.max(...loss) >= 5 ? 'bad' : 'warn', text: `Loss ${Math.max(...loss).toFixed(1)}%` });
+        else if (obs.some(o => o.kind === 'slow')) health.set(r.skey, { kind: 'warn', text: 'High latency' });
+        else health.set(r.skey, { kind: 'ok', text: 'Healthy' });
+      } catch { /* leave the status blank */ }
+    }));
     if (q.trim()) app.log.info('query', `Flow search: ${q.trim()} (${page.total} result${page.total === 1 ? '' : 's'})`, user);
-    c.json({ rows: page.rows.map(r => streamView(app, r)), total: page.total, truncated: page.truncated, errors: parsed.errors, range, tier: page.tier });
+    c.json({ rows: page.rows.map(r => ({ ...streamView(app, r), health: health.get(r.skey) ?? null })), total: page.total, truncated: page.truncated, errors: parsed.errors, range, tier: page.tier });
   });
 
   // One stream with its hops. The stream id contains punctuation, so it goes in the query string.

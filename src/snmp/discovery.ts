@@ -81,14 +81,14 @@ export class Discovery {
   cancel(id: string): void { const j = this.jobs.get(id); if (j) j.cancelled = true; }
 
   /** Adds the chosen devices from a finished (or running) scan using what the scan already read. */
-  async addFound(id: string, ips: string[], user: string): Promise<{ added: DeviceView[]; failed: { ip: string; error: string }[] }> {
+  async addFound(id: string, ips: string[], user: string, intervalSec?: number): Promise<{ added: DeviceView[]; failed: { ip: string; error: string }[] }> {
     const j = this.jobs.get(id);
     if (!j) throw new DeviceError('That scan has expired. Run it again.', 404);
     const added: DeviceView[] = []; const failed: { ip: string; error: string }[] = [];
     for (const ip of ips) {
       const found = j.probes.get(ip);
       if (!found) { failed.push({ ip, error: 'Not found by this scan' }); continue; }
-      try { added.push(await this.devs.add({ ip, credId: found.credId, probed: found.p, source: `Discovered ${j.spec}` })); j.probes.delete(ip); const r = j.results.find(x => x.ip === ip); if (r) r.status = 'already'; }
+      try { added.push(await this.devs.add({ ip, credId: found.credId, probed: found.p, source: `Discovered ${j.spec}`, intervalSec })); j.probes.delete(ip); const r = j.results.find(x => x.ip === ip); if (r) r.status = 'already'; }
       catch (e) { failed.push({ ip, error: (e as Error).message }); }
     }
     if (added.length) this.log.audit(user, `Added ${added.length} device${added.length === 1 ? '' : 's'} from discovery ${j.spec}: ${added.map(d => d.name).join(', ')}`);

@@ -31,7 +31,7 @@ export function registerLinks(app: App): void {
       interfaces: app.devices.interfaces(d.id).map(i => {
         const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
         return {
-          ifIndex: i.ifIndex, name: i.name, alias: i.alias, speedMbps: i.speedMbps, oper: i.oper, policy: i.policy,
+          ifIndex: i.ifIndex, name: i.name, alias: i.alias, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy,
           utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
           classes: i.classes.map(def => {
             const k = cls.find(x => x.cls === def.cls);
