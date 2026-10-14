@@ -19,8 +19,11 @@ export class Discovery {
 
   constructor(private devs: DeviceService, private creds: CredentialStore, private log: AppLog, private o: { timeoutMs?: number; concurrency?: number; port?: number } = {}) {}
 
-  start(spec: string, user: string, credId?: number, tryOthers = false): Job {
+  /** `allow`, when given, must accept every address in the search; otherwise nothing is sent. */
+  start(spec: string, user: string, credId?: number, tryOthers = false, allow?: (ip: string) => boolean): Job {
     const targets = parseTargets(spec);
+    const outside = allow ? targets.find(ip => !allow(ip)) : undefined;
+    if (outside) throw new DeviceError(`${outside} is outside the networks you may scan. An administrator sets them under Admin, SNMP credentials.`, 403);
     const cid = credId ?? this.creds.defaultId();
     if (cid === null || cid === undefined) throw new DeviceError('Create a credential set first, then scan');
     const cred = this.creds.list().find(c => c.id === cid);

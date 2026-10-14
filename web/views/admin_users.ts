@@ -27,13 +27,21 @@ let creds: Cred[] = []; let cErr = '';
 let editId = 0; let pendingDel = '';
 let cf = blank();
 let cMsg = '', cOk = false, cBusy = false;
+let nets = '', netsMsg = '', netsOk = false;
 
 function blank() { return { name: '', version: 'v3', username: '', level: 'authPriv', authProto: 'SHA-256', authKey: '', privProto: 'AES-128', privKey: '', context: '', community: '', def: false }; }
 
 export async function load(): Promise<void> {
   try { const r = await get<{ users: User[]; minLen: number }>('/api/admin/users'); users = r.users; minLen = r.minLen; uErr = ''; } catch (e) { uErr = (e as Error).message; }
   try { creds = (await get<{ credentials: Cred[] }>('/api/snmp/credentials')).credentials; cErr = ''; } catch (e) { cErr = (e as Error).message; }
+  try { nets = (await get<{ allowedNets: string }>('/api/snmp/access')).allowedNets; } catch { /* older server: the limit does not exist */ }
   loaded = true; redraw();
+}
+async function saveNets(): Promise<void> {
+  netsMsg = '';
+  try { nets = (await put<{ allowedNets: string }>('/api/snmp/access', { allowedNets: nets })).allowedNets; netsOk = true; netsMsg = nets ? 'Saved. SNMP device admins are limited to these networks.' : 'Saved. There is no limit.'; }
+  catch (e) { netsOk = false; netsMsg = (e as Error).message; }
+  redraw();
 }
 
 async function addUser(): Promise<void> {
@@ -116,7 +124,7 @@ function credsPanel(): VNode {
   const hasAuth = v3 && cf.level !== 'noAuthNoPriv', hasPriv = v3 && cf.level === 'authPriv';
   const ph = editId ? 'Stored. Leave blank to keep it.' : '';
   return h('div', { class: 'split' },
-    h('div', { class: 'mainp', style: 'flex-basis:520px' }, h('div', { class: 'panel col', style: 'gap:12px' },
+    h('div', { class: 'mainp col', style: 'flex-basis:520px;gap:16px' }, h('div', { class: 'panel col', style: 'gap:12px' },
       h('h3', null, 'Credential sets'),
       h('p', { class: 'muted' }, 'Create each set once. When someone adds a device or runs a discovery on the SNMP devices tab, they pick a set by name and never type a secret. The default set is preselected.'),
       cErr ? note(cErr, 'bad', true) : null,
@@ -126,7 +134,12 @@ function credsPanel(): VNode {
         h('div', { class: 'row', style: 'gap:6px' }, btn('Edit', { small: true, onclick: () => editCred(c) }), !c.isDefault ? btn('Make default', { small: true, kind: 'ghost', onclick: () => void credAction(() => post(`/api/snmp/credentials/${c.id}/default`), `${c.name} is now the default.`) }) : null,
           btn(pendingDel === 'c' + c.id ? 'Confirm delete' : 'Delete', { small: true, kind: 'danger', disabled: c.usedBy > 0, title: c.usedBy ? 'In use by devices' : undefined, onclick: () => { if (pendingDel === 'c' + c.id) { pendingDel = ''; void credAction(() => del(`/api/snmp/credentials/${c.id}`), `Deleted ${c.name}.`); } else { pendingDel = 'c' + c.id; redraw(); } } })))),
       !creds.length && loaded ? empty('No credential sets yet. Create the first one on the right.') : null,
-      msg(cMsg && !editId ? cMsg : '', cOk ? 'ok' : 'bad'))),
+      msg(cMsg && !editId ? cMsg : '', cOk ? 'ok' : 'bad')),
+    h('div', { class: 'panel col', style: 'gap:10px' },
+      h('h3', null, 'Where SNMP device admins may send these credentials'),
+      h('p', { class: 'muted' }, 'An SNMP device admin can test, add and scan any address with a stored credential set. SNMPv2c sends its community string in clear text, so whoever listens at the address they choose can read it. List the networks they may use, such as 10.20.0.0/16, 192.0.2.10. Leave it empty for no limit. Full admins are never limited.'),
+      field('Allowed addresses and prefixes', textInput(nets, v => { nets = v; }, { placeholder: 'empty = any address', aria: 'Allowed networks' })),
+      h('div', { class: 'row' }, btn('Save', { kind: 'primary', onclick: () => void saveNets() }), msg(netsMsg, netsOk ? 'ok' : 'bad')))),
     h('div', { class: 'mainp', style: 'flex-basis:520px' }, h('div', { class: 'panel col', style: 'gap:12px' },
       h('h3', null, editId ? `Edit ${creds.find(c => c.id === editId)?.name ?? 'credential set'}` : 'New credential set'),
       h('div', { class: 'two' },

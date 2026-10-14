@@ -26,6 +26,8 @@ export const DEFAULTS = {
   collect: { flow: true, snmp: true, flowAt: 0, snmpAt: 0 } as CollectSettings,
   backend: 'sqlite' as 'sqlite' | 'clickhouse',
   logDays: 90,
+  /** Limits on where SNMP-role users can send stored credentials. Empty allows any address. */
+  snmpAccess: { allowedNets: '' },
   alerts: { util: 90, drop: 1 },
   /** Reading MAC address tables, ARP and LLDP/CDP from the polled devices to find which port a host is on. */
   hosts: { enabled: true, intervalSec: 300, keepDays: 14 },
