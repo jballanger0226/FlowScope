@@ -157,3 +157,28 @@ test('LDAP login maps groups; AD nested groups', async () => {
     await assert.rejects(() => e.auth.authenticate('web', 'ann', 'ann-password-1', '3.3.3.4'));
   } finally { dir.close(); e.done(); }
 });
+
+test('with SAML as the web provider, local administrators can still sign in through the form (when fallback is on)', async () => {
+  const e = env();
+  try {
+    e.auth.bootstrap('initial-admin-password');
+    e.auth.createUser('admin', { username: 'localro', password: 'local-ro-password', role: 'ro' });
+    const a = e.settings.get('aaa');
+    a.services.web = 'saml'; a.fallback = true; e.settings.set('aaa', a);
+    const r = await e.auth.authenticate('web', 'admin', 'initial-admin-password', '3.3.3.1');
+    assert.equal(r.principal.role, 'admin'); assert.equal(r.principal.source, 'local');
+    // only administrators, and the answer does not reveal that the password was right
+    await assert.rejects(() => e.auth.authenticate('web', 'localro', 'local-ro-password', '3.3.3.2'), /Wrong user name or password/);
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'not-the-password', '3.3.3.3'), /Wrong user name or password/);
+    // a disabled admin stays out
+    e.auth.createUser('admin', { username: 'admin2', password: 'second-admin-password', role: 'admin' });
+    e.cdb.db.prepare("UPDATE users SET disabled = 1 WHERE username = 'admin2'").run();
+    await assert.rejects(() => e.auth.authenticate('web', 'admin2', 'second-admin-password', '3.3.3.4'), /disabled/);
+    // repeated failures are still rate limited
+    for (let i = 0; i < 10; i++) await assert.rejects(() => e.auth.authenticate('web', 'admin', 'bad-' + i, '3.3.3.5'));
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'initial-admin-password', '3.3.3.5'), /Too many/);
+    // fallback off: SAML only
+    a.fallback = false; e.settings.set('aaa', a);
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'initial-admin-password', '3.3.3.6'), /Wrong user name or password/);
+  } finally { e.done(); }
+});

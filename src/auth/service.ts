@@ -206,7 +206,16 @@ export class AuthService {
     const provider = a.services[service];
     let outcome: { ok: boolean; role?: Role; reason?: string; mustChange?: boolean; unreachable?: boolean; name?: string } & { source?: string };
     if (provider === 'local') outcome = { ...this.localLogin(username, password), source: 'local' };
-    else if (provider === 'saml') outcome = { ok: false, reason: 'This service signs in through SAML in the browser' };
+    else if (provider === 'saml') {
+      // SAML signs in through the browser. The web form is the break-glass path for local administrators, so a SAML outage cannot lock everyone out.
+      if (!a.fallback) outcome = { ok: false, reason: 'This service signs in through SAML in the browser' };
+      else {
+        const local = this.localLogin(username, password);
+        if (local.ok && local.role === 'admin') { outcome = { ...local, source: 'local' }; this.log.warn('auth', `${username} signed in with the local break-glass account while the web service uses SAML`, username); }
+        else if (local.ok) outcome = { ok: false, reason: 'With SAML, the local sign-in is limited to local administrators' };
+        else outcome = { ...local, source: 'local' };
+      }
+    }
     else {
       const r = await this.remote(provider, username, password);
       outcome = { ...r, source: provider };
