@@ -78,7 +78,7 @@ export function render(): VNode {
         h('p', { class: 'muted' }, 'Tokens let scripts call the REST API with the header Authorization: Bearer <token>. A token carries your role or less.'),
         h('div', { class: 'row end' },
           field('Name', textInput(tName, v => { tName = v; }, { placeholder: 'grafana-readonly', aria: 'Token name', onenter: () => void createToken() })),
-          field('Valid for', select(tDays, [['30', '30 days'], ['90', '90 days'], ['365', '1 year'], ['0', 'No expiry']], v => { tDays = v; redraw(); }, { aria: 'Token lifetime' })),
+          field('Valid for', select(tDays, [['30', '30 days'], ['90', '90 days'], ['365', '1 year'], ...(me.role === 'admin' ? [['0', 'No expiry'] as [string, string]] : [])], v => { tDays = v; redraw(); }, { aria: 'Token lifetime' })),
           btn(tBusy ? 'Creating…' : 'Create token', { kind: 'primary', disabled: tBusy || !tName.trim(), onclick: () => void createToken() })),
         tNew ? h('div', { class: 'note ok col', style: 'gap:6px' }, h('b', null, 'Copy this token now. It is shown only once.'), h('code', { class: 'code', style: 'word-break:break-all;user-select:all' }, tNew)) : null,
         msg(tMsg, tMsg.startsWith('Revoked') ? 'ok' : 'bad'),

@@ -86,7 +86,7 @@ test('API tokens: cannot exceed creator role, expire, revoke, die with the user'
     assert.ok(!JSON.stringify(e.cdb.db.prepare('SELECT * FROM api_tokens').all()).includes(t.token));
     e.cdb.db.prepare('UPDATE api_tokens SET expires_at = ?').run(Date.now() - 1000);
     assert.equal(e.auth.fromToken(t.token), null);
-    const t2 = e.auth.createToken(snmp, { name: 'mine', days: 0 });
+    const t2 = e.auth.createToken(snmp, { name: 'mine', days: 30 });
     assert.equal(e.auth.listTokens(snmp).length, 1);
     assert.equal(e.auth.listTokens(admin).length, 2);
     assert.throws(() => e.auth.revokeToken(snmp, e.auth.listTokens(admin)[0].id), /own tokens/);
@@ -281,4 +281,44 @@ test('a flood of password checks gets "busy" instead of unbounded work', async (
   assert.equal(busy, 54);
   // and it recovers
   assert.equal(await sec.verifyPasswordAsync('right', h), true);
+});
+
+test('API token policy: lifetime limits, no expiry for admins only, revoked on reset, used-time written at most once a minute', async () => {
+  const e = env();
+  try {
+    e.auth.bootstrap('initial-admin-password');
+    const admin = (await e.auth.authenticate('api', 'admin', 'initial-admin-password', '7.7.7.1')).principal;
+    e.auth.createUser('admin', { username: 'snmpadm', password: 'long-secret-passphrase-3', role: 'snmp', mustChange: false });
+    const snmp = (await e.auth.authenticate('api', 'snmpadm', 'long-secret-passphrase-3', '7.7.7.2')).principal;
+    assert.throws(() => e.auth.createToken(snmp, { name: 'forever', days: 0 }), /Only administrators/);
+    assert.throws(() => e.auth.createToken(snmp, { name: 'long', days: 366 }), /up to 365 days/);
+    e.auth.createToken(snmp, { name: 'ok', days: 365 });
+    e.auth.createToken(admin, { name: 'forever', days: 0 });
+    e.auth.createToken(admin, { name: 'long', days: 1000 });
+    assert.throws(() => e.auth.createToken(admin, { name: 'x', days: 4000 }), /1 to 3650/);
+
+    // a reset ends the tokens of that user only
+    const uid = e.auth.listUsers().find(u => u.username === 'snmpadm')!.id;
+    const tk = e.auth.createToken(snmp, { name: 'script', days: 30 }).token;
+    const adminTk = e.auth.createToken(admin, { name: 'ops', days: 30 }).token;
+    assert.ok(e.auth.fromToken(tk));
+    e.auth.updateUser('admin', uid, { password: 'another-long-passphrase-9' });
+    assert.equal(e.auth.fromToken(tk), null);
+    assert.equal(e.auth.listTokens(admin).filter(t => t.username === 'snmpadm').length, 0);
+    assert.ok(e.auth.fromToken(adminTk), 'other users keep theirs');
+    // changing your own password is not a reset: scripts keep working
+    e.auth.changePassword('admin', 'initial-admin-password', 'a-brand-new-passphrase-1');
+    assert.ok(e.auth.fromToken(adminTk));
+
+    // last_used is not written on every request
+    const id = e.auth.listTokens(admin).find(t => t.name === 'ops')!.id;
+    const used = () => (e.cdb.db.prepare('SELECT last_used FROM api_tokens WHERE id = ?').get(id) as { last_used: number | null }).last_used!;
+    const first = used();
+    e.cdb.db.prepare('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(first - 1000, id);
+    e.auth.fromToken(adminTk);
+    assert.equal(used(), first - 1000, 'a use within a minute of the last is not written');
+    e.cdb.db.prepare('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(first - 61_000, id);
+    e.auth.fromToken(adminTk);
+    assert.ok(used() >= first, 'an older record is refreshed');
+  } finally { e.done(); }
 });

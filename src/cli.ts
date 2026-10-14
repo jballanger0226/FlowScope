@@ -36,11 +36,13 @@ async function resetPassword(user: string | undefined): Promise<number> {
   const { hashPassword, randomToken } = await import('./secrets.js');
   const cdb = new ConfigDb(defaultDataDir());
   try {
-    const row = cdb.db.prepare("SELECT id FROM users WHERE username = ? COLLATE NOCASE AND source = 'local'").get(user) as { id: number } | undefined;
+    const row = cdb.db.prepare("SELECT id, username FROM users WHERE username = ? COLLATE NOCASE AND source = 'local'").get(user) as { id: number; username: string } | undefined;
     if (!row) { console.error(`No local user "${user}" in ${defaultDataDir()}`); return 1; }
     const pw = randomToken(12).replace(/[-_]/g, 'x');
     cdb.db.prepare('UPDATE users SET pw_hash = ?, must_change = 1, failed = 0, locked_until = 0, disabled = 0 WHERE id = ?').run(hashPassword(pw), row.id);
-    cdb.db.prepare('DELETE FROM sessions WHERE username = ?').run(user);
+    // by the stored name: "ADMIN" typed here must end the sessions and tokens of "admin"
+    cdb.db.prepare('DELETE FROM sessions WHERE username = ? COLLATE NOCASE').run(row.username);
+    cdb.db.prepare('DELETE FROM api_tokens WHERE username = ? COLLATE NOCASE').run(row.username);
     cdb.db.prepare("INSERT INTO logs(ts, level, source, user, message) VALUES (?, 'WARN', 'audit', ?, ?)").run(Date.now(), os.userInfo().username, `Password of ${user} reset from the command line`);
     console.log(`New one-time password for ${user}: ${pw}\nIt must be changed at the next sign-in.`);
     return 0;

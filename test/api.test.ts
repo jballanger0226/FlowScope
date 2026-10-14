@@ -172,6 +172,7 @@ test('HTTP API: auth, roles, CSRF, flows, devices, storage, admin, AAA', { timeo
     const api = new Client(base); api.token = tk.json.token;
     assert.equal((await api.get('/api/devices')).status, 200);
     assert.equal((await api.get('/api/admin/users')).status, 403);
+    assert.equal((await api.post('/api/auth/tokens', { name: 'more', days: 1 })).status, 403);   // a token cannot create tokens
     assert.equal((await api.post('/api/devices/test', { ip: '127.0.0.1', port: snmpPort })).status, 200);
     const badTok = new Client(base); badTok.token = 'fs_wrong';
     assert.equal((await badTok.get('/api/devices')).status, 401);

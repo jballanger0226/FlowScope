@@ -63,6 +63,8 @@ export function registerAuth(app: App): void {
   w.get('/api/auth/tokens', 'ro', c => c.json({ tokens: app.auth.listTokens(c.user()) }));
   w.post('/api/auth/tokens', 'ro', async c => {
     const b = await c.body<{ name?: string; role?: Role; days?: number }>(10_000);
+    // A token that could mint more tokens turns a leaked short-lived one into a permanent one. Sign in (browser or password) to create one.
+    if (c.user().source === 'token') throw new HttpError(403, 'Create API tokens from a signed-in session, not with another token');
     const t = app.auth.createToken(c.user(), { name: str(b.name, 64), role: b.role, days: b.days === undefined ? undefined : int(b.days, 90, 0, 3650) });
     c.json({ token: t.token, id: t.id, note: 'This is the only time the token is shown.' });
   });

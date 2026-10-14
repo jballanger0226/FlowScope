@@ -135,6 +135,7 @@ export class AuthService {
       this.policyCheck(u.username, patch.password);
       this.cdb.db.prepare('UPDATE users SET pw_hash = ?, must_change = 1, failed = 0, locked_until = 0 WHERE id = ?').run(hashPassword(patch.password), id);
       this.revokeSessions(u.username);
+      this.revokeTokensOf(u.username);   // a reset is what you do when a credential may have leaked, and a token is one
       this.log.audit(actor, `Reset the password of ${u.username}`);
     }
     if (patch.unlock) { this.cdb.db.prepare('UPDATE users SET failed = 0, locked_until = 0 WHERE id = ?').run(id); this.log.audit(actor, `Unlocked ${u.username}`); }
@@ -147,7 +148,7 @@ export class AuthService {
     if (u.source === 'local' && u.role === 'admin' && this.enabledLocalAdmins(id) === 0) throw new AuthError('This is the last enabled local administrator', 409);
     this.cdb.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     this.revokeSessions(u.username);
-    this.cdb.db.prepare('DELETE FROM api_tokens WHERE username = ?').run(u.username);
+    this.revokeTokensOf(u.username);
     this.log.audit(actor, `Deleted user ${u.username}`);
   }
 
@@ -338,13 +339,23 @@ export class AuthService {
 
   /* ---------------------------------------------------------------- API tokens */
 
+  /** Longest lifetime for an API token made by anyone but an administrator, in days. Only administrators may make one that never expires. */
+  static readonly TOKEN_MAX_DAYS = 365;
+
+  revokeTokensOf(username: string): number {
+    return Number(this.cdb.db.prepare('DELETE FROM api_tokens WHERE username = ? COLLATE NOCASE').run(username).changes);
+  }
+
   createToken(p: Principal, o: { name: string; role?: Role; days?: number }): { token: string; id: number } {
     const name = (o.name || '').trim();
     if (!name || name.length > 64) throw new AuthError('Give the token a name of up to 64 characters', 400);
     const role = o.role ?? p.role;
     if (!ROLE_RANK[role] || ROLE_RANK[role] > ROLE_RANK[p.role]) throw new AuthError('A token cannot have more access than you do', 403);
     const days = o.days === undefined ? 90 : o.days;
-    if (!Number.isInteger(days) || days < 0 || days > 3650) throw new AuthError('Lifetime must be 0 (no expiry) to 3650 days', 400);
+    const admin = p.role === 'admin';
+    if (!Number.isInteger(days) || days < 0 || days > 3650) throw new AuthError('Lifetime must be 1 to 3650 days (0 for no expiry, administrators only)', 400);
+    if (days === 0 && !admin) throw new AuthError('Only administrators can create a token that never expires', 403);
+    if (!admin && days > AuthService.TOKEN_MAX_DAYS) throw new AuthError(`A token can last up to ${AuthService.TOKEN_MAX_DAYS} days. Administrators can create longer ones.`, 403);
     const token = 'fs_' + randomToken(32);
     const r = this.cdb.db.prepare('INSERT INTO api_tokens(username, role, name, token_hash, created_at, expires_at) VALUES (?,?,?,?,?,?)').run(p.username, role, name, sha256(token), Date.now(), days ? Date.now() + days * 86400_000 : null);
     this.log.audit(p.username, `Created API token "${name}" (${ROLE_LABEL[role]}, ${days ? days + ' days' : 'no expiry'})`);
@@ -366,12 +377,14 @@ export class AuthService {
 
   fromToken(token: string): Principal | null {
     if (!token.startsWith('fs_') || token.length > 200) return null;
-    const t = this.cdb.db.prepare('SELECT * FROM api_tokens WHERE token_hash = ?').get(sha256(token)) as unknown as { id: number; username: string; role: Role; expires_at: number | null } | undefined;
+    const t = this.cdb.db.prepare('SELECT * FROM api_tokens WHERE token_hash = ?').get(sha256(token)) as unknown as { id: number; username: string; role: Role; expires_at: number | null; last_used: number | null } | undefined;
     if (!t || (t.expires_at !== null && t.expires_at < Date.now())) return null;
     const u = this.cdb.db.prepare('SELECT role, disabled FROM users WHERE username = ?').get(t.username) as unknown as { role: Role; disabled: number } | undefined;
     if (!u || u.disabled) return null;
     const role = ROLE_RANK[t.role] <= ROLE_RANK[u.role] ? t.role : u.role;
-    this.cdb.db.prepare('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(Date.now(), t.id);
+    // recording every use would write to the database on every request; once a minute is enough to see that a token is in use
+    const now = Date.now();
+    if (t.last_used === null || now - t.last_used >= 60_000) this.cdb.db.prepare('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(now, t.id);
     return { username: t.username, role, source: 'token', service: 'api', tokenId: t.id };
   }
 
