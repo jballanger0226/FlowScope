@@ -193,7 +193,7 @@ A multicast stream has one source and many receivers, and every switch and route
 * Passwords are hashed with scrypt; stored secrets are encrypted with AES-256-GCM; sessions use `SameSite=Strict` cookies and a CSRF header; the content-security-policy forbids inline scripts and external resources.
 * Each service (web console, API, CLI) has its own authentication chain. A local **break-glass** administrator can always be allowed so a RADIUS/LDAP/SAML outage cannot lock everyone out; see Admin → Authentication.
 * SAML is implemented in this project (no SAML library): SP-initiated login, HTTP-Redirect AuthnRequest, HTTP-POST response, enveloped signatures with exclusive canonicalisation only (RSA-SHA256/384/512, ECDSA), replay protection kept in memory (a restart just means signing in again). It is web-console only.
-* Put the collector on a management network. Flow export is unauthenticated UDP by nature.
+* Put the collector on a management network. Flow export is unauthenticated UDP by nature, and FlowScope does not yet limit what an unknown sender can make it store or keep in memory (templates, timestamps, exporter list). Allow the flow ports only from your exporters at the firewall. Rules for nftables, ufw, Docker (which bypasses ufw), Windows and Proxmox, the known gaps, and notes on the SNMP admin role, RADIUS, LDAP and SAML are in [docs/security.md](docs/security.md).
 
 ## Development
 

@@ -321,7 +321,7 @@ These need Node.js 22.13 or newer. Step-by-step Windows instructions, including 
 2. **Exporters.** On each router or switch, send NetFlow v5/v9 or IPFIX to the FlowScope address, UDP 2055 or 4739. The log (`docker logs flowscope` or `flowscope-ctl logs`) shows `new exporter <address>` the first time each one is heard from.
 3. **SNMP.** Add SNMP credential sets under Admin and the devices under SNMP devices to get interface names, speeds, VLANs, QoS policies and host tracking. Allow UDP 161 from FlowScope to the devices.
 4. **HTTPS certificate.** Admin → HTTPS certificate replaces the self-signed one.
-5. **Firewalls.** Allow TCP 8443 from your admin networks and UDP 2055/4739 from your exporters only. NetFlow is unauthenticated.
+5. **Firewalls.** Allow TCP 8443 from your admin networks and UDP 2055/4739 from your exporters only. NetFlow is unauthenticated, and FlowScope does not yet limit what an unknown sender can make it store. Ready-to-use rules for nftables, ufw, Docker, Windows and Proxmox are in [security.md](security.md). The Windows installer opens these ports to every address, so tighten them there.
 6. **Storage sizing.** Roughly allow for the retention you set times your flow rate; ClickHouse is the default storage on the Docker, Linux and Proxmox installs; SQLite is still fine for a small network and needs nothing else running.
 
 ## Troubleshooting
