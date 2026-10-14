@@ -8,6 +8,11 @@
 
 CH_ETC="${FLOWSCOPE_CH_ETC:-/etc/clickhouse-server}"
 CH_PORT=8123
+# The ClickHouse release line to install. 25.8 is the LTS line the project is tested against (CI and the Docker compose files use it) and it
+# runs on older CPUs: 26.8, the newest in the repository, was killed with an illegal instruction on an Intel Xeon X5650 (2010, no AVX) where
+# 25.8 ran. It is held (apt-mark hold) so a routine apt upgrade cannot move it to a release the CPU cannot run. FLOWSCOPE_CH_VERSION=26.8
+# picks another line, FLOWSCOPE_CH_VERSION=latest the newest.
+CH_VERSION="${FLOWSCOPE_CH_VERSION:-25.8}"
 
 ch_gen_password() { head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }
 
@@ -24,7 +29,13 @@ ch_install_package() {
     || die "Could not download the ClickHouse repository key. Check the network, or use FLOWSCOPE_STORAGE=sqlite."
   echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=$(dpkg --print-architecture)] https://packages.clickhouse.com/deb lts main" > /etc/apt/sources.list.d/clickhouse.list
   apt-get update -qq
-  apt-get install -y -qq clickhouse-server clickhouse-client
+  if [ "$CH_VERSION" = latest ]; then
+    apt-get install -y -qq clickhouse-server clickhouse-client
+  else
+    apt-get install -y -qq --allow-downgrades "clickhouse-server=$CH_VERSION.*" "clickhouse-common-static=$CH_VERSION.*" "clickhouse-client=$CH_VERSION.*" \
+      || die "ClickHouse $CH_VERSION was not found in the repository. Set FLOWSCOPE_CH_VERSION to another release line, or use FLOWSCOPE_STORAGE=sqlite."
+    apt-mark hold clickhouse-server clickhouse-common-static clickhouse-client >/dev/null
+  fi
 }
 
 # Keeps the server on the loopback address: FlowScope runs on the same machine, nothing else should reach it.
@@ -81,7 +92,7 @@ ch_binary_works() {
 }
 
 ch_cpu_message() {
-  echo "ClickHouse cannot run on this CPU: the server is killed with an illegal-instruction error as soon as it starts. That happens on older CPUs and on virtual CPUs of a generic type (kvm64 and similar). A Proxmox container uses the CPU of the Proxmox host, so give the host, or the VM it runs in, a newer CPU type (for a VM: Hardware, Processors, Type = host), restart it, and run the installer again with FLOWSCOPE_STORAGE=clickhouse."
+  echo "ClickHouse $CH_VERSION cannot run on this CPU: the server is killed with an illegal-instruction error as soon as it starts. That happens on older CPUs and on virtual CPUs of a generic type (kvm64 and similar). A Proxmox container uses the CPU of the Proxmox host, so give the host, or the VM it runs in, a newer CPU type (for a VM: Hardware, Processors, Type = host), restart it, and run the installer again with FLOWSCOPE_STORAGE=clickhouse."
 }
 
 ch_url() { printf 'http://flowscope:%s@127.0.0.1:%s/flowscope' "$1" "$CH_PORT"; }

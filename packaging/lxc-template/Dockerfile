@@ -11,6 +11,8 @@ ARG NODE_IMAGE=node:22-bookworm-slim
 FROM ${NODE_IMAGE} AS nodesrc
 
 FROM ${DEBIAN_IMAGE}
+# declared inside the stage: an ARG before the first FROM is only visible to FROM lines
+ARG CLICKHOUSE_VERSION=25.8
 ENV DEBIAN_FRONTEND=noninteractive
 # What a Proxmox container needs from the inside: an init system, a DHCP client and ifupdown (Proxmox writes /etc/network/interfaces),
 # login tools for setting the root password, and SSH for key-based access. Also what the installer and `flowscope-ctl update` use.
@@ -30,12 +32,14 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
  && node --version && npm --version
 
-# ClickHouse, FlowScope's storage, from ClickHouse's own repository (LTS line). Installed here, not by the FlowScope installer, so this layer is cached.
+# ClickHouse, FlowScope's storage, from ClickHouse's own repository, pinned to the 25.8 LTS line (the one the project is tested against; the newest
+# line, 26.8, does not run on older CPUs such as a 2010 Xeon) and held so apt upgrade keeps it there. Installed here, not by the FlowScope installer, so this layer is cached.
 # It listens on 127.0.0.1 only (the installer writes that setting). The user FlowScope connects as is made at each container's first boot.
 RUN curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg \
  && echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=$(dpkg --print-architecture)] https://packages.clickhouse.com/deb lts main" > /etc/apt/sources.list.d/clickhouse.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends clickhouse-server clickhouse-client \
+ && apt-get install -y --no-install-recommends "clickhouse-server=${CLICKHOUSE_VERSION}.*" "clickhouse-common-static=${CLICKHOUSE_VERSION}.*" "clickhouse-client=${CLICKHOUSE_VERSION}.*" \
+ && apt-mark hold clickhouse-server clickhouse-common-static clickhouse-client \
  && rm -rf /var/lib/apt/lists/*
 
 # FlowScope itself. FLOWSCOPE_TEMPLATE_BUILD keeps a password out of the template; the first-boot service makes one per container.
