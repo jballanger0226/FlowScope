@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Installs FlowScope as a systemd service. Run as root from a built checkout (npm install && npm run build first).
 #
+#   install.sh            install or update
+#   install.sh --sqlite   do not download or set up ClickHouse: use the embedded SQLite store (same as FLOWSCOPE_STORAGE=sqlite)
+#   install.sh --clickhouse   set up ClickHouse (the default for a new install)
+#
 # Storage: a new install also sets up ClickHouse on this machine (official package from packages.clickhouse.com, listening on 127.0.0.1,
-# its own random password) and points FlowScope at it. This needs Debian or Ubuntu (apt). FLOWSCOPE_STORAGE=sqlite keeps the embedded
-# SQLite store instead; on another distribution install ClickHouse yourself and set FLOWSCOPE_CLICKHOUSE_URL in /etc/flowscope/flowscope.env.
+# its own random password) and points FlowScope at it. This needs Debian or Ubuntu (apt). --sqlite keeps the embedded
+# SQLite store instead, and nothing about ClickHouse is downloaded; on another distribution install ClickHouse yourself and set FLOWSCOPE_CLICKHOUSE_URL in /etc/flowscope/flowscope.env.
 # Re-running the script on an existing install leaves its storage alone unless FLOWSCOPE_STORAGE=clickhouse is given.
 set -euo pipefail
 say()  { printf '\033[1m==> %s\033[0m\n' "$*"; }
@@ -13,6 +17,13 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 [ -d "$here/dist/src" ] || { echo "dist/ not found. Run: npm install && npm run build" >&2; exit 1; }
 . "$here/packaging/linux/clickhouse-setup.sh"
+for a in "$@"; do
+  case "$a" in
+    --sqlite) FLOWSCOPE_STORAGE=sqlite ;;
+    --clickhouse) FLOWSCOPE_STORAGE=clickhouse ;;
+    *) die "Unknown option: $a (use --sqlite or --clickhouse)." ;;
+  esac
+done
 new_install=0; [ -f /etc/flowscope/flowscope.env ] || new_install=1
 want_ch=0
 case "${FLOWSCOPE_STORAGE:-}" in

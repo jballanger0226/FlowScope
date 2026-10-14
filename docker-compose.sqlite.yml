@@ -1,0 +1,28 @@
+# FlowScope with the embedded SQLite store: one container, no ClickHouse to download or run, no password to set.
+#
+#   docker compose -f docker-compose.sqlite.yml up -d
+#
+# ClickHouse (docker-compose.yml) is the default; this is the alternative for small sites. Choose the file when you first start FlowScope:
+# the storage you start with is remembered in the data volume. To change it later use the Storage page (history is not copied).
+# Exporters all look like one device (the Docker bridge address)? Use docker-compose.host.sqlite.yml instead. Directions: docs/deployment.md
+services:
+  flowscope:
+    build: .
+    image: flowscope:latest
+    restart: unless-stopped
+    # user: "1000:1000"        # run as this user from the start instead of starting as root and dropping to "node"; the /data volume must then be owned by it
+    ports:
+      - "8443:8443/tcp"     # web console
+      - "2055:2055/udp"     # NetFlow v5 / v9 / IPFIX
+      - "4739:4739/udp"     # IPFIX
+    volumes:
+      - flowscope-data:/data
+    environment:
+      # First start only: password for the "admin" account (12+ characters). If unset, one is generated and printed in the log.
+      FLOWSCOPE_ADMIN_PASSWORD: ${FLOWSCOPE_ADMIN_PASSWORD:-}
+      # FLOWSCOPE_TLS: "off"                 # serve plain HTTP on 8080 behind your own TLS proxy
+      # FLOWSCOPE_PUBLIC_URL: https://flows.example.com   # needed for SAML behind a proxy
+      FLOWSCOPE_BACKEND: sqlite
+
+volumes:
+  flowscope-data:

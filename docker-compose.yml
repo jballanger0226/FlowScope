@@ -2,8 +2,8 @@
 #
 #   docker compose up -d                  FlowScope with ClickHouse storage (the default)
 #
-# SQLite instead (nothing else to run; compose still wants some value for the password, which is then unused):
-#   CLICKHOUSE_PASSWORD=unused FLOWSCOPE_BACKEND=sqlite docker compose up -d --no-deps flowscope
+# Without ClickHouse (embedded SQLite, one container, nothing more to download):
+#   docker compose -f docker-compose.sqlite.yml up -d
 # Exporters all look like one device (the Docker bridge address)? Use docker-compose.host.yml instead. Full directions: docs/deployment.md
 services:
   flowscope:

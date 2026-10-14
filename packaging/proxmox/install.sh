@@ -4,6 +4,8 @@
 #
 #   install.sh                 install, or update an existing install, from the source in FLOWSCOPE_SRC
 #   install.sh --update        same, but refuse to run if FlowScope is not installed yet
+#   install.sh --sqlite        do not download or set up ClickHouse: store everything in the embedded SQLite file (same as FLOWSCOPE_STORAGE=sqlite)
+#   install.sh --clickhouse    set up ClickHouse (the default for a new install; same as FLOWSCOPE_STORAGE=clickhouse)
 #
 # Where the source comes from (first match wins):
 #   FLOWSCOPE_SRC=/path/to/flowscope.tar.gz   a tarball of the repository (what flowscope-lxc.sh pushes in)
@@ -15,7 +17,7 @@
 # written; the template's first-boot service creates one for every container made from it).
 #
 # Storage: a new install sets up ClickHouse on this machine (official package, listening on 127.0.0.1, its own random password) and
-# points FlowScope at it. FLOWSCOPE_STORAGE=sqlite skips that and keeps the embedded SQLite store. An update leaves the storage of an
+# points FlowScope at it. --sqlite (or FLOWSCOPE_STORAGE=sqlite) skips that: nothing about ClickHouse is downloaded and keeps the embedded SQLite store. An update leaves the storage of an
 # existing install alone; FLOWSCOPE_STORAGE=clickhouse on an update adds the ClickHouse server and the setting, and you then pick
 # ClickHouse under Storage in the web console (the old data is not copied over).
 set -euo pipefail
@@ -29,11 +31,19 @@ NODE_DIR="${FLOWSCOPE_NODE_DIR:-/opt/node}"
 NODE_MAJOR=22
 NODE_MIN_MINOR=13
 MODE="install"
-[ "${1:-}" = "--update" ] && MODE="update"
 
 say()  { printf '\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+for a in "$@"; do
+  case "$a" in
+    --update) MODE="update" ;;
+    --sqlite) FLOWSCOPE_STORAGE=sqlite ;;
+    --clickhouse) FLOWSCOPE_STORAGE=clickhouse ;;
+    *) die "Unknown option: $a (use --update, --sqlite or --clickhouse)." ;;
+  esac
+done
 
 [ "$(id -u)" -eq 0 ] || [ -n "${FLOWSCOPE_ALLOW_NONROOT:-}" ] || die "Run as root."
 [ "$MODE" = "install" ] || [ -d "$OPT/dist/src" ] || die "FlowScope is not installed in $OPT; run without --update."
@@ -277,8 +287,8 @@ fi
 [ "$MODE" = "update" ] && echo "  Updated. If something is wrong, the previous version is in $OPT.prev"
 echo "  Web console: https://$(hostname -I 2>/dev/null | awk '{print $1}'):8443/   (self-signed certificate until you install your own)"
 echo "  Send NetFlow v5/v9 or IPFIX to UDP 2055 or 4739 on this machine."
-if grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env" 2>/dev/null || [ -n "${FLOWSCOPE_TEMPLATE_BUILD:-}" ]; then
+if grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env" 2>/dev/null || { [ -n "${FLOWSCOPE_TEMPLATE_BUILD:-}" ] && [ "$want_ch" = 1 ]; }; then
   echo "  Storage:     ClickHouse (data in /var/lib/clickhouse; it is on the container's root disk, so the container backup covers it)."
 else
-  echo "  Storage:     SQLite (embedded). To use ClickHouse instead, see docs/deployment.md."
+  echo "  Storage:     SQLite (embedded, in /var/lib/flowscope). To use ClickHouse instead, see docs/deployment.md."
 fi

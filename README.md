@@ -70,7 +70,7 @@ cp .env.example .env                          # then set CLICKHOUSE_PASSWORD in 
 docker compose up -d                          # FlowScope and ClickHouse; data in the flowscope-data and clickhouse-data volumes
 ```
 
-SQLite instead, with nothing else to run: `CLICKHOUSE_PASSWORD=unused FLOWSCOPE_BACKEND=sqlite docker compose up -d --no-deps flowscope`.
+**Without ClickHouse** (embedded SQLite, one container, nothing more to download, no password to set): `docker compose -f docker-compose.sqlite.yml up -d`, or `docker-compose.host.sqlite.yml` for host networking.
 
 or `docker build -t flowscope . && docker run -d -p 8443:8443 -p 2055:2055/udp -p 4739:4739/udp -v flowscope-data:/data flowscope`. A lone container has no ClickHouse server beside it, so it uses SQLite unless you pass `-e FLOWSCOPE_CLICKHOUSE_URL=...` for a server you run yourself.
 The image has a health check (`flowscope healthcheck`), keeps everything in `/data`, and runs the server as the unprivileged `node` user (it starts as root only to make `/data` writable, then drops privileges; `--user 1000:1000` skips that).
@@ -92,8 +92,8 @@ A walkthrough of each wizard tab, updating, backups and troubleshooting: **[docs
 
 | OS | How |
 | --- | --- |
-| Linux | `sudo packaging/linux/install.sh` (systemd unit, dedicated user, settings in `/etc/flowscope/flowscope.env`, data in `/var/lib/flowscope`; on Debian or Ubuntu it also installs ClickHouse, listening on 127.0.0.1 only, unless you set `FLOWSCOPE_STORAGE=sqlite`) |
-| Proxmox VE | CT template via the web interface (see above), or `packaging/proxmox/flowscope-lxc.sh` on the host; `packaging/proxmox/install.sh` is the installer both use |
+| Linux | `sudo packaging/linux/install.sh` (systemd unit, dedicated user, settings in `/etc/flowscope/flowscope.env`, data in `/var/lib/flowscope`; on Debian or Ubuntu it also installs ClickHouse, listening on 127.0.0.1 only; `sudo packaging/linux/install.sh --sqlite` skips ClickHouse entirely and uses SQLite) |
+| Proxmox VE | CT template via the web interface (see above), or `packaging/proxmox/flowscope-lxc.sh` on the host; `packaging/proxmox/install.sh` is the installer both use. Without ClickHouse: the `debian-12-flowscope-sqlite_<version>_amd64.tar.zst` template, or `flowscope-lxc.sh --sqlite` |
 | macOS | `sudo packaging/macos/install.sh` (launchd daemon, data in `/Library/Application Support/FlowScope`, log `/var/log/flowscope.log`) |
 | Windows | elevated PowerShell: `.\packaging\windows\install.ps1` (scheduled task at boot as SYSTEM, firewall rules, settings in `%ProgramData%\FlowScope\flowscope.env`) |
 
@@ -126,6 +126,15 @@ Other commands: `flowscope reset-password <user>`, `flowscope healthcheck`, `flo
 
 * **ClickHouse (default for Docker, Linux and Proxmox)**: a column store for higher volume and long retention. The Docker compose files start a ClickHouse container beside FlowScope. The Linux installer and the Proxmox installer and template put ClickHouse on the same machine (official package, listening on `127.0.0.1` only, a database user with its own random password that is kept only in `flowscope.env`). FlowScope talks to it over its HTTP interface, so there is no extra native dependency. The 1-minute tier is maintained by a materialized view; 1h/1d are filled when each hour/day closes. If ClickHouse cannot be reached at start-up FlowScope waits up to `FLOWSCOPE_CLICKHOUSE_WAIT` seconds, then falls back to SQLite for that run and says so in Storage. For an HTTPS ClickHouse with a private CA, start Node with `NODE_EXTRA_CA_CERTS=/path/ca.pem`.
 * **SQLite**: one `ts.db` file in the data folder, nothing to run. Raw flows live in one table per day, so retention is a cheap drop. Rolled-up tiers (1m, 1h, 1d) are built from the raw rows exactly once, even when records arrive late. Good for small sites, up to a few thousand flows per second. It is also what FlowScope uses when no ClickHouse server is configured: `npm start`, Windows, macOS, and a lone container.
+
+**Choosing at install time.** ClickHouse is the default everywhere; each platform has an explicit way to leave it out, and then nothing about ClickHouse is downloaded:
+
+| | With ClickHouse (default) | Without (SQLite) |
+| --- | --- | --- |
+| Docker | `docker compose up -d` | `docker compose -f docker-compose.sqlite.yml up -d` (host networking: `docker-compose.host.sqlite.yml`) |
+| Linux | `sudo packaging/linux/install.sh` | `sudo packaging/linux/install.sh --sqlite` |
+| Proxmox, web interface | template `debian-12-flowscope_<version>_amd64.tar.zst` | template `debian-12-flowscope-sqlite_<version>_amd64.tar.zst` |
+| Proxmox, command line | `packaging/proxmox/flowscope-lxc.sh` | `packaging/proxmox/flowscope-lxc.sh --sqlite` (also needs less: 2 GB memory and a 16 GB disk) |
 
 **Which one a start-up uses.** A choice stored in the database (the Storage page) always wins. On a first start, FlowScope uses `FLOWSCOPE_BACKEND` if set; otherwise SQLite if the data folder already holds a SQLite store; otherwise ClickHouse when `FLOWSCOPE_CLICKHOUSE_URL` is set; otherwise SQLite. So **updating an existing install never moves it to ClickHouse or hides its data**. Switching is a choice under Storage (collection must be stopped; the new backend starts empty and old data is not migrated).
 

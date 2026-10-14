@@ -23,8 +23,15 @@ permissions:
 
 jobs:
   template:
+    # Two templates: the default with ClickHouse, and one without it (embedded SQLite) for small sites.
+    strategy:
+      fail-fast: false
+      matrix:
+        storage: [clickhouse, sqlite]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      STORAGE_BACKEND: ${{ matrix.storage }}
     steps:
       - uses: actions/checkout@v4
       - name: Install zstd
@@ -33,7 +40,7 @@ jobs:
         run: packaging/lxc-template/build.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: proxmox-ct-template
+          name: proxmox-ct-template-${{ matrix.storage }}
           path: template-out/*
           retention-days: 30
 
@@ -54,11 +61,16 @@ jobs:
           done
           if [ "$ok" != 1 ]; then docker exec tpl systemctl status flowscope flowscope-firstboot --no-pager || true; docker exec tpl journalctl -u flowscope -u flowscope-firstboot --no-pager -n 80 || true; exit 1; fi
           docker exec tpl test -s /root/flowscope-admin-password.txt
-          # ClickHouse is the storage: running, listening on loopback only, and FlowScope has a password of its own for it (made at first boot)
-          docker exec tpl systemctl is-active --quiet clickhouse-server
-          docker exec tpl curl -fsS http://127.0.0.1:8123/ping
-          docker exec tpl sh -c 'grep -Eq "^FLOWSCOPE_CLICKHOUSE_URL=http://flowscope:[A-Za-z0-9]{24}@127\\.0\\.0\\.1:8123/flowscope$" /etc/flowscope/flowscope.env'
-          docker exec tpl sh -c 'ss -H -ltn | grep ":8123" | grep -qv "0.0.0.0:8123"'
+          if [ "$STORAGE_BACKEND" = clickhouse ]; then
+            # ClickHouse is the storage: running, listening on loopback only, and FlowScope has a password of its own for it (made at first boot)
+            docker exec tpl systemctl is-active --quiet clickhouse-server
+            docker exec tpl curl -fsS http://127.0.0.1:8123/ping
+            docker exec tpl sh -c 'grep -Eq "^FLOWSCOPE_CLICKHOUSE_URL=http://flowscope:[A-Za-z0-9]{24}@127\\.0\\.0\\.1:8123/flowscope$" /etc/flowscope/flowscope.env'
+            docker exec tpl sh -c 'ss -H -ltn | grep ":8123" | grep -qv "0.0.0.0:8123"'
+          else
+            # the SQLite template has no ClickHouse at all: not installed, no setting, nothing listening
+            docker exec tpl sh -c '! command -v clickhouse-server && ! ls /etc/clickhouse-server 2>/dev/null && ! grep -Eq "^FLOWSCOPE_CLICKHOUSE_URL=.+" /etc/flowscope/flowscope.env'
+          fi
           docker exec tpl sh -c '! grep -Eq "^FLOWSCOPE_ADMIN_PASSWORD=" /etc/flowscope/flowscope.env'
           docker exec tpl sh -c 'ls /etc/ssh/ssh_host_*_key >/dev/null'
           curl -ksf -o /dev/null https://localhost:18443/ && echo "web console answers"
@@ -69,11 +81,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Both matrix jobs publish to the same release, so whichever gets there second must not fail because the release exists.
           if [ "${GITHUB_REF_TYPE}" = tag ]; then
-            gh release create "$GITHUB_REF_NAME" template-out/* --title "FlowScope $GITHUB_REF_NAME" --generate-notes
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "FlowScope $GITHUB_REF_NAME" --generate-notes || gh release view "$GITHUB_REF_NAME" >/dev/null
+            gh release upload "$GITHUB_REF_NAME" template-out/* --clobber
           else
             gh release view template-latest >/dev/null 2>&1 || gh release create template-latest --target "$GITHUB_SHA" --prerelease \
-              --title "Proxmox template (latest main)" --notes "Rolling build of the Proxmox CT template from the main branch. Upload the .tar.zst in the Proxmox web interface; see docs/deployment.md."
+              --title "Proxmox template (latest main)" --notes "Rolling build of the Proxmox CT templates from the main branch." || gh release view template-latest >/dev/null
             gh release upload template-latest template-out/* --clobber
-            gh release edit template-latest --notes "Rolling build of the Proxmox CT template from the main branch (commit ${GITHUB_SHA::7}). Upload the .tar.zst in the Proxmox web interface; see docs/deployment.md."
+            gh release edit template-latest --notes "Rolling build of the Proxmox CT templates from the main branch (commit ${GITHUB_SHA::7}). debian-12-flowscope_*.tar.zst includes ClickHouse (the default); debian-12-flowscope-sqlite_*.tar.zst has none and stores flow records in the embedded SQLite file. Upload one in the Proxmox web interface; see docs/deployment.md."
           fi

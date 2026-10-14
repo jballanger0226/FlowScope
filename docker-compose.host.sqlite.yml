@@ -1,0 +1,23 @@
+# FlowScope on the host's network with the embedded SQLite store: no ClickHouse to download or run, no password to set.
+#
+#   docker compose -f docker-compose.host.sqlite.yml up -d
+#
+# Host networking is for when exporters must be identified by their real address (see docker-compose.host.yml for the reasons and the
+# limits; it does not work on Docker Desktop for Windows or macOS). ClickHouse is the default storage: docker-compose.host.yml.
+services:
+  flowscope:
+    build: .
+    image: flowscope:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - flowscope-data:/data
+    environment:
+      FLOWSCOPE_ADMIN_PASSWORD: ${FLOWSCOPE_ADMIN_PASSWORD:-}
+      # Ports are the settings below, not a "ports:" list, because the container uses the host's network directly.
+      FLOWSCOPE_HTTPS_PORT: ${FLOWSCOPE_HTTPS_PORT:-8443}
+      FLOWSCOPE_FLOW_PORTS: ${FLOWSCOPE_FLOW_PORTS:-2055,4739}
+      FLOWSCOPE_BACKEND: sqlite
+
+volumes:
+  flowscope-data:

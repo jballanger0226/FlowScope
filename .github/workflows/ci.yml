@@ -55,6 +55,11 @@ jobs:
       - name: Shell syntax
         run: |
           for f in packaging/docker-entrypoint.sh packaging/linux/install.sh packaging/linux/clickhouse-setup.sh packaging/macos/install.sh packaging/proxmox/*.sh packaging/lxc-template/build.sh packaging/lxc-template/rootfs/usr/local/sbin/flowscope-firstboot; do bash -n "$f" && echo "ok $f"; done
+      - name: Compose files
+        run: |
+          printf 'CLICKHOUSE_PASSWORD=ciPassword123\n' > .env
+          for f in docker-compose.yml docker-compose.host.yml docker-compose.sqlite.yml docker-compose.host.sqlite.yml; do docker compose -f "$f" config -q && echo "ok $f"; done
+          rm .env
       - name: ShellCheck
         run: sudo apt-get install -y -qq shellcheck && shellcheck -S warning packaging/docker-entrypoint.sh packaging/linux/clickhouse-setup.sh packaging/proxmox/*.sh packaging/lxc-template/build.sh packaging/lxc-template/rootfs/usr/local/sbin/flowscope-firstboot
 

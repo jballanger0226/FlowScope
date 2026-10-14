@@ -35,9 +35,11 @@ fi
 # ClickHouse (FlowScope's storage). The template ships the server but no user for FlowScope. Like the admin password, this one is made
 # here, so containers cloned from one template never share it. It goes straight into the settings file; nothing else keeps a copy.
 # The helper is plain sh and only needs these three small functions.
-storage_note="ClickHouse, inside this container (flowscope-ctl doctor shows its state)"
+CH_DIR="${FLOWSCOPE_CH_ETC:-/etc/clickhouse-server}"
+# A template built without ClickHouse (STORAGE_BACKEND=sqlite) has no such folder: nothing to set up, FlowScope uses its SQLite file.
+if [ -d "$CH_DIR" ]; then storage_note="ClickHouse, inside this container (flowscope-ctl doctor shows its state)"; else storage_note="SQLite (embedded, in /var/lib/flowscope)"; fi
 say() { :; }; warn() { :; }; die() { echo "flowscope-firstboot: $*" >&2; exit 1; }
-if [ -f "$CH_HELPER" ] && [ -d "${FLOWSCOPE_CH_ETC:-/etc/clickhouse-server}" ] && ! grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env" 2>/dev/null; then
+if [ -f "$CH_HELPER" ] && [ -d "$CH_DIR" ] && ! grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env" 2>/dev/null; then
   # shellcheck source=/dev/null
   . "$CH_HELPER"
   if ch_binary_works; then
