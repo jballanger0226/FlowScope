@@ -2,8 +2,10 @@
 # Runs under Docker, Podman, and as an OCI application container on Proxmox VE 9.1 or newer (see docs/deployment.md).
 FROM node:22-slim AS build
 WORKDIR /src
-COPY package.json ./
-RUN npm install --no-audit --no-fund
+# package-lock.json is optional here so the image still builds without one, but commit it: with a lockfile the build installs exactly the
+# versions that were reviewed (npm ci). Dependency install scripts are never run; FlowScope's dependencies need none.
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --ignore-scripts --no-audit --no-fund; else npm install --ignore-scripts --no-audit --no-fund; fi
 COPY tsconfig.*.json ./
 COPY tools ./tools
 COPY src ./src
