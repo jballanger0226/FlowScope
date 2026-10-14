@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AppConfig } from './config.js';
 import { secureDataDir } from './perms.js';
+import { guardedInterval } from './interval.js';
 import { ConfigDb } from './db/configdb.js';
 import { Secrets } from './secrets.js';
 import { Settings, type CollectSettings } from './settings.js';
@@ -203,7 +204,7 @@ export class App {
       tls: cfg.tls === 'auto' ? this.certs.options() : null, redirectToHttps: cfg.tls === 'auto'
     });
     if (!this.demo) this.poller.start();
-    const every = (ms: number, fn: () => void | Promise<void>) => { const t = setInterval(() => { try { void Promise.resolve(fn()).catch(e => this.log.error('app', String(e))); } catch (e) { this.log.error('app', String(e)); } }, ms); t.unref(); this.timers.push(t); };
+    const every = (ms: number, fn: () => void | Promise<void>) => { this.timers.push(guardedInterval(ms, fn, e => this.log.error('app', String(e)))); };
     every(60_000, async () => { const r = await this.store.maintain(this.settings.get('retention')); if (r.dropped.length) this.log.info('store', `Retention removed ${r.dropped.join(', ')}`); });
     every(60_000, () => this.syncExporters());
     every(3600_000, () => this.auth.sweep());
