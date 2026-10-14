@@ -41,6 +41,20 @@ export function inContainer(): boolean {
   try { return fs.existsSync('/.dockerenv'); } catch { return false; }
 }
 
+/**
+ * Demo mode has published sign-ins (the passwords are in the README), so it must not be reachable from the network by accident:
+ * it listens on the loopback address unless FLOWSCOPE_BIND / FLOWSCOPE_FLOW_BIND say otherwise, or it runs in a container, where
+ * loopback would make the published ports useless. Its data goes into a new private folder instead of a fixed one in /tmp that
+ * another local user could create first. Returns a sentence to show the person running it.
+ */
+export function applyDemoDefaults(cfg: AppConfig, env: NodeJS.ProcessEnv = process.env, container = inContainer()): string {
+  let note = '';
+  if (!env.FLOWSCOPE_BIND && !container) { cfg.bind = '127.0.0.1'; note = 'The demo listens on this computer only (127.0.0.1). Set FLOWSCOPE_BIND=0.0.0.0 to open it to your network.'; }
+  if (!env.FLOWSCOPE_FLOW_BIND && !container) cfg.flowBind = '127.0.0.1';
+  if (!env.FLOWSCOPE_DATA_DIR) cfg.dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'flowscope-demo-'));
+  return note;
+}
+
 export function defaultDataDir(): string {
   if (process.env.FLOWSCOPE_DATA_DIR) return path.resolve(process.env.FLOWSCOPE_DATA_DIR);
   if (inContainer()) return '/data';

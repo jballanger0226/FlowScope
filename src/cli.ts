@@ -3,8 +3,7 @@ import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import os from 'node:os';
-import path from 'node:path';
-import { loadConfig, defaultDataDir } from './config.js';
+import { loadConfig, defaultDataDir, applyDemoDefaults } from './config.js';
 import { VERSION } from './app.js';
 
 const HELP = `FlowScope ${VERSION}: NetFlow / IPFIX collector with SNMP link and QoS monitoring
@@ -58,11 +57,11 @@ async function main(): Promise<number> {
       if (args.includes('--demo')) cfg.demo = true;
       if (cfg.demo) {
         process.env.FLOWSCOPE_ADMIN_PASSWORD ||= 'flowscope-demo-admin';
-        if (!process.env.FLOWSCOPE_DATA_DIR) {
-          // a throw-away data folder, so demo data never mixes with real data
-          cfg.dataDir = path.join(os.tmpdir(), 'flowscope-demo');
-          fs.rmSync(cfg.dataDir, { recursive: true, force: true });
-        }
+        // a throw-away data folder, so demo data never mixes with real data, and no listening on the network by accident
+        const ownDir = !process.env.FLOWSCOPE_DATA_DIR;
+        const note = applyDemoDefaults(cfg);
+        if (note) console.log(note);
+        if (ownDir) { const dir = cfg.dataDir; process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }); }
       }
       const { run } = await import('./main.js');
       await run(cfg);
