@@ -164,3 +164,16 @@ test('closing a store does not restart its workers', async () => {
   assert.deepEqual(notes, []);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('a slow read on one reader does not hold up another', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-readers-'));
+  const s = await SqliteStore.open(dir);
+  try {
+    await s.insertFlows([rec()]);
+    const readers = (s as unknown as { readers: { load: number }[] }).readers;
+    assert.equal(readers.length, 2);
+    const many = Promise.all(Array.from({ length: 20 }, () => s.searchStreams(q())));
+    assert.ok(readers[0].load > 0 && readers[1].load > 0, 'both readers were given work: ' + readers.map(r => r.load).join(','));
+    for (const r of await many) assert.equal(r.total, 1);
+  } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
