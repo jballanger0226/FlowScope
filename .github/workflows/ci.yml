@@ -16,6 +16,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      # Linux and Windows treat all of 127.0.0.0/8 as loopback, macOS only configures 127.0.0.1. The SNMP tests run simulated
+      # devices on 127.0.0.2 and discovery scans up to 127.0.0.3, so add them (on a Mac at your desk: the same two commands).
+      - name: Extra loopback addresses (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo ifconfig lo0 alias 127.0.0.2 up
+          sudo ifconfig lo0 alias 127.0.0.3 up
       - run: npm install --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
@@ -64,7 +71,8 @@ jobs:
           test "$(docker inspect -f '{{.State.Health.Status}}' fsroot)" = healthy
           test "$(stat -c %u /tmp/rootdata)" = 1000
           docker exec fsroot sh -c 'test "$(id -u $(ps -o user= -p 1 2>/dev/null || echo node))" != 0 || true'
-          docker top fsroot -o user | tail -n +2 | grep -qv '^root'
+          # docker top needs the pid column in the ps output it parses ("Couldn't find PID field"), so ask for pid,user and look at user.
+          docker top fsroot -eo pid,user | tail -n +2 | awk '{print $2}' | grep -qv '^root'
       - name: Starts directly as another user
         run: |
           mkdir /tmp/userdata && sudo chown 1000:1000 /tmp/userdata
