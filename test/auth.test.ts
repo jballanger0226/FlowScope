@@ -226,3 +226,59 @@ test('the sign-in limiter forgets the oldest key when full, not everybody', asyn
   // clear releases one key
   l.clear('victim'); assert.equal(l.blocked('victim'), false);
 });
+
+// --- password hashing (audit A1) ---
+test('password hashes: old ones keep working and are upgraded at the next sign-in', async () => {
+  const sec = await import('../src/secrets.js');
+  const crypto = await import('node:crypto');
+  const e = env();
+  const prev = process.env.FLOWSCOPE_SCRYPT_LOG2N;
+  try {
+    e.auth.bootstrap('initial-admin-password');
+    // a hash as written by earlier versions: N=16384 (2^14)
+    const salt = crypto.randomBytes(16);
+    const legacy = `scrypt$16384$8$1$${salt.toString('base64')}$${crypto.scryptSync('initial-admin-password', salt, 32, { N: 16384, r: 8, p: 1 }).toString('base64')}`;
+    e.cdb.db.prepare("UPDATE users SET pw_hash = ? WHERE username = 'admin'").run(legacy);
+    assert.equal(sec.verifyPassword('initial-admin-password', legacy), true);
+    assert.equal(await sec.verifyPasswordAsync('initial-admin-password', legacy), true);
+    assert.equal(await sec.verifyPasswordAsync('nope', legacy), false);
+    assert.equal(sec.needsRehash(legacy), false, 'at the test cost (2^10) a 2^14 hash is already strong enough');
+    process.env.FLOWSCOPE_SCRYPT_LOG2N = '15';
+    assert.equal(sec.needsRehash(legacy), true);
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'wrong-password-here', '5.5.5.1'));
+    assert.equal((e.cdb.db.prepare("SELECT pw_hash FROM users WHERE username = 'admin'").get() as { pw_hash: string }).pw_hash, legacy, 'a failed sign-in changes nothing');
+    await e.auth.authenticate('web', 'admin', 'initial-admin-password', '5.5.5.2');
+    const now = (e.cdb.db.prepare("SELECT pw_hash FROM users WHERE username = 'admin'").get() as { pw_hash: string }).pw_hash;
+    assert.match(now, /^scrypt\$32768\$8\$1\$/);
+    assert.equal(sec.needsRehash(now), false);
+    await e.auth.authenticate('web', 'admin', 'initial-admin-password', '5.5.5.3');   // and the new hash verifies
+    // malformed stored values never verify
+    assert.equal(await sec.verifyPasswordAsync('x', 'scrypt$1$8$1$AA==$AA=='), false);
+    assert.equal(await sec.verifyPasswordAsync('x', 'scrypt$999999999$8$1$AA==$AA=='), false);
+    assert.equal(await sec.verifyPasswordAsync('x', 'plain'), false);
+  } finally { if (prev === undefined) delete process.env.FLOWSCOPE_SCRYPT_LOG2N; else process.env.FLOWSCOPE_SCRYPT_LOG2N = prev; e.done(); }
+});
+
+test('parallel wrong guesses against one account still lock it', async () => {
+  const e = env();
+  try {
+    e.auth.bootstrap('initial-admin-password');
+    const a = e.settings.get('aaa'); a.local.lockout = 5; e.settings.set('aaa', a);
+    const results = await Promise.allSettled(Array.from({ length: 30 }, (_, i) => e.auth.authenticate('web', 'admin', 'guess-' + i, '6.6.6.' + i)));
+    const locked = results.filter(r => r.status === 'rejected' && /locked/.test((r.reason as Error).message)).length;
+    assert.ok(locked >= 24, 'only the first five guesses are checked; got ' + locked + ' locked');
+    // the right password is refused while locked
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'initial-admin-password', '6.6.7.1'), /locked/);
+  } finally { e.done(); }
+});
+
+test('a flood of password checks gets "busy" instead of unbounded work', async () => {
+  const sec = await import('../src/secrets.js');
+  const h = sec.hashPassword('right');
+  const r = await Promise.allSettled(Array.from({ length: 120 }, () => sec.verifyPasswordAsync('right', h)));
+  const busy = r.filter(x => x.status === 'rejected' && x.reason instanceof sec.PasswordBusy).length;
+  assert.equal(r.filter(x => x.status === 'fulfilled').length, 66);   // 2 running + 64 queued
+  assert.equal(busy, 54);
+  // and it recovers
+  assert.equal(await sec.verifyPasswordAsync('right', h), true);
+});

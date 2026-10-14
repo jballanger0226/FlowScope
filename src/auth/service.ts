@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { ConfigDb } from '../db/configdb.js';
 import type { Settings, Role, Service, Provider, AaaSettings } from '../settings.js';
 import type { Secrets } from '../secrets.js';
-import { hashPassword, verifyPassword, randomToken, sha256 } from '../secrets.js';
+import { hashPassword, hashPasswordAsync, verifyPassword, verifyPasswordAsync, needsRehash, PasswordBusy, randomToken, sha256 } from '../secrets.js';
 import type { AppLog } from '../logger.js';
 import * as radius from './radius.js';
 import { adLogin, groupMatches, ldapLogin } from './ldap.js';
@@ -49,7 +49,10 @@ export function validUsername(u: string): boolean { return /^[A-Za-z0-9][A-Za-z0
 
 export class AuthService {
   private limiter = new Limiter(10, 5 * 60_000);
-  private dummyHash = hashPassword(crypto.randomBytes(8).toString('hex'));
+  private chain = new Map<string, Promise<void>>();
+  private dummy: Promise<string> | null = null;
+  /** Checked against when the user does not exist or is disabled, so those take as long as a real check. */
+  private dummyHash(): Promise<string> { return this.dummy ??= hashPasswordAsync(crypto.randomBytes(8).toString('hex')); }
   private lastTouch = new Map<string, number>();
 
   constructor(private cdb: ConfigDb, private settings: Settings, private secrets: Secrets, private log: AppLog) { this.keepRadiusBehaviour(); }
@@ -214,19 +217,41 @@ export class AuthService {
     return { ok: false, reason: 'This service does not use passwords' };
   }
 
-  private localLogin(username: string, password: string): { ok: boolean; role?: Role; reason?: string; mustChange?: boolean; name?: string } {
+  /** Runs checks for one account one after another, so parallel guesses cannot all pass the lockout test before the first one is counted. */
+  private serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.chain.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.then(() => undefined, () => undefined);
+    this.chain.set(key, tail);
+    void tail.then(() => { if (this.chain.get(key) === tail) this.chain.delete(key); });
+    return run;
+  }
+
+  private localLogin(username: string, password: string): Promise<{ ok: boolean; role?: Role; reason?: string; mustChange?: boolean; name?: string }> {
+    return this.serial(username.toLowerCase(), async () => {
+      try { return await this.localLoginNow(username, password); }
+      catch (e) { if (e instanceof PasswordBusy) throw new AuthError(e.message, 503); throw e; }
+    });
+  }
+
+  private async localLoginNow(username: string, password: string): Promise<{ ok: boolean; role?: Role; reason?: string; mustChange?: boolean; name?: string }> {
     const u = this.cdb.db.prepare("SELECT * FROM users WHERE username = ? AND source = 'local'").get(username) as unknown as { id: number; username: string; pw_hash: string; role: Role; failed: number; locked_until: number; disabled: number; must_change: number } | undefined;
-    if (!u) { verifyPassword(password, this.dummyHash); return { ok: false, reason: 'Wrong user name or password' }; }
+    if (!u) { await verifyPasswordAsync(password, await this.dummyHash()); return { ok: false, reason: 'Wrong user name or password' }; }
     const now = Date.now();
-    if (u.disabled) { verifyPassword(password, this.dummyHash); return { ok: false, reason: 'This account is disabled' }; }
+    if (u.disabled) { await verifyPasswordAsync(password, await this.dummyHash()); return { ok: false, reason: 'This account is disabled' }; }
     if (u.locked_until > now) return { ok: false, reason: `This account is locked for ${Math.ceil((u.locked_until - now) / 60000)} more minutes after too many wrong passwords` };
-    if (!verifyPassword(password, u.pw_hash)) {
+    if (!(await verifyPasswordAsync(password, u.pw_hash))) {
       const failed = u.failed + 1; const max = this.aaa().local.lockout;
-      if (max > 0 && failed >= max) { this.cdb.db.prepare('UPDATE users SET failed = 0, locked_until = ? WHERE id = ?').run(now + LOCK_MS, u.id); this.log.warn('auth', `Locked ${username} for 15 minutes after ${failed} wrong passwords`); }
+      if (max > 0 && failed >= max) { this.cdb.db.prepare('UPDATE users SET failed = 0, locked_until = ? WHERE id = ?').run(Date.now() + LOCK_MS, u.id); this.log.warn('auth', `Locked ${username} for 15 minutes after ${failed} wrong passwords`); }
       else this.cdb.db.prepare('UPDATE users SET failed = ? WHERE id = ?').run(failed, u.id);
       return { ok: false, reason: 'Wrong user name or password' };
     }
     this.cdb.db.prepare('UPDATE users SET failed = 0, locked_until = 0 WHERE id = ?').run(u.id);
+    if (needsRehash(u.pw_hash)) {
+      // the password is known to be right here, so move it to the current cost; only if nobody changed it while we were hashing
+      try { const h = await hashPasswordAsync(password); this.cdb.db.prepare('UPDATE users SET pw_hash = ? WHERE id = ? AND pw_hash = ?').run(h, u.id, u.pw_hash); }
+      catch { /* try again at the next sign-in */ }
+    }
     return { ok: true, role: u.role, mustChange: u.must_change === 1, name: u.username };
   }
 
@@ -239,12 +264,12 @@ export class AuthService {
     const a = this.aaa();
     const provider = a.services[service];
     let outcome: { ok: boolean; role?: Role; reason?: string; mustChange?: boolean; unreachable?: boolean; name?: string } & { source?: string };
-    if (provider === 'local') outcome = { ...this.localLogin(username, password), source: 'local' };
+    if (provider === 'local') outcome = { ...(await this.localLogin(username, password)), source: 'local' };
     else if (provider === 'saml') {
       // SAML signs in through the browser. The web form is the break-glass path for local administrators, so a SAML outage cannot lock everyone out.
       if (!a.fallback) outcome = { ok: false, reason: 'This service signs in through SAML in the browser' };
       else {
-        const local = this.localLogin(username, password);
+        const local = await this.localLogin(username, password);
         if (local.ok && local.role === 'admin') { outcome = { ...local, source: 'local' }; this.log.warn('auth', `${username} signed in with the local break-glass account while the web service uses SAML`, username); }
         else if (local.ok) outcome = { ok: false, reason: 'With SAML, the local sign-in is limited to local administrators' };
         else outcome = { ...local, source: 'local' };
@@ -256,7 +281,7 @@ export class AuthService {
       if (r.ok) { try { this.upsertRemote(username, r.role!, provider); outcome.name = (this.cdb.db.prepare('SELECT username FROM users WHERE username = ?').get(username) as { username: string }).username; } catch (e) { outcome = { ok: false, reason: (e as Error).message }; } }
       else if (r.unreachable && a.fallback) {
         // Break-glass: when the directory cannot be reached, local administrators may still sign in so the server is not locked out.
-        const local = this.localLogin(username, password);
+        const local = await this.localLogin(username, password);
         if (local.ok && local.role === 'admin') { outcome = { ...local, source: 'local' }; this.log.warn('auth', `${username} signed in with the local break-glass account because ${provider} is unreachable (${r.reason})`, username); }
         else outcome = { ok: false, reason: `${provider.toUpperCase()} is unreachable and the local fallback is limited to local administrators` };
       }
