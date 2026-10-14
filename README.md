@@ -82,7 +82,7 @@ Everything can be done in the Proxmox web interface, without a shell:
 1. Download the template `debian-12-flowscope_<version>_amd64.tar.zst` from this repository's **Releases** page (built by GitHub Actions; or build it yourself with `packaging/lxc-template/build.sh`).
 2. Proxmox: your node → a storage → **CT Templates** → **Upload**.
 3. **Create CT**, choose that template (Debian 12, 2 cores, 2 GiB, 16 GiB disk is a good start), start it, open **Console**, log in as `root`, and read the `admin` password from `/root/flowscope-admin-password.txt`.
-4. Open `https://<container address>:8443/`.
+4. Open `https://<container address>:8443/`. Nothing needs to be started by hand. If the page does not load, run `flowscope-ctl doctor` in the console and see the troubleshooting part of the guide below (the container's **Nesting** option should be ticked).
 
 A walkthrough of each wizard tab, updating, backups and troubleshooting: **[docs/deployment.md](docs/deployment.md)**. The same document covers the command-line alternative (`packaging/proxmox/flowscope-lxc.sh`, which creates the container for you) and running the Docker image directly as an OCI application container on Proxmox VE 9.1 and newer.
 

@@ -38,7 +38,8 @@ cat > "$MOTD" <<MSG
     Sign in as:   admin
     $note
     Exporters:    send NetFlow v5/v9 or IPFIX to this address, UDP 2055 or 4739
-    Commands:     flowscope-ctl status | logs | update | reset-password admin
+    Commands:     flowscope-ctl status | doctor | logs | update | reset-password admin
+    Not loading?  run: flowscope-ctl doctor
     Settings:     $ETC/flowscope.env   (then: systemctl restart flowscope)
 
   To remove this message: rm /etc/motd

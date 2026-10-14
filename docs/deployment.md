@@ -136,6 +136,28 @@ Click **Create CT** (top right) and fill in the tabs:
 
 The password is generated for you; you can change it in FlowScope after signing in. If you ever lose it, run `flowscope-ctl reset-password admin` in the container's console for a new one-time password.
 
+### If the web console does not answer (only SSH, port 22, is open)
+
+FlowScope starts by itself when the container boots; there is nothing to run by hand. If TCP 8443 is closed, the service did not start, and the container's console tells you why:
+
+```sh
+flowscope-ctl doctor          # service state, listening ports, container type, last log lines
+systemctl status flowscope    # the exact error, e.g. "status=226/NAMESPACE"
+```
+
+The common cause is **systemd's sandboxing needing a feature the container lacks**. Make sure the container has **Options → Features → Nesting** ticked (stop and start the container after changing it). Templates built before 2026-10-13 also had a bug that made the service fail even with the sandbox options switched off; the quick fix, run in the container's console, is:
+
+```sh
+mkdir -p /etc/systemd/system/flowscope.service.d
+printf '[Service]\nProtectSystem=no\nProtectHome=no\nPrivateTmp=no\nPrivateDevices=no\nProtectKernelTunables=no\nProtectKernelModules=no\nProtectControlGroups=no\nReadWritePaths=\n' \
+  > /etc/systemd/system/flowscope.service.d/lxc.conf
+systemctl daemon-reload
+systemctl restart flowscope
+ss -ltn | grep 8443        # should now show a listener
+```
+
+If it still does not start, send the output of `systemctl status flowscope` and `journalctl -u flowscope -n 50` (an issue on GitHub is fine).
+
 ### 5. Finish up in the GUI
 
 * **Start at boot:** container → **Options** → **Start at boot** → Yes.
@@ -299,6 +321,7 @@ These need Node.js 22.13 or newer. Step-by-step Windows instructions, including 
 | All flows appear to come from one device, with the Docker bridge address | Use `docker-compose.host.yml`, or run FlowScope in an LXC container |
 | No flows at all | Firewall in the way; exporter pointed at the wrong port; the log shows `new exporter <address>` when the first packet from a device arrives |
 | Container exits with `EACCES` or `unable to open database file` on `/data` | The data directory is not writable. Run without `--user` so the entrypoint can fix ownership, or `chown 1000:1000` the directory |
+| Only port 22 is open on a new container | See *If the web console does not answer* above; start with `flowscope-ctl doctor` |
 | Service fails in an LXC with `status=226/NAMESPACE` | The sandboxing drop-in is missing; re-run the installer (`flowscope-lxc.sh update <CTID>`, or `flowscope-ctl update` in the container) |
 | The uploaded template is not listed under Create CT → Template | Check that it was uploaded to a storage with *Container template* content, and that the file name ends in `.tar.zst` (not `.zip`) |
 | The container starts but there is no network | Check the bridge, VLAN tag, address and gateway on the Network tab (container → Network). Inside the console: `ip a`, `ip route` |

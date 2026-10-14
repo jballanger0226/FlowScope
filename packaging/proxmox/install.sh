@@ -160,7 +160,8 @@ sed -e "s#^ExecStart=.*#ExecStart=$NODE_BIN --disable-warning=ExperimentalWarnin
 chmod 644 "$unit"
 # Inside an LXC container systemd cannot always set up the mount namespaces behind ProtectSystem, PrivateTmp and PrivateDevices
 # (the service then fails with status 226/NAMESPACE). The container is already the isolation boundary, so those are switched off here
-# and the remaining hardening (no new privileges, restricted address families, ...) stays.
+# and the remaining hardening (no new privileges, restricted address families, ...) stays. Every directive that makes systemd build a
+# mount namespace has to be switched off, including ReadWritePaths=, or the service still fails to start.
 virt="$(systemd-detect-virt --container 2>/dev/null || true)"
 if [ "$virt" = "lxc" ] || [ "$virt" = "lxc-libvirt" ] || [ "$virt" = "openvz" ] || [ -n "${FLOWSCOPE_LXC:-}" ]; then
   d="$UNIT_DIR/flowscope.service.d"; mkdir -p "$d"
@@ -174,6 +175,8 @@ PrivateDevices=no
 ProtectKernelTunables=no
 ProtectKernelModules=no
 ProtectControlGroups=no
+# ReadWritePaths= alone makes systemd build a mount namespace, which is what fails inside a container without the Nesting feature.
+ReadWritePaths=
 CONF
   say "LXC container detected: relaxed the systemd mount sandboxing (drop-in $d/lxc.conf)"
 fi
@@ -181,9 +184,16 @@ fi
 # ---------------------------------------------------------------- helper command
 cat > "$BIN_DIR/flowscope-ctl" <<CTL
 #!/bin/sh
-# Small helper installed by FlowScope. Usage: flowscope-ctl status | logs | update | reset-password <user> | version
+# Small helper installed by FlowScope. Usage: flowscope-ctl status | doctor | logs | update | reset-password <user> | version
 case "\${1:-status}" in
   status) systemctl status flowscope --no-pager ;;
+  doctor)
+    # One screen of facts to read when the web console does not answer.
+    echo "== service"; systemctl is-enabled flowscope 2>&1; systemctl is-active flowscope 2>&1
+    echo "== listening (expect TCP 8443 and UDP 2055, 4739)"; ss -H -ltun 2>/dev/null | grep -E ':(8443|2055|4739)\\b' || echo "nothing is listening on the FlowScope ports"
+    echo "== container type: \$(systemd-detect-virt 2>/dev/null || echo unknown)   (nesting must be on in the Proxmox container options if this is lxc)"
+    echo "== last log lines"; journalctl -u flowscope --no-pager -n 25 2>&1
+    echo "== first-boot service"; systemctl is-active flowscope-firstboot 2>&1 || true ;;
   logs) shift; exec journalctl -u flowscope --no-pager "\${@:--n 100}" ;;
   reset-password) shift; exec runuser -u flowscope -- env FLOWSCOPE_DATA_DIR=$VAR $NODE_BIN --disable-warning=ExperimentalWarning $OPT/dist/src/cli.js reset-password "\$@" ;;
   version) exec $NODE_BIN $OPT/dist/src/cli.js version ;;
@@ -193,7 +203,7 @@ case "\${1:-status}" in
     t=\$(mktemp /tmp/flowscope-install.XXXXXX) || exit 1
     cp $OPT/packaging/proxmox/install.sh "\$t"
     exec env FLOWSCOPE_REPO="\${FLOWSCOPE_REPO:-jballanger0226/flowscope}" FLOWSCOPE_REF="\${FLOWSCOPE_REF:-main}" bash "\$t" --update ;;
-  *) echo "usage: flowscope-ctl status | logs | update | reset-password <user> | version" >&2; exit 2 ;;
+  *) echo "usage: flowscope-ctl status | doctor | logs | update | reset-password <user> | version" >&2; exit 2 ;;
 esac
 CTL
 chmod 755 "$BIN_DIR/flowscope-ctl"
