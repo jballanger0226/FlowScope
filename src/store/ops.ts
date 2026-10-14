@@ -201,10 +201,23 @@ export class SqliteOps {
     return parts.length ? '(' + parts.join(' OR ') + ')' : '0';
   }
 
+  /**
+   * `col IN (...)` for a list of numbers. Runs of three or more consecutive values (port:1000-3000) become `BETWEEN`, so a search
+   * for many ranges stays far below SQLite's limit on bound parameters instead of failing with "too many SQL variables".
+   */
   private numIn(col: string, vals: number[], args: SqlArg[]): string {
     if (!vals.length) return '0';
-    args.push(...vals);
-    return `${col} IN (${vals.map(() => '?').join(',')})`;
+    const sorted = [...new Set(vals)].sort((a, b) => a - b);
+    const singles: number[] = [], parts: string[] = [];
+    for (let i = 0; i < sorted.length;) {
+      let j = i;
+      while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
+      if (j - i >= 2) { parts.push(`${col} BETWEEN ? AND ?`); args.push(sorted[i], sorted[j]); }
+      else for (let k = i; k <= j; k++) singles.push(sorted[k]);
+      i = j + 1;
+    }
+    if (singles.length) { parts.push(`${col} IN (${singles.map(() => '?').join(',')})`); args.push(...singles); }
+    return parts.length === 1 ? parts[0] : '(' + parts.join(' OR ') + ')';
   }
 
   /** Record-level predicate that is a safe superset of the condition (used to find candidate streams). */

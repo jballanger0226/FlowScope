@@ -177,3 +177,26 @@ test('a slow read on one reader does not hold up another', async () => {
     for (const r of await many) assert.equal(r.total, 1);
   } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('searches with many port ranges do not run into the SQL parameter limit', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-ports-'));
+  const db = openTsDb({ dir });
+  const ops = new SqliteOps(db, dir, true);
+  try {
+    ops.insertFlows([rec({ dport: 443 }), rec({ dport: 25000, srcIp: '10.9.9.9' }), rec({ dport: 61000, srcIp: '10.9.9.8' })]);
+    // 17 ranges of 2,000 ports, a gap before each so they do not merge: 34,000 ports, which used to fail
+    const ports: number[] = [];
+    for (let r = 0; r < 17; r++) for (let p = 1 + r * 3500; p < 1 + r * 3500 + 2000; p++) ports.push(p);
+    ports.push(61000, 61000, 8080);                      // singles and a duplicate
+    for (const kind of ['port', 'sport', 'dport'] as const) {
+      const page = ops.searchStreams({ ...q(), conds: [{ kind, ports }] });
+      const dports = page.rows.map(r => r.dport).sort((a, b) => a - b);
+      assert.deepEqual(dports, kind === 'sport' ? [] : [443, 25000, 61000].filter(p => ports.includes(p)), kind);
+    }
+    // the same answer as a plain list
+    const small = ops.searchStreams({ ...q(), conds: [{ kind: 'port', ports: [443, 444, 445, 446, 25000, 61000] }] });
+    assert.deepEqual(small.rows.map(r => r.dport).sort((a, b) => a - b), [443, 25000, 61000]);
+    const none = ops.searchStreams({ ...q(), conds: [{ kind: 'port', ports: [7, 9] }] });
+    assert.equal(none.rows.length, 0);
+  } finally { db.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
