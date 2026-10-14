@@ -182,3 +182,27 @@ test('with SAML as the web provider, local administrators can still sign in thro
     await assert.rejects(() => e.auth.authenticate('web', 'admin', 'initial-admin-password', '3.3.3.6'), /Wrong user name or password/);
   } finally { e.done(); }
 });
+
+test('Message-Authenticator is required by default; a RADIUS setup saved before the setting existed keeps working', async () => {
+  const fresh = env();
+  try {
+    assert.equal(fresh.settings.get('aaa').radius.requireMa, true);
+  } finally { fresh.done(); }
+  const e = env();
+  try {
+    // what an older version stored: a configured server and no requireMa
+    e.settings.setRaw('aaa', JSON.stringify({ radius: { host1: 'radius.example.com', authPort: 1812 } }));
+    assert.equal(e.settings.get('aaa').radius.requireMa, true, 'without migration the default would apply');
+    new AuthService(e.cdb, e.settings, e.secrets, e.log);
+    assert.equal(e.settings.get('aaa').radius.requireMa, false);
+    assert.equal(e.settings.get('aaa').radius.host1, 'radius.example.com');
+    // an admin who has chosen is left alone
+    e.settings.setRaw('aaa', JSON.stringify({ radius: { host1: 'radius.example.com', requireMa: true } }));
+    new AuthService(e.cdb, e.settings, e.secrets, e.log);
+    assert.equal(e.settings.get('aaa').radius.requireMa, true);
+    // nothing configured: the default stays on
+    e.settings.setRaw('aaa', JSON.stringify({ radius: { host1: '' } }));
+    new AuthService(e.cdb, e.settings, e.secrets, e.log);
+    assert.equal(e.settings.get('aaa').radius.requireMa, true);
+  } finally { e.done(); }
+});

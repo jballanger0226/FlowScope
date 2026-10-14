@@ -54,7 +54,7 @@ export function mergeAaa(app: App, cur: AaaSettings, b: Draft): AaaSettings {
     next.radius = {
       host1: s(r.host1, c.host1, 255), host2: s(r.host2, c.host2, 255), authPort: n(r.authPort, c.authPort, 1, 65535), acctPort: n(r.acctPort, c.acctPort, 1, 65535),
       timeout: n(r.timeout, c.timeout, 1, 60), retries: n(r.retries, c.retries, 0, 10),
-      attr: ['Filter-Id', 'Class', 'Reply-Message'].includes(r.attr) ? r.attr : c.attr, acct: bool(r.acct, c.acct),
+      attr: ['Filter-Id', 'Class', 'Reply-Message'].includes(r.attr) ? r.attr : c.attr, acct: bool(r.acct, c.acct), requireMa: bool(r.requireMa, c.requireMa),
       secretEnc: typeof r.secret === 'string' && r.secret ? app.secrets.encryptJson(r.secret) : r.clearSecret === true ? '' : c.secretEnc
     };
   }

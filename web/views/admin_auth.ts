@@ -9,7 +9,7 @@ type Ext = 'radius' | 'ldap' | 'ad' | 'saml';
 interface Aaa {
   services: Record<Svc, Prov>; fallback: boolean;
   local: { minLen: number; lockout: number; idle: number };
-  radius: { host1: string; host2: string; authPort: number; acctPort: number; timeout: number; retries: number; attr: string; acct: boolean; hasSecret: boolean };
+  radius: { host1: string; host2: string; authPort: number; acctPort: number; timeout: number; retries: number; attr: string; acct: boolean; requireMa: boolean; hasSecret: boolean };
   ldap: { url: string; bindDn: string; baseDn: string; filter: string; groupBase: string; verify: boolean; hasBindPw: boolean };
   ad: { domain: string; dcs: string; bindUser: string; baseDn: string; ldaps: boolean; nested: boolean; verify: boolean; hasBindPw: boolean };
   saml: { idp: string; sp: string; nameAttr: string; groupAttr: string; sign: boolean; idpEntity: string; idpSso: string; idpCert: string };
@@ -98,7 +98,9 @@ function radiusForm(a: Aaa): VNode {
     field('Role attribute', select(r.attr, [['Filter-Id', 'Filter-Id'], ['Class', 'Class'], ['Reply-Message', 'Reply-Message']], v => { r.attr = v; redraw(); }, { aria: 'Role attribute' }), 'The attribute in the Access-Accept that carries the group names.'),
     nm('Authentication port', () => r.authPort, v => { r.authPort = v; }, 1, 65535), nm('Accounting port', () => r.acctPort, v => { r.acctPort = v; }, 1, 65535),
     nm('Timeout (seconds)', () => r.timeout, v => { r.timeout = v; }, 1, 60), nm('Retries per server', () => r.retries, v => { r.retries = v; }, 0, 10)),
-    tg('Send accounting records for sign-ins', r.acct, () => { r.acct = !r.acct; }));
+    tg('Send accounting records for sign-ins', r.acct, () => { r.acct = !r.acct; }),
+    tg('Require Message-Authenticator in replies', r.requireMa, () => { r.requireMa = !r.requireMa; }),
+    r.requireMa ? null : note('Without Message-Authenticator in replies, someone who can intercept RADIUS traffic may be able to forge an Access-Accept (CVE-2024-3596). Use Test below to see whether your server sends it, then turn this on.', 'warn'));
 }
 function ldapForm(a: Aaa): VNode {
   const l = a.ldap;

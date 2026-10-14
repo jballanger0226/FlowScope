@@ -64,12 +64,16 @@ export function packet(code: number, id: number, auth: Buffer, attrs: RadiusAttr
   return Buffer.concat([h, body]);
 }
 
-/** Adds Message-Authenticator (HMAC-MD5 over the whole packet, RFC 3579) to a request. */
+/**
+ * Adds Message-Authenticator (HMAC-MD5 over the whole packet, RFC 3579) to a request.
+ * It goes first: that is what stops an attacker who can inject attributes at the front of a request
+ * from building a forged reply (CVE-2024-3596, "Blast-RADIUS").
+ */
 function withMessageAuth(code: number, id: number, auth: Buffer, attrs: RadiusAttr[], secret: Buffer): Buffer {
   const placeholder: RadiusAttr = { type: Attr.MessageAuthenticator, value: Buffer.alloc(16) };
-  const pkt = packet(code, id, auth, [...attrs, placeholder]);
+  const pkt = packet(code, id, auth, [placeholder, ...attrs]);
   const mac = crypto.createHmac('md5', secret).update(pkt).digest();
-  mac.copy(pkt, pkt.length - 16);
+  mac.copy(pkt, 22);   // 20 byte header + type + length
   return pkt;
 }
 
@@ -94,31 +98,59 @@ export function verifyResponse(raw: Buffer, requestAuth: Buffer, secret: Buffer)
 }
 
 export interface RadiusServer { host: string; port: number }
-export interface RadiusOpts { servers: RadiusServer[]; secret: string; timeoutMs: number; retries: number; nasId?: string; nasIp?: string }
+export interface RadiusOpts { servers: RadiusServer[]; secret: string; timeoutMs: number; retries: number; nasId?: string; nasIp?: string; requireMa?: boolean }
 
-function exchange(srv: RadiusServer, req: Buffer, timeoutMs: number): Promise<Buffer> {
+/** What to do with a datagram that arrived while waiting for a reply: accept it, ignore it, or remember why it was refused. */
+type Verdict = 'ok' | 'ignore' | string;
+
+/**
+ * Sends one request and waits for an acceptable reply. The socket is connected, so the kernel drops datagrams from any other
+ * address or port. Replies that do not match (wrong id, bad signature) are ignored rather than ending the wait, so someone who
+ * can send us UDP cannot cancel a sign-in by racing the server. If nothing acceptable arrives, the reason for the last refused
+ * reply is reported instead of a bare timeout, which is how a wrong shared secret is still found.
+ */
+function exchange(srv: RadiusServer, req: Buffer, timeoutMs: number, judge: (m: Buffer) => Verdict): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const sock = dgram.createSocket(net.isIPv6(srv.host) ? 'udp6' : 'udp4');
-    const timer = setTimeout(() => { sock.close(); reject(new RadiusError(`No answer from ${srv.host}:${srv.port}`, 'timeout')); }, timeoutMs);
-    sock.once('message', m => { clearTimeout(timer); sock.close(); resolve(m); });
-    sock.once('error', e => { clearTimeout(timer); try { sock.close(); } catch { /* closed */ } reject(new RadiusError(`${srv.host}: ${e.message}`, 'timeout')); });
-    sock.send(req, srv.port, srv.host, e => { if (e) { clearTimeout(timer); sock.close(); reject(new RadiusError(`${srv.host}: ${e.message}`, 'timeout')); } });
+    let done = false, refused = '';
+    const end = (fn: () => void) => { if (done) return; done = true; clearTimeout(timer); try { sock.close(); } catch { /* closed */ } fn(); };
+    const timer = setTimeout(() => end(() => reject(refused ? new RadiusError(refused, 'protocol') : new RadiusError(`No answer from ${srv.host}:${srv.port}`, 'timeout'))), timeoutMs);
+    sock.on('message', m => {
+      const v = judge(m);
+      if (v === 'ok') end(() => resolve(m));
+      else if (v !== 'ignore' && !refused) refused = `${srv.host}: ${v}`;
+    });
+    sock.on('error', e => end(() => reject(new RadiusError(`${srv.host}: ${e.message}`, 'timeout'))));
+    sock.connect(srv.port, srv.host, () => {
+      if (done) return;
+      sock.send(req, e => { if (e) end(() => reject(new RadiusError(`${srv.host}: ${e.message}`, 'timeout'))); });
+    });
   });
 }
 
-export interface RadiusResult { accepted: boolean; challenge: boolean; replyMessage: string; filterIds: string[]; classes: string[]; server: string }
+export interface RadiusResult { accepted: boolean; challenge: boolean; replyMessage: string; filterIds: string[]; classes: string[]; server: string; messageAuth: boolean }
 
-async function send(o: RadiusOpts, build: (id: number, auth: Buffer) => { raw: Buffer; auth: Buffer }): Promise<{ resp: Buffer; auth: Buffer; server: string }> {
+const ACCESS_REPLIES = new Set<number>([Code.AccessAccept, Code.AccessReject, Code.AccessChallenge]);
+
+async function send(o: RadiusOpts, build: (id: number, auth: Buffer) => { raw: Buffer; auth: Buffer }, needMa = false): Promise<{ resp: Buffer; auth: Buffer; server: string }> {
   const secret = Buffer.from(o.secret);
   let lastErr: Error = new RadiusError('No RADIUS server is configured', 'config');
   for (const srv of o.servers) {
     for (let attempt = 0; attempt <= o.retries; attempt++) {
       const id = crypto.randomBytes(1)[0];
       const { raw, auth } = build(id, crypto.randomBytes(16));
+      const judge = (m: Buffer): Verdict => {
+        if (m.length < 20 || m[1] !== id) return 'ignore';
+        const len = m.readUInt16BE(2);
+        if (len < 20 || len > m.length) return 'ignore';
+        let ok = false;
+        try { ok = verifyResponse(m, auth, secret); } catch { return 'ignore'; }
+        if (!ok) return 'the reply failed authentication. The shared secret is probably wrong.';
+        if (needMa && ACCESS_REPLIES.has(m[0]) && !hasMessageAuth(m)) return 'the reply has no Message-Authenticator. Turn on Message-Authenticator on the RADIUS server (recommended, see CVE-2024-3596), or turn off "Require Message-Authenticator" here.';
+        return 'ok';
+      };
       try {
-        const resp = await exchange(srv, raw, o.timeoutMs);
-        if (resp.length < 20 || resp[1] !== id) { lastErr = new RadiusError(`${srv.host}: mismatched reply`); continue; }
-        if (!verifyResponse(resp, auth, secret)) throw new RadiusError(`${srv.host}: the reply failed authentication. The shared secret is probably wrong.`, 'protocol');
+        const resp = await exchange(srv, raw, o.timeoutMs, judge);
         return { resp, auth, server: `${srv.host}:${srv.port}` };
       } catch (e) {
         lastErr = e as Error;
@@ -127,6 +159,10 @@ async function send(o: RadiusOpts, build: (id: number, auth: Buffer) => { raw: B
     }
   }
   throw lastErr;
+}
+
+function hasMessageAuth(raw: Buffer): boolean {
+  return parsePacket(raw).attrs.some(a => a.type === Attr.MessageAuthenticator);
 }
 
 /** Sends an Access-Request using PAP. */
@@ -143,10 +179,10 @@ export async function authenticate(o: RadiusOpts, username: string, password: st
     if (o.nasId) attrs.push({ type: Attr.NasIdentifier, value: Buffer.from(o.nasId) });
     if (o.nasIp && net.isIPv4(o.nasIp)) attrs.push({ type: Attr.NasIpAddress, value: Buffer.from(o.nasIp.split('.').map(Number)) });
     return { raw: withMessageAuth(Code.AccessRequest, id, auth, attrs, secret), auth };
-  });
+  }, !!o.requireMa);
   const p = parsePacket(resp);
   const txt = (t: number) => p.attrs.filter(a => a.type === t).map(a => a.value.toString('utf8'));
-  return { accepted: p.code === Code.AccessAccept, challenge: p.code === Code.AccessChallenge, replyMessage: txt(Attr.ReplyMessage).join(' '), filterIds: txt(Attr.FilterId), classes: txt(Attr.Class), server };
+  return { accepted: p.code === Code.AccessAccept, challenge: p.code === Code.AccessChallenge, replyMessage: txt(Attr.ReplyMessage).join(' '), filterIds: txt(Attr.FilterId), classes: txt(Attr.Class), server, messageAuth: hasMessageAuth(resp) };
 }
 
 /** Sends an Accounting-Request (Start or Stop). */

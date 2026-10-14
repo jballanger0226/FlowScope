@@ -6,9 +6,9 @@ import * as d from '../src/tls/der.js';
 const md5 = (...b: Buffer[]) => crypto.createHash('md5').update(Buffer.concat(b)).digest();
 
 /** Independent mock server: decrypts the password per RFC 2865 section 5.2 and checks the request Message-Authenticator. */
-export function mockRadius(secret: string, users: Record<string, { pw: string; filter?: string; klass?: string }>, opts: { badSecretReply?: boolean } = {}) {
+export function mockRadius(secret: string, users: Record<string, { pw: string; filter?: string; klass?: string }>, opts: { badSecretReply?: boolean; replyMa?: boolean; junkFirst?: boolean } = {}) {
   const sock = dgram.createSocket('udp4');
-  const seen: { code: number; user: string; msgAuthOk: boolean; acctStatus?: number }[] = [];
+  const seen: { code: number; user: string; msgAuthOk: boolean; maFirst: boolean; acctStatus?: number }[] = [];
   sock.on('message', (m, r) => {
     const code = m[0], id = m[1], len = m.readUInt16BE(2), ra = m.subarray(4, 20);
     const attrs = new Map<number, Buffer>();
@@ -21,13 +21,25 @@ export function mockRadius(secret: string, users: Record<string, { pw: string; f
       msgAuthOk = macOff > 0;
       if (macOff > 0) { copy.fill(0, macOff, macOff + 16); msgAuthOk = crypto.createHmac('md5', secret).update(copy).digest().equals(attrs.get(80)!); }
     }
-    seen.push({ code, user, msgAuthOk, acctStatus: attrs.get(40)?.readUInt32BE(0) });
+    seen.push({ code, user, msgAuthOk, maFirst: m[20] === 80, acctStatus: attrs.get(40)?.readUInt32BE(0) });
     const reply = (rc: number, extra: Buffer[] = []) => {
-      const body = Buffer.concat(extra);
+      const withMa = opts.replyMa !== false && rc !== 5;
+      const body = Buffer.concat([...(withMa ? [Buffer.concat([Buffer.from([80, 18]), Buffer.alloc(16)])] : []), ...extra]);
       const h = Buffer.alloc(20); h[0] = rc; h[1] = id; h.writeUInt16BE(20 + body.length, 2);
+      if (withMa) {   // RFC 3579: HMAC-MD5 over the reply with the request authenticator in the header and the MAC zeroed
+        ra.copy(h, 4);
+        crypto.createHmac('md5', secret).update(Buffer.concat([h, body])).digest().copy(body, 2);
+      }
       const auth = md5(h.subarray(0, 4), ra, body, Buffer.from(opts.badSecretReply ? 'nope' : secret));
       auth.copy(h, 4);
-      sock.send(Buffer.concat([h, body]), r.port, r.address);
+      const real = Buffer.concat([h, body]);
+      if (opts.junkFirst) {
+        const wrongId = Buffer.from(real); wrongId[1] = (id + 1) & 255;
+        const forged = Buffer.from(real); md5(Buffer.from('forged')).copy(forged, 4);
+        const clone = Buffer.from(real); clone[0] = 2;   // an Accept built without knowing the secret
+        sock.send(wrongId, r.port, r.address); sock.send(forged, r.port, r.address); sock.send(clone.subarray(0, 10), r.port, r.address);
+      }
+      sock.send(real, r.port, r.address);
     };
     const attr = (t: number, v: string) => Buffer.concat([Buffer.from([t, v.length + 2]), Buffer.from(v)]);
     if (code === 4) {
