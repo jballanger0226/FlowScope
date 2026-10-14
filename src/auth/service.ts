@@ -20,13 +20,30 @@ const COMMON = new Set(['password', 'password1', 'password123', 'letmein', 'welc
 const LOCK_MS = 15 * 60_000;
 const SESSION_ABS_MS = 12 * 3600_000;
 
-class Limiter {
+/** Counts recent failures per key. Memory is bounded: when full, the key that was least recently updated is forgotten, never everybody at once. */
+export class Limiter {
   private hits = new Map<string, number[]>();
-  constructor(private max: number, private windowMs: number) {}
-  blocked(key: string): boolean { const now = Date.now(); const a = (this.hits.get(key) ?? []).filter(t => now - t < this.windowMs); this.hits.set(key, a); return a.length >= this.max; }
-  fail(key: string): void { const a = this.hits.get(key) ?? []; a.push(Date.now()); this.hits.set(key, a); if (this.hits.size > 20000) this.hits.clear(); }
+  constructor(private max: number, private windowMs: number, private maxKeys = 20000) {}
+  private recent(key: string, now: number): number[] { return (this.hits.get(key) ?? []).filter(t => now - t < this.windowMs); }
+  /** Reading never stores anything, so probing with many different keys cannot grow the table. */
+  blocked(key: string): boolean { return this.recent(key, Date.now()).length >= this.max; }
+  fail(key: string): void {
+    const now = Date.now();
+    const a = this.recent(key, now);
+    a.push(now);
+    if (a.length > this.max) a.splice(0, a.length - this.max);
+    this.hits.delete(key);          // re-insert so the table stays ordered by last update
+    this.hits.set(key, a);
+    while (this.hits.size > this.maxKeys) this.hits.delete(this.hits.keys().next().value as string);
+  }
   clear(key: string): void { this.hits.delete(key); }
+  get size(): number { return this.hits.size; }
 }
+
+const MA_NOTE = (present: boolean, required?: boolean): string =>
+  present ? 'The reply carried a Message-Authenticator.'
+    : required ? 'The reply has no Message-Authenticator.'
+      : 'The reply had no Message-Authenticator. Enable it on the RADIUS server, then turn on "Require Message-Authenticator" here (CVE-2024-3596).';
 
 export function validUsername(u: string): boolean { return /^[A-Za-z0-9][A-Za-z0-9._@\\-]{0,127}$/.test(u); }
 
@@ -35,7 +52,24 @@ export class AuthService {
   private dummyHash = hashPassword(crypto.randomBytes(8).toString('hex'));
   private lastTouch = new Map<string, number>();
 
-  constructor(private cdb: ConfigDb, private settings: Settings, private secrets: Secrets, private log: AppLog) {}
+  constructor(private cdb: ConfigDb, private settings: Settings, private secrets: Secrets, private log: AppLog) { this.keepRadiusBehaviour(); }
+
+  /**
+   * Message-Authenticator in RADIUS replies is required by default. A RADIUS setup saved before that setting existed keeps
+   * working as it did, with a warning, because its server may not send it.
+   */
+  private keepRadiusBehaviour(): void {
+    const raw = this.settings.raw('aaa');
+    if (!raw) return;
+    try {
+      const v = JSON.parse(raw) as { radius?: { host1?: string; requireMa?: boolean } };
+      if (v.radius && v.radius.requireMa === undefined && v.radius.host1) {
+        v.radius.requireMa = false;
+        this.settings.setRaw('aaa', JSON.stringify(v));
+        this.log.warn('auth', 'RADIUS replies are not required to carry Message-Authenticator on this installation (kept so sign-in keeps working). Check that your RADIUS server sends it, then turn on "Require Message-Authenticator" under Admin > Authentication (CVE-2024-3596).');
+      }
+    } catch { /* unreadable settings are handled where they are read */ }
+  }
 
   private aaa(): AaaSettings { return this.settings.get('aaa'); }
 
@@ -143,22 +177,22 @@ export class AuthService {
   private radiusOpts(): radius.RadiusOpts {
     const r = this.aaa().radius;
     const hosts = [r.host1, r.host2].filter(Boolean).map(h => { const m = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(h.trim()); return { host: (m ? m[1] : h).replace(/^\[|\]$/g, ''), port: m?.[2] ? Number(m[2]) : r.authPort }; });
-    return { servers: hosts, secret: this.secrets.decryptJson<string>(r.secretEnc, ''), timeoutMs: r.timeout * 1000, retries: r.retries, nasId: 'flowscope' };
+    return { servers: hosts, secret: this.secrets.decryptJson<string>(r.secretEnc, ''), timeoutMs: r.timeout * 1000, retries: r.retries, nasId: 'flowscope', requireMa: r.requireMa };
   }
 
-  private async remote(provider: Provider, username: string, password: string): Promise<{ ok: boolean; role?: Role; reason?: string; unreachable?: boolean; groups?: string[] }> {
+  private async remote(provider: Provider, username: string, password: string): Promise<{ ok: boolean; role?: Role; reason?: string; unreachable?: boolean; groups?: string[]; maMissing?: boolean }> {
     const a = this.aaa();
     if (provider === 'radius') {
       const o = this.radiusOpts();
       if (!o.servers.length || !o.secret) return { ok: false, reason: 'RADIUS is not configured', unreachable: true };
       try {
         const r = await radius.authenticate(o, username, password);
-        if (!r.accepted) return { ok: false, reason: r.replyMessage || 'Rejected by the RADIUS server' };
+        if (!r.accepted) return { ok: false, reason: r.replyMessage || 'Rejected by the RADIUS server', maMissing: !r.messageAuth };
         const vals = a.radius.attr === 'Class' ? r.classes : a.radius.attr === 'Reply-Message' ? r.replyMessage.split(/[\s,;]+/).filter(Boolean) : r.filterIds;
         const role = this.mapRole('radius', vals);
         if (!role) return { ok: false, reason: `The RADIUS server accepted the login but sent no ${a.radius.attr} that maps to a role` };
         if (a.radius.acct) void radius.account(o, username, 'fs-' + randomToken(6), 'start').catch(() => undefined);
-        return { ok: true, role, groups: vals };
+        return { ok: true, role, groups: vals, maMissing: !r.messageAuth };
       } catch (e) { return { ok: false, reason: (e as Error).message, unreachable: (e as radius.RadiusError).kind === 'timeout' || (e as radius.RadiusError).kind === 'config' }; }
     }
     if (provider === 'ldap') {
@@ -206,7 +240,16 @@ export class AuthService {
     const provider = a.services[service];
     let outcome: { ok: boolean; role?: Role; reason?: string; mustChange?: boolean; unreachable?: boolean; name?: string } & { source?: string };
     if (provider === 'local') outcome = { ...this.localLogin(username, password), source: 'local' };
-    else if (provider === 'saml') outcome = { ok: false, reason: 'This service signs in through SAML in the browser' };
+    else if (provider === 'saml') {
+      // SAML signs in through the browser. The web form is the break-glass path for local administrators, so a SAML outage cannot lock everyone out.
+      if (!a.fallback) outcome = { ok: false, reason: 'This service signs in through SAML in the browser' };
+      else {
+        const local = this.localLogin(username, password);
+        if (local.ok && local.role === 'admin') { outcome = { ...local, source: 'local' }; this.log.warn('auth', `${username} signed in with the local break-glass account while the web service uses SAML`, username); }
+        else if (local.ok) outcome = { ok: false, reason: 'With SAML, the local sign-in is limited to local administrators' };
+        else outcome = { ...local, source: 'local' };
+      }
+    }
     else {
       const r = await this.remote(provider, username, password);
       outcome = { ...r, source: provider };
@@ -316,7 +359,7 @@ export class AuthService {
         const o = this.radiusOpts();
         if (!o.servers.length) return { ok: false, message: 'Enter at least one RADIUS server' };
         if (!o.secret) return { ok: false, message: 'Enter the shared secret' };
-        try { const r = await radius.authenticate(o, 'flowscope-probe', 'flowscope-probe'); return { ok: true, message: `${r.server} answered (it rejected the probe user, as expected), so the address and shared secret work.` }; }
+        try { const r = await radius.authenticate(o, 'flowscope-probe', 'flowscope-probe'); return { ok: true, message: `${r.server} answered (it rejected the probe user, as expected), so the address and shared secret work. ${MA_NOTE(r.messageAuth, o.requireMa)}` }; }
         catch (e) { return { ok: false, message: (e as Error).message }; }
       }
       return { ok: false, message: 'Enter a test user name and password to try a full sign-in' };
@@ -324,7 +367,7 @@ export class AuthService {
     const r = await this.remote(provider, username, password);
     if (!r.ok) return { ok: false, message: r.reason ?? 'Sign-in failed' };
     this.log.info('auth', `Test sign-in for ${username} against ${provider} succeeded (role ${r.role})`);
-    return { ok: true, message: `Signed in as ${username}. Mapped role: ${ROLE_LABEL[r.role!]}.`, role: r.role, groups: r.groups };
+    return { ok: true, message: `Signed in as ${username}. Mapped role: ${ROLE_LABEL[r.role!]}.${provider === 'radius' ? ' ' + MA_NOTE(!r.maMissing, this.aaa().radius.requireMa) : ''}`, role: r.role, groups: r.groups };
   }
 
   private testSaml(): { ok: boolean; message: string } {

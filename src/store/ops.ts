@@ -145,7 +145,10 @@ export class SqliteOps {
     const now = Date.now();
     this.tx(() => {
       for (const r of recs) {
-        const t = 'flows_' + ymd(r.ts1);
+        const day = ymd(r.ts1);
+        // Defence in depth: a time that does not give a plain YYYYMMDD would create a table that is never listed, rolled up or dropped.
+        if (!/^\d{8}$/.test(day)) continue;
+        const t = 'flows_' + day;
         this.ensure(t, flowDdl(t));
         const skey = skeyOf(r);
         const dirKey = skey + '>' + r.srcIp;

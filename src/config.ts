@@ -26,7 +26,8 @@ export interface AppConfig {
   backend: 'sqlite' | 'clickhouse' | '';
   /** How long start-up waits for a configured ClickHouse server to answer before falling back to SQLite for this run. */
   clickhouseWaitSec: number;
-  trustProxy: boolean;
+  /** Number of reverse proxies in front of the web server; 0 trusts no forwarded headers. */
+  trustProxy: number;
 }
 
 function num(v: string | undefined, d: number): number {
@@ -68,6 +69,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     clickhouseUrl: env.FLOWSCOPE_CLICKHOUSE_URL || '',
     backend: env.FLOWSCOPE_BACKEND === 'sqlite' || env.FLOWSCOPE_BACKEND === 'clickhouse' ? env.FLOWSCOPE_BACKEND : '',
     clickhouseWaitSec: Math.max(0, Math.min(600, num(env.FLOWSCOPE_CLICKHOUSE_WAIT, 60))),
-    trustProxy: env.FLOWSCOPE_TRUST_PROXY === '1'
+    trustProxy: /^\d{1,2}$/.test(env.FLOWSCOPE_TRUST_PROXY || '') ? Number(env.FLOWSCOPE_TRUST_PROXY) : 0
   };
 }

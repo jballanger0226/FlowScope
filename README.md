@@ -113,7 +113,7 @@ All settings are environment variables.
 | `FLOWSCOPE_ADMIN_PASSWORD` | generated | Password for the first `admin` (first start only) |
 | `FLOWSCOPE_MASTER_KEY` | key file in the data dir | Encrypts stored secrets (SNMP communities/passwords, RADIUS secret, bind passwords, private keys). Set it if you want the key outside the data folder. |
 | `FLOWSCOPE_PUBLIC_URL` | | External URL, used for SAML callbacks |
-| `FLOWSCOPE_TRUST_PROXY` | off | Trust `X-Forwarded-*` from a reverse proxy |
+| `FLOWSCOPE_TRUST_PROXY` | off | Number of reverse proxies in front of FlowScope (`1` for one). The client address is then taken from `X-Forwarded-For`, counting from the right |
 | `FLOWSCOPE_CLICKHOUSE_URL` | set by the Docker compose files, the Linux and Proxmox installers and the Proxmox template | `http://user:pass@host:8123/database` (database defaults to `flowscope`). With no value, FlowScope uses SQLite. |
 | `FLOWSCOPE_BACKEND` | | `sqlite` or `clickhouse`: which store a **new** install starts with. Empty: ClickHouse when `FLOWSCOPE_CLICKHOUSE_URL` is set, otherwise SQLite. |
 | `FLOWSCOPE_CLICKHOUSE_WAIT` | `60` | Seconds to wait at start-up for ClickHouse to answer before falling back to SQLite for that run (ClickHouse is often still starting after a reboot or `docker compose up`) |

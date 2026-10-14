@@ -1,4 +1,5 @@
 import http from 'node:http';
+import net from 'node:net';
 import https from 'node:https';
 import tls from 'node:tls';
 import fs from 'node:fs';
@@ -48,11 +49,28 @@ const MIME: Record<string, string> = {
   '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8', '.map': 'application/json'
 };
 
+const plainIp = (a: string): string => a.startsWith('::ffff:') ? a.slice(7) : a;
+
+/**
+ * The address of the client. With no proxy that is the socket's peer. Behind `hops` proxies, each of which appends the address it
+ * received the request from to X-Forwarded-For, the client is the entry `hops` places from the right: everything left of that
+ * was written by the client or by a hop we do not control, so it can be anything. A header that is missing or does not hold an
+ * address there falls back to the socket's peer, which is the proxy itself.
+ */
+export function clientAddress(peer: string, forwardedFor: string | string[] | undefined, hops: number): string {
+  const socket = plainIp(peer);
+  if (hops < 1 || !forwardedFor) return socket;
+  const list = (Array.isArray(forwardedFor) ? forwardedFor.join(',') : forwardedFor).split(',').map(s => s.trim()).filter(Boolean);
+  const pick = plainIp(list[Math.max(0, list.length - hops)] ?? '');
+  return net.isIP(pick) ? pick : socket;
+}
+
 export class WebServer {
   private routes: Route[] = [];
   private servers: (http.Server | https.Server)[] = [];
   private tlsServers: https.Server[] = [];
-  trustProxy = false;
+  /** How many reverse proxies stand in front (0 = none, the socket address is used). */
+  trustProxy = 0;
   private webRoot: string;
 
   constructor(private auth: AuthHooks, webRoot: string, private hsts = true) { this.webRoot = path.resolve(webRoot); }
@@ -70,9 +88,7 @@ export class WebServer {
   del(p: string, role: Role | null, h: Handler) { this.route('DELETE', p, role, h); }
 
   private clientIp(req: http.IncomingMessage): string {
-    if (this.trustProxy) { const x = req.headers['x-forwarded-for']; if (typeof x === 'string' && x) return x.split(',')[0].trim(); }
-    const a = req.socket.remoteAddress || '';
-    return a.startsWith('::ffff:') ? a.slice(7) : a;
+    return clientAddress(req.socket.remoteAddress || '', req.headers['x-forwarded-for'], this.trustProxy);
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse, secure: boolean): Promise<void> {

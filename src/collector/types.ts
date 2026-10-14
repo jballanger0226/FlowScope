@@ -40,6 +40,8 @@ export interface DecodeStats {
   missingTemplate: number;
   templates: number;
   discarded: number;
+  /** Records dropped because their flow times were outside the accepted window (exporter clock wrong, or forged). */
+  badTime?: number;
 }
 
 export type FlowSink = (records: FlowRecord[], exporter: string, version: string) => void;

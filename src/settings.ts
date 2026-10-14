@@ -11,7 +11,7 @@ export interface AaaSettings {
   services: Record<Service, Provider>;
   fallback: boolean;
   local: { minLen: number; lockout: number; idle: number };
-  radius: { host1: string; host2: string; authPort: number; acctPort: number; timeout: number; retries: number; attr: 'Filter-Id' | 'Class' | 'Reply-Message'; acct: boolean; secretEnc: string };
+  radius: { host1: string; host2: string; authPort: number; acctPort: number; timeout: number; retries: number; attr: 'Filter-Id' | 'Class' | 'Reply-Message'; acct: boolean; requireMa: boolean; secretEnc: string };
   ldap: { url: string; bindDn: string; baseDn: string; filter: string; groupBase: string; verify: boolean; bindPwEnc: string };
   ad: { domain: string; dcs: string; bindUser: string; baseDn: string; ldaps: boolean; nested: boolean; verify: boolean; bindPwEnc: string };
   saml: { idp: string; sp: string; nameAttr: string; groupAttr: string; sign: boolean; idpEntity: string; idpSso: string; idpCert: string };
@@ -33,7 +33,7 @@ export const DEFAULTS = {
     services: { web: 'local', api: 'local', cli: 'local' },
     fallback: true,
     local: { minLen: 12, lockout: 5, idle: 30 },
-    radius: { host1: '', host2: '', authPort: 1812, acctPort: 1813, timeout: 5, retries: 2, attr: 'Filter-Id', acct: false, secretEnc: '' },
+    radius: { host1: '', host2: '', authPort: 1812, acctPort: 1813, timeout: 5, retries: 2, attr: 'Filter-Id', acct: false, requireMa: true, secretEnc: '' },
     ldap: { url: '', bindDn: '', baseDn: '', filter: '(uid={user})', groupBase: '', verify: true, bindPwEnc: '' },
     ad: { domain: '', dcs: '', bindUser: '', baseDn: '', ldaps: true, nested: true, verify: true, bindPwEnc: '' },
     saml: { idp: '', sp: '', nameAttr: 'email', groupAttr: 'groups', sign: false, idpEntity: '', idpSso: '', idpCert: '' },

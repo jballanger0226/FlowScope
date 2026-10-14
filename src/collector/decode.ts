@@ -88,14 +88,62 @@ interface Raw {
   natSrc?: string; natDst?: string; natSport?: number; natDport?: number; sampling?: number; tcpOctets?: number;
 }
 
-export interface V9Stats { templates: number; missingTemplate: number; heldRecords: number; unknownVersion: number }
+export interface V9Stats { templates: number; missingTemplate: number; heldRecords: number; unknownVersion: number; templatesRejected: number }
+
+/** Limits on what a sender can make the decoder remember. Exporters send tens of templates of up to ~100 fields, so these leave room. */
+export const TEMPLATE_LIMITS = { perExporter: 1024, total: 10_000, fields: 256, heldBytes: 32 * 1024 * 1024, heldKeys: 2000 };
 
 /** Decodes NetFlow v9 and IPFIX packets. Templates are cached per exporter and observation domain. */
 export class TemplateDecoder {
   private templates = new Map<string, Template>();
   private sampling = new Map<string, number>();
   private pending = new Map<string, { buf: Buffer; hdr: Hdr }[]>();
-  readonly stats: V9Stats = { templates: 0, missingTemplate: 0, heldRecords: 0, unknownVersion: 0 };
+  private perExporter = new Map<string, number>();
+  private heldBytes = 0;
+  readonly stats: V9Stats = { templates: 0, missingTemplate: 0, heldRecords: 0, unknownVersion: 0, templatesRejected: 0 };
+
+  private dropTemplate(key: string): void {
+    if (!this.templates.delete(key)) return;
+    const ex = key.slice(0, key.indexOf('|'));
+    const n = (this.perExporter.get(ex) ?? 1) - 1;
+    if (n > 0) this.perExporter.set(ex, n); else this.perExporter.delete(ex);
+  }
+
+  /** Stores a template unless the sender is over its share. The oldest template overall goes first when the total limit is reached. */
+  private storeTemplate(key: string, exporter: string, t: Template): boolean {
+    const known = this.templates.has(key);
+    if (!known) {
+      if ((this.perExporter.get(exporter) ?? 0) >= TEMPLATE_LIMITS.perExporter) { this.stats.templatesRejected++; return false; }
+      if (this.templates.size >= TEMPLATE_LIMITS.total) this.dropTemplate(this.templates.keys().next().value as string);
+      this.perExporter.set(exporter, (this.perExporter.get(exporter) ?? 0) + 1);
+    } else this.templates.delete(key);   // re-insert so a refreshed template counts as newest
+    this.templates.set(key, t);
+    return true;
+  }
+
+  private forgetHeld(key: string): { buf: Buffer; hdr: Hdr }[] | undefined {
+    const held = this.pending.get(key);
+    if (!held) return undefined;
+    this.pending.delete(key);
+    for (const h of held) { this.stats.heldRecords--; this.heldBytes -= h.buf.length; }
+    return held;
+  }
+
+  private hold(key: string, body: Buffer, hdr: Hdr): void {
+    let q = this.pending.get(key);
+    if (!q) {
+      while (this.pending.size >= TEMPLATE_LIMITS.heldKeys) this.forgetHeld(this.pending.keys().next().value as string);
+      q = [];
+    }
+    if (q.length >= 64) return;
+    while (this.heldBytes + body.length > TEMPLATE_LIMITS.heldBytes && this.pending.size) {
+      const oldest = this.pending.keys().next().value as string;
+      if (oldest === key) return;
+      this.forgetHeld(oldest);
+    }
+    q.push({ buf: Buffer.from(body), hdr }); this.heldBytes += body.length;
+    this.pending.set(key, q); this.stats.heldRecords++;
+  }
 
   decode(b: Buffer, exporter: string): FlowRecord[] {
     const ver = b.readUInt16BE(0);
@@ -142,7 +190,7 @@ export class TemplateDecoder {
       let scopeCount = 0; const fields: Field[] = [];
       if (!options) {
         const n = body.readUInt16BE(p + 2); p += 4;
-        if (n === 0) { this.templates.delete(this.key(exporter, hdr.domain, id)); continue; }
+        if (n === 0) { this.dropTemplate(this.key(exporter, hdr.domain, id)); continue; }
         p = this.readFields(body, p, n, fields, hdr.ipfix);
       } else if (hdr.ipfix) {
         const n = body.readUInt16BE(p + 2); scopeCount = body.readUInt16BE(p + 4); p += 6;
@@ -153,16 +201,14 @@ export class TemplateDecoder {
         p = this.readFields(body, p, (scopeBytes + optBytes) / 4, fields, false);
       }
       if (p < 0) return;
+      if (fields.length > TEMPLATE_LIMITS.fields) { this.stats.templatesRejected++; continue; }
       let fixedLen = 0, hasVar = false;
       for (const f of fields) { if (f.len === 65535) hasVar = true; else fixedLen += f.len; }
-      this.templates.set(this.key(exporter, hdr.domain, id), { id, fields, scopeCount, options, fixedLen, hasVar });
+      if (!this.storeTemplate(this.key(exporter, hdr.domain, id), exporter, { id, fields, scopeCount, options, fixedLen, hasVar })) continue;
       this.stats.templates++;
       // release data sets that arrived before this template
-      const held = this.pending.get(this.key(exporter, hdr.domain, id));
-      if (held) {
-        this.pending.delete(this.key(exporter, hdr.domain, id));
-        for (const h of held) { this.stats.heldRecords--; this.readData(id, h.buf, exporter, h.hdr, out); }
-      }
+      const held = this.forgetHeld(this.key(exporter, hdr.domain, id));
+      if (held) for (const h of held) this.readData(id, h.buf, exporter, h.hdr, out);
     }
   }
 
@@ -182,8 +228,7 @@ export class TemplateDecoder {
     const t = this.templates.get(k);
     if (!t) {
       this.stats.missingTemplate++;
-      const q = this.pending.get(k) || [];
-      if (q.length < 64) { q.push({ buf: Buffer.from(body), hdr }); this.pending.set(k, q); this.stats.heldRecords++; }
+      this.hold(k, body, hdr);
       return;
     }
     let p = 0;

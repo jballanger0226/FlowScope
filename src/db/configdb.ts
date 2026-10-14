@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
-import fs from 'node:fs';
 import path from 'node:path';
+import { secureDataDir, secureDbFiles } from '../perms.js';
 
 const MIGRATIONS: string[] = [
   `
@@ -164,10 +164,12 @@ export class ConfigDb {
   readonly db: DatabaseSync;
 
   constructor(dataDir: string, file = 'config.db') {
-    fs.mkdirSync(dataDir, { recursive: true });
-    this.db = new DatabaseSync(file === ':memory:' ? file : path.join(dataDir, file));
+    secureDataDir(dataDir);
+    const full = file === ':memory:' ? file : path.join(dataDir, file);
+    this.db = new DatabaseSync(full);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
     this.migrate();
+    if (file !== ':memory:') secureDbFiles(full);
   }
 
   private migrate(): void {

@@ -157,3 +157,72 @@ test('LDAP login maps groups; AD nested groups', async () => {
     await assert.rejects(() => e.auth.authenticate('web', 'ann', 'ann-password-1', '3.3.3.4'));
   } finally { dir.close(); e.done(); }
 });
+
+test('with SAML as the web provider, local administrators can still sign in through the form (when fallback is on)', async () => {
+  const e = env();
+  try {
+    e.auth.bootstrap('initial-admin-password');
+    e.auth.createUser('admin', { username: 'localro', password: 'local-ro-password', role: 'ro' });
+    const a = e.settings.get('aaa');
+    a.services.web = 'saml'; a.fallback = true; e.settings.set('aaa', a);
+    const r = await e.auth.authenticate('web', 'admin', 'initial-admin-password', '3.3.3.1');
+    assert.equal(r.principal.role, 'admin'); assert.equal(r.principal.source, 'local');
+    // only administrators, and the answer does not reveal that the password was right
+    await assert.rejects(() => e.auth.authenticate('web', 'localro', 'local-ro-password', '3.3.3.2'), /Wrong user name or password/);
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'not-the-password', '3.3.3.3'), /Wrong user name or password/);
+    // a disabled admin stays out
+    e.auth.createUser('admin', { username: 'admin2', password: 'second-admin-password', role: 'admin' });
+    e.cdb.db.prepare("UPDATE users SET disabled = 1 WHERE username = 'admin2'").run();
+    await assert.rejects(() => e.auth.authenticate('web', 'admin2', 'second-admin-password', '3.3.3.4'), /disabled/);
+    // repeated failures are still rate limited
+    for (let i = 0; i < 10; i++) await assert.rejects(() => e.auth.authenticate('web', 'admin', 'bad-' + i, '3.3.3.5'));
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'initial-admin-password', '3.3.3.5'), /Too many/);
+    // fallback off: SAML only
+    a.fallback = false; e.settings.set('aaa', a);
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'initial-admin-password', '3.3.3.6'), /Wrong user name or password/);
+  } finally { e.done(); }
+});
+
+test('Message-Authenticator is required by default; a RADIUS setup saved before the setting existed keeps working', async () => {
+  const fresh = env();
+  try {
+    assert.equal(fresh.settings.get('aaa').radius.requireMa, true);
+  } finally { fresh.done(); }
+  const e = env();
+  try {
+    // what an older version stored: a configured server and no requireMa
+    e.settings.setRaw('aaa', JSON.stringify({ radius: { host1: 'radius.example.com', authPort: 1812 } }));
+    assert.equal(e.settings.get('aaa').radius.requireMa, true, 'without migration the default would apply');
+    new AuthService(e.cdb, e.settings, e.secrets, e.log);
+    assert.equal(e.settings.get('aaa').radius.requireMa, false);
+    assert.equal(e.settings.get('aaa').radius.host1, 'radius.example.com');
+    // an admin who has chosen is left alone
+    e.settings.setRaw('aaa', JSON.stringify({ radius: { host1: 'radius.example.com', requireMa: true } }));
+    new AuthService(e.cdb, e.settings, e.secrets, e.log);
+    assert.equal(e.settings.get('aaa').radius.requireMa, true);
+    // nothing configured: the default stays on
+    e.settings.setRaw('aaa', JSON.stringify({ radius: { host1: '' } }));
+    new AuthService(e.cdb, e.settings, e.secrets, e.log);
+    assert.equal(e.settings.get('aaa').radius.requireMa, true);
+  } finally { e.done(); }
+});
+
+test('the sign-in limiter forgets the oldest key when full, not everybody', async () => {
+  const { Limiter } = await import('../src/auth/service.js');
+  const l = new Limiter(3, 60_000, 100);
+  for (let i = 0; i < 3; i++) l.fail('victim');
+  assert.equal(l.blocked('victim'), true);
+  // a flood of other keys must not release the victim
+  for (let i = 0; i < 500; i++) l.fail('spray-' + i);
+  assert.equal(l.size, 100);
+  assert.equal(l.blocked('spray-499'), false);
+  for (let i = 0; i < 3; i++) l.fail('victim');   // an attacker who keeps trying stays blocked
+  for (let i = 0; i < 90; i++) l.fail('more-' + i);
+  assert.equal(l.blocked('victim'), true);
+  // checking does not store anything
+  const before = l.size;
+  for (let i = 0; i < 1000; i++) l.blocked('probe-' + i);
+  assert.equal(l.size, before);
+  // clear releases one key
+  l.clear('victim'); assert.equal(l.blocked('victim'), false);
+});
