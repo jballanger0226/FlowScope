@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AppConfig } from './config.js';
+import { secureDataDir } from './perms.js';
 import { ConfigDb } from './db/configdb.js';
 import { Secrets } from './secrets.js';
 import { Settings, type CollectSettings } from './settings.js';
@@ -49,7 +50,7 @@ export class App {
 
   private async init(): Promise<void> {
     const cfg = this.cfg;
-    fs.mkdirSync(cfg.dataDir, { recursive: true });
+    secureDataDir(cfg.dataDir);
     this.cdb = new ConfigDb(cfg.dataDir);
     this.secrets = new Secrets(cfg.dataDir);
     this.settings = new Settings(this.cdb);
