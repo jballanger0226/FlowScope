@@ -149,7 +149,15 @@ export class App {
 
   async start(): Promise<void> {
     const cfg = this.cfg;
-    const hosts = [os.hostname(), 'localhost', '127.0.0.1', '::1', ...Object.values(os.networkInterfaces()).flat().filter(i => i && !i.internal).map(i => i!.address)];
+    let nicAddresses: string[] = [];
+    try {
+      nicAddresses = Object.values(os.networkInterfaces()).flat().filter(i => i && !i.internal).map(i => i!.address);
+    } catch (e) {
+      // A sandbox (for example a systemd unit without AF_NETLINK) can make the interface lookup fail; the certificate then only
+      // lists the fixed names instead of the service refusing to start.
+      this.log.warn('cert', 'Could not list the network interfaces, the certificate will not include their addresses: ' + (e as Error).message);
+    }
+    const hosts = [os.hostname(), 'localhost', '127.0.0.1', '::1', ...nicAddresses];
     if (cfg.tls === 'auto') await this.certs.ensureActive(hosts);
     this.initialAdminPassword = this.auth.bootstrap(process.env.FLOWSCOPE_ADMIN_PASSWORD);
     try { await this.collector.start(); } catch (e) { this.log.error('collector', 'Could not open the flow ports: ' + (e as Error).message); }

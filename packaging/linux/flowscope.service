@@ -25,7 +25,9 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK is needed by Node.js itself: os.networkInterfaces() (libuv uv_interface_addresses) asks the kernel for the address list over a
+# netlink socket, and without it the service exits at start with "uv_interface_addresses returned Unknown system error 97" (EAFNOSUPPORT).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 LockPersonality=true
 ReadWritePaths=/var/lib/flowscope
 
