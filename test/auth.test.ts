@@ -206,3 +206,23 @@ test('Message-Authenticator is required by default; a RADIUS setup saved before 
     assert.equal(e.settings.get('aaa').radius.requireMa, true);
   } finally { e.done(); }
 });
+
+test('the sign-in limiter forgets the oldest key when full, not everybody', async () => {
+  const { Limiter } = await import('../src/auth/service.js');
+  const l = new Limiter(3, 60_000, 100);
+  for (let i = 0; i < 3; i++) l.fail('victim');
+  assert.equal(l.blocked('victim'), true);
+  // a flood of other keys must not release the victim
+  for (let i = 0; i < 500; i++) l.fail('spray-' + i);
+  assert.equal(l.size, 100);
+  assert.equal(l.blocked('spray-499'), false);
+  for (let i = 0; i < 3; i++) l.fail('victim');   // an attacker who keeps trying stays blocked
+  for (let i = 0; i < 90; i++) l.fail('more-' + i);
+  assert.equal(l.blocked('victim'), true);
+  // checking does not store anything
+  const before = l.size;
+  for (let i = 0; i < 1000; i++) l.blocked('probe-' + i);
+  assert.equal(l.size, before);
+  // clear releases one key
+  l.clear('victim'); assert.equal(l.blocked('victim'), false);
+});

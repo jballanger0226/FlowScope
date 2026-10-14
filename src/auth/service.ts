@@ -20,12 +20,24 @@ const COMMON = new Set(['password', 'password1', 'password123', 'letmein', 'welc
 const LOCK_MS = 15 * 60_000;
 const SESSION_ABS_MS = 12 * 3600_000;
 
-class Limiter {
+/** Counts recent failures per key. Memory is bounded: when full, the key that was least recently updated is forgotten, never everybody at once. */
+export class Limiter {
   private hits = new Map<string, number[]>();
-  constructor(private max: number, private windowMs: number) {}
-  blocked(key: string): boolean { const now = Date.now(); const a = (this.hits.get(key) ?? []).filter(t => now - t < this.windowMs); this.hits.set(key, a); return a.length >= this.max; }
-  fail(key: string): void { const a = this.hits.get(key) ?? []; a.push(Date.now()); this.hits.set(key, a); if (this.hits.size > 20000) this.hits.clear(); }
+  constructor(private max: number, private windowMs: number, private maxKeys = 20000) {}
+  private recent(key: string, now: number): number[] { return (this.hits.get(key) ?? []).filter(t => now - t < this.windowMs); }
+  /** Reading never stores anything, so probing with many different keys cannot grow the table. */
+  blocked(key: string): boolean { return this.recent(key, Date.now()).length >= this.max; }
+  fail(key: string): void {
+    const now = Date.now();
+    const a = this.recent(key, now);
+    a.push(now);
+    if (a.length > this.max) a.splice(0, a.length - this.max);
+    this.hits.delete(key);          // re-insert so the table stays ordered by last update
+    this.hits.set(key, a);
+    while (this.hits.size > this.maxKeys) this.hits.delete(this.hits.keys().next().value as string);
+  }
   clear(key: string): void { this.hits.delete(key); }
+  get size(): number { return this.hits.size; }
 }
 
 const MA_NOTE = (present: boolean, required?: boolean): string =>
