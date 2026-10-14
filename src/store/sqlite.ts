@@ -45,7 +45,12 @@ export class Rpc {
       if (this.pending.size === 0) w.unref();
       if (m.ok) p.resolve(m.res); else p.reject(new Error(m.err));
     });
-    w.on('error', e => { if (this.w === w) { this.note(`The ${this.writer ? 'writing' : 'reading'} storage worker failed: ${e.message}`); fail(e); } });
+    w.on('error', (e: unknown) => {
+      if (this.w !== w) return;
+      const err = e instanceof Error ? e : new Error(String(e));
+      this.note(`The ${this.writer ? 'writing' : 'reading'} storage worker failed: ${err.message}`);
+      fail(err);
+    });
     w.on('exit', () => {
       if (this.w !== w) return;
       this.dead = true;

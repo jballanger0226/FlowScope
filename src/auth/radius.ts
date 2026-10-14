@@ -167,7 +167,7 @@ function hasMessageAuth(raw: Buffer): boolean {
 
 /** Sends an Access-Request using PAP. */
 export async function authenticate(o: RadiusOpts, username: string, password: string): Promise<RadiusResult> {
-  if (!password) return { accepted: false, challenge: false, replyMessage: 'Empty password', filterIds: [], classes: [], server: '' };
+  if (!password) return { accepted: false, challenge: false, replyMessage: 'Empty password', filterIds: [], classes: [], server: '', messageAuth: false };
   const secret = Buffer.from(o.secret);
   const { resp, server } = await send(o, (id, auth) => {
     const attrs: RadiusAttr[] = [

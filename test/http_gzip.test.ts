@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import type { IncomingHttpHeaders } from 'node:http';
 import { WebServer } from '../src/server/http.js';
 
 async function server() {
@@ -22,7 +23,7 @@ async function server() {
 // fetch decodes gzip by itself, so the wire format is checked with a raw request
 async function raw(url: string, headers: Record<string, string> = {}, method = 'GET') {
   const http = await import('node:http');
-  return new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }>((res, rej) => {
+  return new Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer }>((res, rej) => {
     const req = http.request(url, { method, headers }, r => { const parts: Buffer[] = []; r.on('data', d => parts.push(d)); r.on('end', () => res({ status: r.statusCode!, headers: r.headers, body: Buffer.concat(parts) })); });
     req.on('error', rej); req.end();
   });
