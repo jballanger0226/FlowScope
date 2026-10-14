@@ -67,6 +67,23 @@ XML
   chmod 640 "$_f"
 }
 
+# Starts the server binary far enough to prove this CPU can run it. ClickHouse's builds need a minimum instruction set (x86-64: SSE 4.2 and
+# related; ARM: v8.2). On an older CPU, or a virtual CPU of a generic type such as kvm64, the server is killed with signal ILL the moment it
+# starts, and systemd then restarts it forever. A Proxmox container uses the host's CPU, so this depends on the Proxmox host.
+ch_binary_works() {
+  _ch="$(command -v clickhouse 2>/dev/null || true)"
+  if [ -n "$_ch" ]; then
+    _out="$(cd /tmp && timeout 60 "$_ch" local --query 'SELECT 1' 2>/dev/null)" || return 1
+    [ "$_out" = 1 ]
+  else
+    command -v clickhouse-server >/dev/null 2>&1 && clickhouse-server --version >/dev/null 2>&1
+  fi
+}
+
+ch_cpu_message() {
+  echo "ClickHouse cannot run on this CPU: the server is killed with an illegal-instruction error as soon as it starts. That happens on older CPUs and on virtual CPUs of a generic type (kvm64 and similar). A Proxmox container uses the CPU of the Proxmox host, so give the host, or the VM it runs in, a newer CPU type (for a VM: Hardware, Processors, Type = host), restart it, and run the installer again with FLOWSCOPE_STORAGE=clickhouse."
+}
+
 ch_url() { printf 'http://flowscope:%s@127.0.0.1:%s/flowscope' "$1" "$CH_PORT"; }
 
 # Waits until the server answers its ping page.
