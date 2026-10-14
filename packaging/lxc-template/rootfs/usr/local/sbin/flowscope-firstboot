@@ -35,13 +35,21 @@ fi
 # ClickHouse (FlowScope's storage). The template ships the server but no user for FlowScope. Like the admin password, this one is made
 # here, so containers cloned from one template never share it. It goes straight into the settings file; nothing else keeps a copy.
 # The helper is plain sh and only needs these three small functions.
+storage_note="ClickHouse, inside this container (flowscope-ctl doctor shows its state)"
 say() { :; }; warn() { :; }; die() { echo "flowscope-firstboot: $*" >&2; exit 1; }
 if [ -f "$CH_HELPER" ] && [ -d "${FLOWSCOPE_CH_ETC:-/etc/clickhouse-server}" ] && ! grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env" 2>/dev/null; then
   # shellcheck source=/dev/null
   . "$CH_HELPER"
-  ch_pw="$(ch_gen_password)"
-  ch_write_user "$ch_pw"
-  printf '\n# Storage: the ClickHouse server in this container, set up at first boot. Remove this line and restart to use another server.\nFLOWSCOPE_CLICKHOUSE_URL=%s\n' "$(ch_url "$ch_pw")" >> "$ETC/flowscope.env"
+  if ch_binary_works; then
+    ch_pw="$(ch_gen_password)"
+    ch_write_user "$ch_pw"
+    printf '\n# Storage: the ClickHouse server in this container, set up at first boot. Remove this line and restart to use another server.\nFLOWSCOPE_CLICKHOUSE_URL=%s\n' "$(ch_url "$ch_pw")" >> "$ETC/flowscope.env"
+  else
+    # This CPU cannot run ClickHouse (it would be killed with SIGILL and restart forever). No URL line: FlowScope uses SQLite. The marker
+    # stops the ClickHouse service from starting at all (see clickhouse-server.service.d/flowscope.conf in the template).
+    mkdir -p "$ETC"; touch "$ETC/.clickhouse-unsupported"
+    storage_note="SQLite. This CPU cannot run ClickHouse (flowscope-ctl doctor explains)."
+  fi
 fi
 
 umask 022
@@ -53,7 +61,7 @@ cat > "$MOTD" <<MSG
     Sign in as:   admin
     $note
     Exporters:    send NetFlow v5/v9 or IPFIX to this address, UDP 2055 or 4739
-    Storage:      ClickHouse, inside this container (flowscope-ctl doctor shows its state)
+    Storage:      $storage_note
     Commands:     flowscope-ctl status | doctor | logs | update | reset-password admin
     Not loading?  run: flowscope-ctl doctor
     Settings:     $ETC/flowscope.env   (then: systemctl restart flowscope)

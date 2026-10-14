@@ -22,6 +22,11 @@ case "${FLOWSCOPE_STORAGE:-}" in
   *) die "FLOWSCOPE_STORAGE must be clickhouse or sqlite." ;;
 esac
 [ "$want_ch" = 0 ] || ch_install_package
+if [ "$want_ch" = 1 ] && ! ch_binary_works; then
+  warn "$(ch_cpu_message) Using SQLite for now."
+  systemctl disable --now clickhouse-server >/dev/null 2>&1 || true
+  want_ch=0
+fi
 command -v node >/dev/null || { echo "Node.js 22.13 or newer is required." >&2; exit 1; }
 node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=13)?0:1)' || { echo "Node.js 22.13 or newer is required (found $(node -v))." >&2; exit 1; }
 id flowscope >/dev/null 2>&1 || useradd --system --home /var/lib/flowscope --shell /usr/sbin/nologin flowscope

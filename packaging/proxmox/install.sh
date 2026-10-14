@@ -121,6 +121,12 @@ esac
 if [ "$want_ch" = 1 ]; then
   ch_install_package
   ch_write_listen_config
+  # Not in the template build: it runs on the build machine's CPU, so the answer would mean nothing. The first-boot service asks on the real one.
+  if [ -z "${FLOWSCOPE_TEMPLATE_BUILD:-}" ] && ! ch_binary_works; then
+    warn "$(ch_cpu_message) Using SQLite for now."
+    systemctl disable --now clickhouse-server >/dev/null 2>&1 || true
+    want_ch=0
+  fi
 fi
 
 # ---------------------------------------------------------------- build
@@ -221,8 +227,12 @@ case "\${1:-status}" in
     echo "== container type: \$(systemd-detect-virt 2>/dev/null || echo unknown)   (nesting must be on in the Proxmox container options if this is lxc)"
     echo "== last log lines"; journalctl -u flowscope --no-pager -n 25 2>&1
     echo "== first-boot service"; systemctl is-active flowscope-firstboot 2>&1 || true
-    if systemctl cat clickhouse-server >/dev/null 2>&1; then
+    if [ -e $ETC/.clickhouse-unsupported ]; then
+      echo "== clickhouse: not started, this CPU cannot run it (it dies with an illegal-instruction signal). FlowScope uses SQLite."
+      echo "   A Proxmox container uses the host's CPU; give the host (or its VM: Hardware, Processors, Type = host) a newer CPU type to use ClickHouse."
+    elif systemctl cat clickhouse-server >/dev/null 2>&1; then
       echo "== clickhouse (FlowScope storage)"; systemctl is-active clickhouse-server 2>&1
+      systemctl show clickhouse-server -p ExecMainStatus -p Result 2>&1 | grep -q 'Result=signal' && echo "killed by a signal: if it is ILL, this CPU cannot run ClickHouse (see docs/deployment.md)"
       curl -fsS --max-time 3 http://127.0.0.1:8123/ping 2>&1 | head -c 40 || echo "ClickHouse does not answer on 127.0.0.1:8123 (journalctl -u clickhouse-server -n 50)"
     fi ;;
   logs) shift; exec journalctl -u flowscope --no-pager "\${@:--n 100}" ;;
