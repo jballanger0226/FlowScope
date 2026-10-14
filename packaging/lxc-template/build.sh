@@ -2,10 +2,12 @@
 # Builds the FlowScope Proxmox VE container template: a .tar.zst you upload in the Proxmox web interface.
 #
 #   packaging/lxc-template/build.sh                 -> template-out/debian-12-flowscope_<version>_amd64.tar.zst (+ .sha256)
+#   STORAGE_BACKEND=sqlite packaging/lxc-template/build.sh   -> template-out/debian-12-flowscope-sqlite_<version>_amd64.tar.zst
+#                                                    (no ClickHouse in it: flow records go into the embedded SQLite file)
 #
 # Needs a Linux machine (or WSL) with Docker and zstd, and internet access for the Debian packages and npm. It does not need Proxmox.
 # GitHub Actions runs this for you (.github/workflows/lxc-template.yml); download its result from the Releases page instead if you prefer.
-# Settings: OUT (output folder, default template-out), PLATFORM (default linux/amd64).
+# Settings: OUT (output folder, default template-out), PLATFORM (default linux/amd64), STORAGE_BACKEND (clickhouse, the default, or sqlite).
 set -euo pipefail
 
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
@@ -21,11 +23,13 @@ version="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' package.json | head -n1)"
 [ -n "$version" ] || die "Could not read the version from package.json."
 OUT="${OUT:-template-out}"; PLATFORM="${PLATFORM:-linux/amd64}"
 case "$PLATFORM" in linux/amd64) arch=amd64;; linux/arm64) arch=arm64;; *) die "PLATFORM must be linux/amd64 or linux/arm64";; esac
-name="debian-12-flowscope_${version}_${arch}.tar.zst"
+STORAGE_BACKEND="${STORAGE_BACKEND:-clickhouse}"
+case "$STORAGE_BACKEND" in clickhouse) variant="";; sqlite) variant="-sqlite";; *) die "STORAGE_BACKEND must be clickhouse or sqlite";; esac
+name="debian-12-flowscope${variant}_${version}_${arch}.tar.zst"
 mkdir -p "$OUT"
 
-say "Building the root filesystem (Debian 12 + FlowScope $version, $PLATFORM)"
-DOCKER_BUILDKIT=1 docker build --platform "$PLATFORM" -f packaging/lxc-template/Dockerfile \
+say "Building the root filesystem (Debian 12 + FlowScope $version, $PLATFORM, storage: $STORAGE_BACKEND)"
+DOCKER_BUILDKIT=1 docker build --platform "$PLATFORM" --build-arg "STORAGE_BACKEND=$STORAGE_BACKEND" -f packaging/lxc-template/Dockerfile \
   --output "type=tar,dest=$OUT/rootfs.tar" .
 
 say "Compressing to $OUT/$name"

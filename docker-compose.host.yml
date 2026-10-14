@@ -9,8 +9,8 @@
 # for Windows or macOS (use the bridge file there).
 #
 # ClickHouse (the default storage) runs beside it and is published on the host's loopback address only (127.0.0.1:8123), which is how FlowScope,
-# sharing the host's network, reaches it. SQLite instead (the password value is then unused but compose still wants one):
-#   CLICKHOUSE_PASSWORD=unused FLOWSCOPE_BACKEND=sqlite docker compose -f docker-compose.host.yml up -d --no-deps flowscope
+# sharing the host's network, reaches it. Without ClickHouse (embedded SQLite, nothing more to download):
+#   docker compose -f docker-compose.host.sqlite.yml up -d
 services:
   flowscope:
     build: .

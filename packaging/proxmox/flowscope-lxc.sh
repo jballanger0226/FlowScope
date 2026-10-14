@@ -19,7 +19,12 @@
 #   TEMPLATE_STORAGE   storage that holds templates     (default: local)
 #   DISK_GB       root disk size in GB                  (default: 32; flow records and ClickHouse need room, see the README)
 #   CORES, MEMORY (MB), SWAP (MB)                       (default: 2, 4096, 512; ClickHouse is the default storage and wants the memory)
-#   STORAGE_BACKEND  clickhouse or sqlite               (default: clickhouse, installed inside the container; sqlite for a very small site, 2048 MB is then enough)
+#   STORAGE_BACKEND  clickhouse or sqlite               (default: clickhouse, installed inside the container)
+#
+# Options (anywhere on the command line):
+#   --sqlite      no ClickHouse: nothing about it is downloaded, flow records go into the embedded SQLite file. Smaller defaults:
+#                 2048 MB memory and a 16 GB disk, unless you set MEMORY and DISK_GB.
+#   --clickhouse  ClickHouse, the default
 #   ADMIN_PASSWORD  password for "admin"                (default: generated and printed at the end)
 #   TEMPLATE      a template file name such as debian-12-standard_12.12-1_amd64.tar.zst   (default: the newest Debian 12 one)
 #   START_ON_BOOT 1 or 0                                (default: 1)
@@ -34,6 +39,17 @@ command -v pct >/dev/null 2>&1 && command -v pveam >/dev/null 2>&1 || die "pct a
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 [ -f "$repo/package.json" ] && [ -f "$here/install.sh" ] || die "Run this script from a checkout of the FlowScope repository (packaging/proxmox/flowscope-lxc.sh)."
+
+rest=()
+for a in "$@"; do
+  case "$a" in
+    --sqlite) STORAGE_BACKEND=sqlite ;;
+    --clickhouse) STORAGE_BACKEND=clickhouse ;;
+    *) rest+=("$a") ;;
+  esac
+done
+set -- "${rest[@]+"${rest[@]}"}"
+case "${STORAGE_BACKEND:-}" in ""|clickhouse|sqlite) ;; *) die "STORAGE_BACKEND must be clickhouse or sqlite." ;; esac
 
 cmd="create"; [ "${1:-}" = "update" ] && { cmd="update"; shift; }
 
@@ -73,7 +89,8 @@ fi
 # ---------------------------------------------------------------- create
 CTID="${CTID:-$(pvesh get /cluster/nextid)}"
 HOSTNAME_CT="${CT_HOSTNAME:-flowscope}"
-IP="${IP:-dhcp}"; BRIDGE="${BRIDGE:-vmbr0}"; DISK_GB="${DISK_GB:-32}"; CORES="${CORES:-2}"; MEMORY="${MEMORY:-4096}"; SWAP="${SWAP:-512}"
+IP="${IP:-dhcp}"; BRIDGE="${BRIDGE:-vmbr0}"; def_disk=32; def_mem=4096; [ "${STORAGE_BACKEND:-}" = sqlite ] && { def_disk=16; def_mem=2048; }
+DISK_GB="${DISK_GB:-$def_disk}"; CORES="${CORES:-2}"; MEMORY="${MEMORY:-$def_mem}"; SWAP="${SWAP:-512}"
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"; START_ON_BOOT="${START_ON_BOOT:-1}"
 if [ -z "${STORAGE:-}" ]; then pvesm status --content rootdir 2>/dev/null | awk 'NR>1{print $1}' | grep -qx local-lvm && STORAGE=local-lvm || STORAGE=local; fi
 pct status "$CTID" >/dev/null 2>&1 && die "Container id $CTID is already in use. Choose another with CTID=..."

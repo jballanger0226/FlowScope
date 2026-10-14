@@ -44,9 +44,9 @@ docker compose up -d                          # FlowScope and ClickHouse
 
 ClickHouse is the default storage here. It is not published on any port; FlowScope reaches it over the compose network, and waits for its health check before starting. Settings and the admin database are in the `flowscope-data` volume (mounted at `/data`), flow records and SNMP samples are in the `clickhouse-data` volume. `docker-compose.host.yml` does the same with host networking and publishes ClickHouse on `127.0.0.1:8123` only.
 
-SQLite instead, with nothing else to run: `CLICKHOUSE_PASSWORD=unused FLOWSCOPE_BACKEND=sqlite docker compose up -d --no-deps flowscope`.
+**Without ClickHouse** (embedded SQLite): `docker compose -f docker-compose.sqlite.yml up -d`. It is one container, nothing more is downloaded, and no `.env` or password is needed. For host networking use `docker-compose.host.sqlite.yml`. Pick the file when you first start FlowScope: the storage it starts with is remembered in the `flowscope-data` volume (change it later under Storage; history is not copied).
 
-**Already running the earlier SQLite compose file?** Pull the change and `docker compose up -d` as above. Your install keeps using SQLite (its data is in `flowscope-data`), so nothing is lost; ClickHouse is started beside it, unused. To move to ClickHouse, stop collection and choose it under Storage; the history in SQLite is not copied. If you do not want the extra container, use the SQLite command above.
+**Already running the earlier SQLite compose file?** Pull the change and `docker compose up -d` as above. Your install keeps using SQLite (its data is in `flowscope-data`), so nothing is lost; ClickHouse is started beside it, unused. To move to ClickHouse, stop collection and choose it under Storage; the history in SQLite is not copied. If you do not want the extra container, run `docker compose -f docker-compose.sqlite.yml up -d` instead.
 
 ### Every exporter looks like the same device?
 
@@ -95,9 +95,9 @@ FlowScope is packaged as a Proxmox **container template**: a single `.tar.zst` f
 
 Pick one:
 
-* **From GitHub (easiest).** In the repository open **Releases** → **Proxmox template (latest main)** (or the newest `v*` release) and download `debian-12-flowscope_<version>_amd64.tar.zst`. The repository is private, so you have to be signed in to GitHub; a browser download is fine.
-* **From a workflow run.** **Actions** → *Proxmox container template* → the newest run → **proxmox-ct-template** at the bottom. This downloads a `.zip`; unzip it and use the `.tar.zst` inside.
-* **Build it yourself** on any Linux machine (or WSL) with Docker and `zstd`: `packaging/lxc-template/build.sh`. The file appears in `template-out/`. This needs no Proxmox and takes a few minutes.
+* **From GitHub (easiest).** In the repository open **Releases** → **Proxmox template (latest main)** (or the newest `v*` release) and download `debian-12-flowscope_<version>_amd64.tar.zst` (with ClickHouse, the default) or `debian-12-flowscope-sqlite_<version>_amd64.tar.zst` (no ClickHouse; embedded SQLite). The repository is private, so you have to be signed in to GitHub; a browser download is fine.
+* **From a workflow run.** **Actions** → *Proxmox container template* → the newest run → **proxmox-ct-template-clickhouse** or **proxmox-ct-template-sqlite** at the bottom. This downloads a `.zip`; unzip it and use the `.tar.zst` inside.
+* **Build it yourself** on any Linux machine (or WSL) with Docker and `zstd`: `packaging/lxc-template/build.sh` (or `STORAGE_BACKEND=sqlite packaging/lxc-template/build.sh` for the one without ClickHouse). The file appears in `template-out/`. This needs no Proxmox and takes a few minutes.
 
 Do not unpack the `.tar.zst`; Proxmox wants it as it is.
 
@@ -206,7 +206,7 @@ The alternative, with no internet access in the container, is to upload a newer 
 
 * Debian 12 with systemd, DHCP and `ifupdown` networking as Proxmox expects, and OpenSSH (key logins as root; Proxmox places the key you gave in the wizard).
 * Node.js 22 and npm, FlowScope in `/opt/flowscope` running as a systemd service under its own user, settings and the admin database in `/var/lib/flowscope`.
-* ClickHouse (from ClickHouse's own repository, LTS line), listening on `127.0.0.1` only, as FlowScope's storage; its data is in `/var/lib/clickhouse`. The database user FlowScope connects as is made at each container's first boot with its own random password, written only to `/etc/flowscope/flowscope.env` (`FLOWSCOPE_CLICKHOUSE_URL`). The container uses ClickHouse from its first start. Prefer SQLite? Stop collection under Admin, choose SQLite under Storage (history is not copied), then `systemctl disable --now clickhouse-server` to free the memory.
+* ClickHouse (from ClickHouse's own repository, LTS line), listening on `127.0.0.1` only, as FlowScope's storage; its data is in `/var/lib/clickhouse`. The database user FlowScope connects as is made at each container's first boot with its own random password, written only to `/etc/flowscope/flowscope.env` (`FLOWSCOPE_CLICKHOUSE_URL`). The container uses ClickHouse from its first start. **Without ClickHouse:** use the SQLite template, `debian-12-flowscope-sqlite_<version>_amd64.tar.zst` (same release page). It has no ClickHouse in it at all, so nothing about ClickHouse is installed or running, and 2 GiB memory and a 16 GiB disk are enough. Already created a container from the ClickHouse template? Stop collection under Admin, choose SQLite under Storage (history is not copied), then `systemctl disable --now clickhouse-server` to free the memory.
 * A first-boot service that makes the SSH host keys and the `admin` password for each container, so no two containers made from the same template share secrets.
 * The template contains no password or key. The Proxmox wizard's password is the only credential for the container itself.
 
@@ -220,12 +220,13 @@ On the Proxmox host (web UI → your node → **Shell**, or SSH), as root:
 
 ```sh
 git clone https://github.com/jballanger0226/flowscope && cd flowscope
-packaging/proxmox/flowscope-lxc.sh
+packaging/proxmox/flowscope-lxc.sh            # with ClickHouse (the default)
+packaging/proxmox/flowscope-lxc.sh --sqlite   # without ClickHouse: nothing about it is downloaded; embedded SQLite
 ```
 
 For a private repository, clone with a token (`git clone https://<user>:<token>@github.com/...`) or copy the repository to the host any other way. The script packs its own checkout and pushes it into the container, so the container itself never needs access to GitHub.
 
-Defaults are 2 cores, 2 GB memory, 512 MB swap, a 16 GB disk, bridge `vmbr0`, DHCP, start on boot. Change them with environment variables:
+Defaults are 2 cores, 4 GB memory, 512 MB swap, a 32 GB disk (2 GB and 16 GB with `--sqlite`, which needs less), bridge `vmbr0`, DHCP, start on boot. Change them with environment variables:
 
 ```sh
 CTID=210 CT_HOSTNAME=flowscope IP=192.168.10.50/24 GW=192.168.10.1 \
@@ -283,7 +284,7 @@ Everything is on the container's root disk (FlowScope's settings in `/var/lib/fl
 * **Flow source address.** The container has its own address on your bridge, so exporters see it as a normal host and the source address of every flow is preserved.
 * **systemd sandboxing.** The service unit is hardened, but some of those options fail inside an LXC container (service exits with status `226/NAMESPACE`). The installer adds a drop-in, `/etc/systemd/system/flowscope.service.d/lxc.conf`, that turns off the mount-namespace options when it detects a container. The container itself is the isolation boundary.
 * **ClickHouse and older CPUs.** The installers and the template use the ClickHouse **25.8** LTS line, held with `apt-mark hold` so `apt upgrade` does not move it. Newer lines need newer CPUs: 26.8 was killed with signal `ILL` (illegal instruction) at start on an Intel Xeon X5650 (2010, SSE4.2 but no AVX), where 25.8 ran. A container uses the Proxmox host's CPU, so the same happens on a VM host with a generic CPU type such as `kvm64`. The installer and the template's first-boot service test the binary by starting it; when it fails they skip ClickHouse, FlowScope uses SQLite, and `flowscope-ctl doctor` says why. To use ClickHouse on such a host, give the host (or its VM: Hardware → Processors → Type = host) a newer CPU type, then run the installer again with `FLOWSCOPE_STORAGE=clickhouse`; for a template container, delete `/etc/flowscope/.clickhouse-unsupported`, `systemctl start clickhouse-server`, then choose ClickHouse under Storage. To move to another release line later: `apt-mark unhold clickhouse-server clickhouse-common-static clickhouse-client`, then install the line you want (`FLOWSCOPE_CH_VERSION` does this for the installers). ClickHouse 25.8 LTS is supported for a limited time; plan the move.
-* **ClickHouse in the container.** `flowscope-ctl doctor` shows whether it is running and answering on `127.0.0.1:8123`. FlowScope waits up to a minute for it at start-up and then uses SQLite for that run, with a warning under Storage. The script's defaults are 4096 MB and a 32 GB disk for this reason; `STORAGE_BACKEND=sqlite` skips ClickHouse (2048 MB is then enough).
+* **ClickHouse in the container.** `flowscope-ctl doctor` shows whether it is running and answering on `127.0.0.1:8123`. FlowScope waits up to a minute for it at start-up and then uses SQLite for that run, with a warning under Storage. The script's defaults are 4096 MB and a 32 GB disk for this reason; `--sqlite` (or `STORAGE_BACKEND=sqlite`) skips ClickHouse (2048 MB is then enough).
 * **Unprivileged.** root inside the container is an unprivileged uid on the host. If you add your own bind mount to the container, mind the uid mapping.
 * **Firewall.** The installer does not install a firewall. If you turn on the Proxmox firewall for the container, allow TCP 8443 and UDP 2055 and 4739.
 
@@ -308,7 +309,7 @@ For a machine where you do not want containers:
 
 | OS | How |
 | --- | --- |
-| Linux | `npm install && npm run build && sudo packaging/linux/install.sh` (on Debian or Ubuntu this also installs ClickHouse as the storage; `FLOWSCOPE_STORAGE=sqlite sudo -E packaging/linux/install.sh` keeps SQLite) |
+| Linux | `npm install && npm run build && sudo packaging/linux/install.sh` (on Debian or Ubuntu this also installs ClickHouse as the storage; `sudo packaging/linux/install.sh --sqlite` skips ClickHouse entirely and keeps SQLite) |
 | macOS | `sudo packaging/macos/install.sh` |
 | Windows | elevated PowerShell: `.\packaging\windows\install.ps1` |
 
