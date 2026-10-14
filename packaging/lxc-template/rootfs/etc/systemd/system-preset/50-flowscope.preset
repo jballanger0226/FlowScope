@@ -1,5 +1,6 @@
 # A container made from the template is "first boot" for systemd (empty machine-id), and systemd then re-applies its preset policy to
 # every service. Say explicitly that these stay on.
 enable flowscope.service
+enable clickhouse-server.service
 enable flowscope-firstboot.service
 enable ssh.service

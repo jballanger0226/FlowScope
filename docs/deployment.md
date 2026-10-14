@@ -37,12 +37,16 @@ Open `https://<docker host>:8443/` and sign in as `admin`. If you left `FLOWSCOP
 ### Compose
 
 ```sh
+cp .env.example .env                          # then edit .env: set CLICKHOUSE_PASSWORD (letters and digits only; openssl rand -hex 16)
 export FLOWSCOPE_ADMIN_PASSWORD='a-password-of-12-or-more-characters'   # optional, first start only
-docker compose up -d                          # SQLite storage
-docker compose --profile clickhouse up -d     # also start ClickHouse (needs CLICKHOUSE_PASSWORD set; see the README)
+docker compose up -d                          # FlowScope and ClickHouse
 ```
 
-Everything FlowScope stores is in the `flowscope-data` volume (mounted at `/data`).
+ClickHouse is the default storage here. It is not published on any port; FlowScope reaches it over the compose network, and waits for its health check before starting. Settings and the admin database are in the `flowscope-data` volume (mounted at `/data`), flow records and SNMP samples are in the `clickhouse-data` volume. `docker-compose.host.yml` does the same with host networking and publishes ClickHouse on `127.0.0.1:8123` only.
+
+SQLite instead, with nothing else to run: `CLICKHOUSE_PASSWORD=unused FLOWSCOPE_BACKEND=sqlite docker compose up -d --no-deps flowscope`.
+
+**Already running the earlier SQLite compose file?** Pull the change and `docker compose up -d` as above. Your install keeps using SQLite (its data is in `flowscope-data`), so nothing is lost; ClickHouse is started beside it, unused. To move to ClickHouse, stop collection and choose it under Storage; the history in SQLite is not copied. If you do not want the extra container, use the SQLite command above.
 
 ### Every exporter looks like the same device?
 
@@ -81,7 +85,7 @@ FlowScope then serves plain HTTP on 8080 (publish that instead of 8443). The UDP
 git pull && docker compose build && docker compose up -d      # or: docker pull ... && docker compose up -d
 ```
 
-The data volume is kept. Back it up with, for example, `docker run --rm -v flowscope-data:/data -v "$PWD":/backup alpine tar czf /backup/flowscope-data.tgz -C /data .` (stop the container first for a consistent copy of the database).
+The data volumes are kept. Back up `flowscope-data` with, for example, `docker run --rm -v flowscope-data:/data -v "$PWD":/backup alpine tar czf /backup/flowscope-data.tgz -C /data .` (stop the container first for a consistent copy of the database). With ClickHouse as the storage, also back up `clickhouse-data` the same way (stop ClickHouse first), or use ClickHouse's own backup tools.
 
 ## Proxmox CT template (web interface)
 
@@ -115,9 +119,9 @@ Click **Create CT** (top right) and fill in the tabs:
 | --- | --- |
 | General | **Hostname** `flowscope`. Leave **Unprivileged container** ticked and **Nesting** ticked. Set a **Password** for the container's `root` user (and/or paste an SSH public key). |
 | Template | **Storage** where you uploaded it, **Template** `debian-12-flowscope_…tar.zst`. |
-| Disks | At least **16 GiB**. Flow records are stored here, so size it for your retention (the Storage and retention page in FlowScope has an estimator). |
+| Disks | At least **32 GiB**. Flow records are stored here (ClickHouse keeps them in `/var/lib/clickhouse`), so size it for your retention (the Storage and retention page in FlowScope has an estimator). |
 | CPU | **2** cores. |
-| Memory | **2048** MiB memory, **512** MiB swap. More helps with many exporters. |
+| Memory | **4096** MiB memory, **512** MiB swap (ClickHouse is the default storage and wants the memory). More helps with many exporters. |
 | Network | Your bridge (usually `vmbr0`), a **VLAN Tag** if needed, **IPv4** *DHCP*, or *Static* with an address like `192.168.10.50/24` and the gateway. A fixed address is best, because your routers send flows to it. |
 | DNS | Leave as *use host settings*, or set your own. |
 | Confirm | Tick **Start after created** and click **Finish**. |
@@ -201,7 +205,8 @@ The alternative, with no internet access in the container, is to upload a newer 
 ### What is in the template
 
 * Debian 12 with systemd, DHCP and `ifupdown` networking as Proxmox expects, and OpenSSH (key logins as root; Proxmox places the key you gave in the wizard).
-* Node.js 22 and npm, FlowScope in `/opt/flowscope` running as a systemd service under its own user, data in `/var/lib/flowscope`.
+* Node.js 22 and npm, FlowScope in `/opt/flowscope` running as a systemd service under its own user, settings and the admin database in `/var/lib/flowscope`.
+* ClickHouse (from ClickHouse's own repository, LTS line), listening on `127.0.0.1` only, as FlowScope's storage; its data is in `/var/lib/clickhouse`. The database user FlowScope connects as is made at each container's first boot with its own random password, written only to `/etc/flowscope/flowscope.env` (`FLOWSCOPE_CLICKHOUSE_URL`). The container uses ClickHouse from its first start. Prefer SQLite? Stop collection under Admin, choose SQLite under Storage (history is not copied), then `systemctl disable --now clickhouse-server` to free the memory.
 * A first-boot service that makes the SSH host keys and the `admin` password for each container, so no two containers made from the same template share secrets.
 * The template contains no password or key. The Proxmox wizard's password is the only credential for the container itself.
 
@@ -271,18 +276,21 @@ This takes a snapshot named `pre-update` first (when the storage supports snapsh
 
 ### Back up
 
-Everything is on the container's root disk, so a normal Proxmox backup job (**Datacenter → Backup**, or `vzdump <CTID>`, optionally to Proxmox Backup Server) covers it.
+Everything is on the container's root disk (FlowScope's settings in `/var/lib/flowscope`, flow records in `/var/lib/clickhouse`), so a normal Proxmox backup job (**Datacenter → Backup**, or `vzdump <CTID>`, optionally to Proxmox Backup Server) covers it. A backup of a running container is crash-consistent; ClickHouse recovers from that on start.
 
 ### Notes for LXC
 
 * **Flow source address.** The container has its own address on your bridge, so exporters see it as a normal host and the source address of every flow is preserved.
 * **systemd sandboxing.** The service unit is hardened, but some of those options fail inside an LXC container (service exits with status `226/NAMESPACE`). The installer adds a drop-in, `/etc/systemd/system/flowscope.service.d/lxc.conf`, that turns off the mount-namespace options when it detects a container. The container itself is the isolation boundary.
+* **ClickHouse in the container.** `flowscope-ctl doctor` shows whether it is running and answering on `127.0.0.1:8123`. FlowScope waits up to a minute for it at start-up and then uses SQLite for that run, with a warning under Storage. The script's defaults are 4096 MB and a 32 GB disk for this reason; `STORAGE_BACKEND=sqlite` skips ClickHouse (2048 MB is then enough).
 * **Unprivileged.** root inside the container is an unprivileged uid on the host. If you add your own bind mount to the container, mind the uid mapping.
 * **Firewall.** The installer does not install a firewall. If you turn on the Proxmox firewall for the container, allow TCP 8443 and UDP 2055 and 4739.
 
 ## Proxmox OCI
 
 Proxmox VE 9.1 and newer can create an LXC container from an OCI image ("application container"), so the Docker image can run there without Docker. This is the less proven path: it depends on Proxmox features that are new, and nothing here has been tried on a real host. If anything below does not match what you see, use the CT template route above, which does not depend on it.
+
+**Storage in this route.** The image alone has no ClickHouse server, so with no further setting it stores data in SQLite under `/data`. For ClickHouse, run a ClickHouse server somewhere FlowScope can reach (another container made the same way from the `clickhouse/clickhouse-server` image, or the template route above, which includes it) and add `FLOWSCOPE_CLICKHOUSE_URL=http://user:password@host:8123/flowscope` to the environment variables in step 5.
 
 1. Make the image available from a registry Proxmox can reach. Either use the one published by `.github/workflows/image.yml` (`ghcr.io/jballanger0226/flowscope:latest`, which must be made public first; see above) or push your own build to a registry you control.
 2. On the node: select a storage that holds container templates → **CT Templates** → **Pull from OCI Registry**; enter the image reference and the tag.
@@ -299,7 +307,7 @@ For a machine where you do not want containers:
 
 | OS | How |
 | --- | --- |
-| Linux | `npm install && npm run build && sudo packaging/linux/install.sh` |
+| Linux | `npm install && npm run build && sudo packaging/linux/install.sh` (on Debian or Ubuntu this also installs ClickHouse as the storage; `FLOWSCOPE_STORAGE=sqlite sudo -E packaging/linux/install.sh` keeps SQLite) |
 | macOS | `sudo packaging/macos/install.sh` |
 | Windows | elevated PowerShell: `.\packaging\windows\install.ps1` |
 
@@ -312,7 +320,7 @@ These need Node.js 22.13 or newer. Step-by-step Windows instructions, including 
 3. **SNMP.** Add SNMP credential sets under Admin and the devices under SNMP devices to get interface names, speeds, VLANs, QoS policies and host tracking. Allow UDP 161 from FlowScope to the devices.
 4. **HTTPS certificate.** Admin → HTTPS certificate replaces the self-signed one.
 5. **Firewalls.** Allow TCP 8443 from your admin networks and UDP 2055/4739 from your exporters only. NetFlow is unauthenticated.
-6. **Storage sizing.** Roughly allow for the retention you set times your flow rate; SQLite is fine for small and medium networks, and ClickHouse is the option for more (experimental).
+6. **Storage sizing.** Roughly allow for the retention you set times your flow rate; ClickHouse is the default storage on the Docker, Linux and Proxmox installs; SQLite is still fine for a small network and needs nothing else running.
 
 ## Troubleshooting
 

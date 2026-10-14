@@ -1,7 +1,8 @@
 [Unit]
 Description=FlowScope NetFlow/IPFIX collector
-After=network-online.target
-Wants=network-online.target
+After=network-online.target clickhouse-server.service
+Wants=network-online.target clickhouse-server.service
+# clickhouse-server.service is the local ClickHouse the installers set up. On a machine without it these two words do nothing.
 
 [Service]
 Type=simple

@@ -13,6 +13,11 @@
 # Other settings: FLOWSCOPE_ADMIN_PASSWORD (first install only; generated when unset), FLOWSCOPE_NODE=system to use the Node.js
 # already on the machine instead of downloading one, FLOWSCOPE_TEMPLATE_BUILD=1 when making the Proxmox CT template (no admin password is
 # written; the template's first-boot service creates one for every container made from it).
+#
+# Storage: a new install sets up ClickHouse on this machine (official package, listening on 127.0.0.1, its own random password) and
+# points FlowScope at it. FLOWSCOPE_STORAGE=sqlite skips that and keeps the embedded SQLite store. An update leaves the storage of an
+# existing install alone; FLOWSCOPE_STORAGE=clickhouse on an update adds the ClickHouse server and the setting, and you then pick
+# ClickHouse under Storage in the web console (the old data is not copied over).
 set -euo pipefail
 
 OPT="${FLOWSCOPE_OPT:-/opt/flowscope}"
@@ -102,6 +107,21 @@ else
   die "No source given. Set FLOWSCOPE_SRC (a tarball or checkout) or FLOWSCOPE_REPO (owner/name)."
 fi
 [ -f "$src/package.json" ] && [ -f "$src/packaging/linux/flowscope.service" ] || die "$src does not look like a FlowScope checkout."
+# shellcheck source=../linux/clickhouse-setup.sh
+. "$src/packaging/linux/clickhouse-setup.sh"
+
+# ---------------------------------------------------------------- storage: ClickHouse server
+want_ch=0
+case "${FLOWSCOPE_STORAGE:-}" in
+  clickhouse) want_ch=1 ;;
+  sqlite) want_ch=0 ;;
+  "") [ "$MODE" = "install" ] && want_ch=1 ;;
+  *) die "FLOWSCOPE_STORAGE must be clickhouse or sqlite." ;;
+esac
+if [ "$want_ch" = 1 ]; then
+  ch_install_package
+  ch_write_listen_config
+fi
 
 # ---------------------------------------------------------------- build
 say "Building FlowScope"
@@ -151,6 +171,14 @@ ENV
 fi
 chmod 640 "$ETC/flowscope.env"; chown root:flowscope "$ETC/flowscope.env"
 
+# A ClickHouse user for FlowScope with its own random password, kept only in the settings file. Not in the template build: there the
+# first-boot service does this for each container, so no two containers share a password.
+if [ "$want_ch" = 1 ] && [ -z "${FLOWSCOPE_TEMPLATE_BUILD:-}" ] && ! grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env"; then
+  ch_pw="$(ch_gen_password)"
+  ch_write_user "$ch_pw"
+  printf '\n# Storage: the ClickHouse server on this machine, set up by the installer. Remove this line and restart to use another server.\nFLOWSCOPE_CLICKHOUSE_URL=%s\n' "$(ch_url "$ch_pw")" >> "$ETC/flowscope.env"
+fi
+
 # ---------------------------------------------------------------- service
 unit="$UNIT_DIR/flowscope.service"
 install -d "$UNIT_DIR"
@@ -192,7 +220,11 @@ case "\${1:-status}" in
     echo "== listening (expect TCP 8443 and UDP 2055, 4739)"; ss -H -ltun 2>/dev/null | grep -E ':(8443|2055|4739)\\b' || echo "nothing is listening on the FlowScope ports"
     echo "== container type: \$(systemd-detect-virt 2>/dev/null || echo unknown)   (nesting must be on in the Proxmox container options if this is lxc)"
     echo "== last log lines"; journalctl -u flowscope --no-pager -n 25 2>&1
-    echo "== first-boot service"; systemctl is-active flowscope-firstboot 2>&1 || true ;;
+    echo "== first-boot service"; systemctl is-active flowscope-firstboot 2>&1 || true
+    if systemctl cat clickhouse-server >/dev/null 2>&1; then
+      echo "== clickhouse (FlowScope storage)"; systemctl is-active clickhouse-server 2>&1
+      curl -fsS --max-time 3 http://127.0.0.1:8123/ping 2>&1 | head -c 40 || echo "ClickHouse does not answer on 127.0.0.1:8123 (journalctl -u clickhouse-server -n 50)"
+    fi ;;
   logs) shift; exec journalctl -u flowscope --no-pager "\${@:--n 100}" ;;
   reset-password) shift; exec runuser -u flowscope -- env FLOWSCOPE_DATA_DIR=$VAR $NODE_BIN --disable-warning=ExperimentalWarning $OPT/dist/src/cli.js reset-password "\$@" ;;
   version) exec $NODE_BIN $OPT/dist/src/cli.js version ;;
@@ -209,6 +241,13 @@ chmod 755 "$BIN_DIR/flowscope-ctl"
 
 if command -v systemctl >/dev/null 2>&1 && [ -z "${FLOWSCOPE_SKIP_SYSTEMD:-}" ]; then
   systemctl daemon-reload
+  if [ "$want_ch" = 1 ]; then
+    systemctl enable clickhouse-server >/dev/null 2>&1 || true
+    # a restart, not a start: the server may already be running from the package install, before it was told to listen on 127.0.0.1 only
+    systemctl restart clickhouse-server
+    say "Waiting for ClickHouse"
+    ch_wait || warn "ClickHouse did not answer within 90 seconds. Look at: journalctl -u clickhouse-server -n 50   (FlowScope keeps trying for a minute, then uses SQLite for this run)"
+  fi
   systemctl enable flowscope >/dev/null 2>&1 || true
   systemctl restart flowscope
   say "Waiting for FlowScope to answer"
@@ -228,3 +267,8 @@ fi
 [ "$MODE" = "update" ] && echo "  Updated. If something is wrong, the previous version is in $OPT.prev"
 echo "  Web console: https://$(hostname -I 2>/dev/null | awk '{print $1}'):8443/   (self-signed certificate until you install your own)"
 echo "  Send NetFlow v5/v9 or IPFIX to UDP 2055 or 4739 on this machine."
+if grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env" 2>/dev/null || [ -n "${FLOWSCOPE_TEMPLATE_BUILD:-}" ]; then
+  echo "  Storage:     ClickHouse (data in /var/lib/clickhouse; it is on the container's root disk, so the container backup covers it)."
+else
+  echo "  Storage:     SQLite (embedded). To use ClickHouse instead, see docs/deployment.md."
+fi
