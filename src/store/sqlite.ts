@@ -9,50 +9,75 @@ import type {
 
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void };
 
-class Rpc {
-  private w: Worker;
+/** Calls into one storage worker thread. If the worker dies (an uncaught error, running out of memory), the next call starts a new one. */
+export class Rpc {
+  private w!: Worker;
   private seq = 1;
   private pending = new Map<number, Pending>();
-  private ready: Promise<void>;
+  private ready!: Promise<void>;
+  /** Set by close(): the worker was stopped on purpose and is not restarted. */
   closed = false;
+  private dead = false;
+  private lastSpawn = 0;
+  restarts = 0;
 
-  constructor(dir: string, writer: boolean) {
+  constructor(private dir: string, private writer: boolean, private note: (m: string) => void = () => undefined, private restartDelayMs = 1000) { this.spawn(); }
+
+  private spawn(): void {
     const file = path.join(path.dirname(fileURLToPath(import.meta.url)), 'worker.js');
-    this.w = new Worker(file, { workerData: { dir, writer } });
+    const w = new Worker(file, { workerData: { dir: this.dir, writer: this.writer } });
+    this.w = w; this.dead = false; this.lastSpawn = Date.now();
+    const fail = (e: Error) => { for (const p of this.pending.values()) p.reject(e); this.pending.clear(); };
     this.ready = new Promise((res, rej) => {
-      const onMsg = (m: any) => { if (m && m.ready) { this.w.off('message', onMsg); if (this.pending.size === 0) this.w.unref(); res(); } };
-      this.w.on('message', onMsg);
-      this.w.once('error', rej);
+      const onMsg = (m: any) => { if (m && m.ready) { w.off('message', onMsg); if (this.pending.size === 0) w.unref(); res(); } };
+      w.on('message', onMsg);
+      w.once('error', rej);
+      w.once('exit', () => rej(new Error('storage worker exited')));
     });
-    this.w.on('message', (m: any) => {
-      if (!m || m.ready) return;
+    this.ready.catch(() => undefined);
+    w.on('message', (m: any) => {
+      if (this.w !== w || !m || m.ready) return;
       const p = this.pending.get(m.id);
       if (!p) return;
       this.pending.delete(m.id);
-      if (this.pending.size === 0) this.w.unref();
+      if (this.pending.size === 0) w.unref();
       if (m.ok) p.resolve(m.res); else p.reject(new Error(m.err));
     });
-    const fail = (e: Error) => { for (const p of this.pending.values()) p.reject(e); this.pending.clear(); };
-    this.w.on('error', fail);
-    this.w.on('exit', () => { this.closed = true; fail(new Error('storage worker exited')); });
+    w.on('error', e => { if (this.w === w) { this.note(`The ${this.writer ? 'writing' : 'reading'} storage worker failed: ${e.message}`); fail(e); } });
+    w.on('exit', () => {
+      if (this.w !== w) return;
+      this.dead = true;
+      fail(new Error('storage worker exited'));
+    });
   }
 
   async call<T>(op: string, ...args: unknown[]): Promise<T> {
+    if (this.closed) throw new Error('storage worker is closed');
+    if (this.dead) {
+      if (Date.now() - this.lastSpawn < this.restartDelayMs) throw new Error('storage worker is restarting');
+      this.restarts++;
+      this.note(`Restarting the ${this.writer ? 'writing' : 'reading'} storage worker (restart ${this.restarts})`);
+      this.spawn();
+    }
     await this.ready;
     if (this.closed) throw new Error('storage worker is closed');
     const id = this.seq++;
+    const w = this.w;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.w.ref();
-      this.w.postMessage({ id, op, args });
+      w.ref();
+      w.postMessage({ id, op, args });
     });
   }
 
   async close(): Promise<void> {
     if (this.closed) return;
+    this.closed = true;
+    if (this.dead) return;
     await this.ready.catch(() => undefined);
-    this.w.ref();
-    await new Promise<void>(res => { this.w.once('exit', () => res()); this.w.postMessage({ close: true }); });
+    const w = this.w;
+    w.ref();
+    await new Promise<void>(res => { w.once('exit', () => res()); w.postMessage({ close: true }); });
   }
 }
 
@@ -64,15 +89,15 @@ export class SqliteStore implements TsStore {
   private ingested = 0;
   private dropped = 0;
 
-  private constructor(dir: string) {
-    this.writer = new Rpc(dir, true);
+  private constructor(dir: string, private note: (m: string) => void) {
+    this.writer = new Rpc(dir, true, note);
   }
 
   /** Opens the database. The writer creates the schema first; the read-only reader is started after that. */
-  static async open(dir: string): Promise<SqliteStore> {
-    const s = new SqliteStore(dir);
+  static async open(dir: string, note: (m: string) => void = () => undefined): Promise<SqliteStore> {
+    const s = new SqliteStore(dir, note);
     await s.writer.call('stats');
-    s.reader = new Rpc(dir, false);
+    s.reader = new Rpc(dir, false, note);
     await s.reader.call('stats');
     return s;
   }

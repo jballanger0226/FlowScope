@@ -128,7 +128,7 @@ export class App {
         }
       }
     }
-    return SqliteStore.open(path.join(this.cfg.dataDir, 'ts'));
+    return SqliteStore.open(path.join(this.cfg.dataDir, 'ts'), m => this.log.error('store', m));
   }
 
   /* ---- collection switches ---- */

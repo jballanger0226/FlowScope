@@ -131,3 +131,36 @@ test('the store refuses flow times that would create unreadable tables', async (
     assert.equal(res.rows.length, 1);
   } finally { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a storage worker that dies is restarted by the next call, and the data is still there', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-respawn-'));
+  const notes: string[] = [];
+  const s = await SqliteStore.open(dir, m => notes.push(m));
+  const kill = async (which: 'writer' | 'reader') => {
+    const w = (s as unknown as Record<string, { w: { terminate(): Promise<number> } }>)[which].w;
+    await w.terminate();
+  };
+  try {
+    await s.insertFlows([rec()]);
+    await kill('writer'); await kill('reader');
+    // right after a crash the call is refused rather than restarting in a tight loop
+    await assert.rejects(() => s.insertFlows([rec({ exporter: '10.255.0.9' })]), /storage worker (exited|is restarting)/);
+    await new Promise(r => setTimeout(r, 1100));
+    await s.insertFlows([rec({ exporter: '10.255.0.2' })]);
+    const r = await s.searchStreams(q());
+    assert.equal(r.total, 1);
+    assert.ok(notes.some(n => /Restarting the writing/.test(n)) && notes.some(n => /Restarting the reading/.test(n)), notes.join(' | '));
+    assert.equal((await s.stats()).ingested, 2);
+  } finally { await s.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('closing a store does not restart its workers', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-close-'));
+  const notes: string[] = [];
+  const s = await SqliteStore.open(dir, m => notes.push(m));
+  await s.close();
+  await assert.rejects(() => s.stats(), /closed/);
+  await assert.rejects(() => s.insertFlows([rec()]), /closed/);
+  assert.deepEqual(notes, []);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
