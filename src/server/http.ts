@@ -49,6 +49,9 @@ const MIME: Record<string, string> = {
   '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.txt': 'text/plain; charset=utf-8', '.map': 'application/json'
 };
 
+const PENDING = Symbol('response being written');
+type Pending = http.ServerResponse & { [PENDING]?: boolean };
+
 const plainIp = (a: string): string => a.startsWith('::ffff:') ? a.slice(7) : a;
 
 /**
@@ -71,6 +74,7 @@ export class WebServer {
   private tlsServers: https.Server[] = [];
   /** How many reverse proxies stand in front (0 = none, the socket address is used). */
   trustProxy = 0;
+  private statics = new Map<string, { etag: string; body: Buffer; gz?: Buffer }>();
   private webRoot: string;
 
   constructor(private auth: AuthHooks, webRoot: string, private hsts = true) { this.webRoot = path.resolve(webRoot); }
@@ -170,8 +174,9 @@ export class WebServer {
         if (!tok || tok.length !== want.length || !crypto.timingSafeEqual(Buffer.from(tok), Buffer.from(want))) throw new HttpError(403, 'Missing or wrong CSRF token. Reload the page.');
       }
       await matched.handler(ctx);
-      if (!res.headersSent && !res.writableEnded) throw new HttpError(500, 'The handler did not respond');
+      if (!res.headersSent && !res.writableEnded && !(res as Pending)[PENDING]) throw new HttpError(500, 'The handler did not respond');
     } catch (e) {
+      if ((res as Pending)[PENDING]) return;   // a response is already on its way
       if (res.headersSent) { res.end(); return; }
       const he = e instanceof HttpError ? e : e instanceof AuthError ? new HttpError(e.status, e.message) : null;
       if (!he) console.error('Unhandled error on', method, url.pathname, e);
@@ -180,16 +185,28 @@ export class WebServer {
     }
   }
 
-  private send(req: http.IncomingMessage, res: http.ServerResponse, status: number, body: string | Buffer, type: string, cookies: string[], noStore: boolean): void {
+  /**
+   * Writes a response. Bodies worth compressing go through the asynchronous gzip, so a large result does not stop the process
+   * (the UDP receive loop shares it). `cache` holds the compressed form of a body that is served again, such as a static file.
+   */
+  private send(req: http.IncomingMessage, res: http.ServerResponse, status: number, body: string | Buffer, type: string, cookies: string[], noStore: boolean, cache?: { gz?: Buffer }): void {
     if (cookies.length) res.setHeader('Set-Cookie', cookies);
     if (noStore) res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Content-Type', type);
     const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+    const head = req.method === 'HEAD';
+    const plain = () => { res.writeHead(status, { 'Content-Length': buf.length }); res.end(head ? undefined : buf); };
+    const gz = (z: Buffer) => { res.setHeader('Content-Encoding', 'gzip'); res.setHeader('Vary', 'Accept-Encoding'); res.writeHead(status, { 'Content-Length': z.length }); res.end(head ? undefined : z); };
     const ae = String(req.headers['accept-encoding'] || '');
-    if (buf.length > 1024 && /\bgzip\b/.test(ae) && /json|text|javascript|svg|csv/.test(type)) {
-      res.setHeader('Content-Encoding', 'gzip'); res.setHeader('Vary', 'Accept-Encoding');
-      const z = zlib.gzipSync(buf); res.writeHead(status, { 'Content-Length': z.length }); res.end(req.method === 'HEAD' ? undefined : z);
-    } else { res.writeHead(status, { 'Content-Length': buf.length }); res.end(req.method === 'HEAD' ? undefined : buf); }
+    if (!(buf.length > 1024 && /\bgzip\b/.test(ae) && /json|text|javascript|svg|csv/.test(type))) return plain();
+    if (cache?.gz) return gz(cache.gz);
+    (res as Pending)[PENDING] = true;
+    zlib.gzip(buf, (err, z) => {
+      if (res.writableEnded || res.destroyed) return;
+      if (err) return plain();
+      if (cache) cache.gz = z;
+      gz(z);
+    });
   }
 
   private async serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string, method: string, cookies: string[]): Promise<void> {
@@ -211,7 +228,14 @@ export class WebServer {
     res.setHeader('ETag', etag);
     res.setHeader('Cache-Control', file.endsWith('index.html') ? 'no-cache' : 'public, max-age=3600');
     if (req.headers['if-none-match'] === etag) { res.writeHead(304); res.end(); return; }
-    this.send(req, res, 200, fs.readFileSync(file), MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', cookies, false);
+    // Files are read and compressed once per version of the file (size and modification time), not once per request.
+    let hit = this.statics.get(file);
+    if (!hit || hit.etag !== etag) {
+      hit = { etag, body: fs.readFileSync(file) };
+      this.statics.delete(file); this.statics.set(file, hit);
+      while (this.statics.size > 256) this.statics.delete(this.statics.keys().next().value as string);
+    }
+    this.send(req, res, 200, hit.body, MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', cookies, false, hit);
   }
 
   /** Starts listeners. Returns the bound ports. */

@@ -11,7 +11,7 @@
     "build": "node tools/build.mjs",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "start": "node dist/src/cli.js start",
-    "test": "node tools/build.mjs && node --test --test-concurrency=1 \"dist/test/*.test.js\"",
+    "test": "node tools/build.mjs && node --env-file=test/test.env --test --test-concurrency=1 \"dist/test/*.test.js\"",
     "demo": "node tools/build.mjs && node dist/src/cli.js start --demo"
   },
   "dependencies": {

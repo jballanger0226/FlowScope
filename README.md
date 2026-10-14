@@ -118,7 +118,9 @@ All settings are environment variables.
 | `FLOWSCOPE_BACKEND` | | `sqlite` or `clickhouse`: which store a **new** install starts with. Empty: ClickHouse when `FLOWSCOPE_CLICKHOUSE_URL` is set, otherwise SQLite. |
 | `FLOWSCOPE_CLICKHOUSE_WAIT` | `60` | Seconds to wait at start-up for ClickHouse to answer before falling back to SQLite for that run (ClickHouse is often still starting after a reboot or `docker compose up`) |
 | `FLOWSCOPE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `FLOWSCOPE_DEMO` | off | Same as `--demo` |
+| `FLOWSCOPE_DEMO` | off | Same as `--demo`. The demo listens on 127.0.0.1 unless `FLOWSCOPE_BIND` is set (or it runs in a container), and keeps its data in a temporary folder that is removed when it stops |
+| `FLOWSCOPE_KEEP_DATA_PERMS` | off | `1` stops FlowScope from removing group and other access from the data folder and `config.db` at start-up (Unix) |
+| `FLOWSCOPE_SCRYPT_LOG2N` | `17` | Cost of new password hashes, as a power of two (4 to 18). The default takes about half a second and 128 MiB per hash, two at a time; lower it on very small machines |
 
 Other commands: `flowscope reset-password <user>`, `flowscope healthcheck`, `flowscope version`.
 

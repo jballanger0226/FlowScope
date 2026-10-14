@@ -86,7 +86,7 @@ test('API tokens: cannot exceed creator role, expire, revoke, die with the user'
     assert.ok(!JSON.stringify(e.cdb.db.prepare('SELECT * FROM api_tokens').all()).includes(t.token));
     e.cdb.db.prepare('UPDATE api_tokens SET expires_at = ?').run(Date.now() - 1000);
     assert.equal(e.auth.fromToken(t.token), null);
-    const t2 = e.auth.createToken(snmp, { name: 'mine', days: 0 });
+    const t2 = e.auth.createToken(snmp, { name: 'mine', days: 30 });
     assert.equal(e.auth.listTokens(snmp).length, 1);
     assert.equal(e.auth.listTokens(admin).length, 2);
     assert.throws(() => e.auth.revokeToken(snmp, e.auth.listTokens(admin)[0].id), /own tokens/);
@@ -225,4 +225,100 @@ test('the sign-in limiter forgets the oldest key when full, not everybody', asyn
   assert.equal(l.size, before);
   // clear releases one key
   l.clear('victim'); assert.equal(l.blocked('victim'), false);
+});
+
+// --- password hashing (audit A1) ---
+test('password hashes: old ones keep working and are upgraded at the next sign-in', async () => {
+  const sec = await import('../src/secrets.js');
+  const crypto = await import('node:crypto');
+  const e = env();
+  const prev = process.env.FLOWSCOPE_SCRYPT_LOG2N;
+  try {
+    e.auth.bootstrap('initial-admin-password');
+    // a hash as written by earlier versions: N=16384 (2^14)
+    const salt = crypto.randomBytes(16);
+    const legacy = `scrypt$16384$8$1$${salt.toString('base64')}$${crypto.scryptSync('initial-admin-password', salt, 32, { N: 16384, r: 8, p: 1 }).toString('base64')}`;
+    e.cdb.db.prepare("UPDATE users SET pw_hash = ? WHERE username = 'admin'").run(legacy);
+    assert.equal(sec.verifyPassword('initial-admin-password', legacy), true);
+    assert.equal(await sec.verifyPasswordAsync('initial-admin-password', legacy), true);
+    assert.equal(await sec.verifyPasswordAsync('nope', legacy), false);
+    assert.equal(sec.needsRehash(legacy), false, 'at the test cost (2^10) a 2^14 hash is already strong enough');
+    process.env.FLOWSCOPE_SCRYPT_LOG2N = '15';
+    assert.equal(sec.needsRehash(legacy), true);
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'wrong-password-here', '5.5.5.1'));
+    assert.equal((e.cdb.db.prepare("SELECT pw_hash FROM users WHERE username = 'admin'").get() as { pw_hash: string }).pw_hash, legacy, 'a failed sign-in changes nothing');
+    await e.auth.authenticate('web', 'admin', 'initial-admin-password', '5.5.5.2');
+    const now = (e.cdb.db.prepare("SELECT pw_hash FROM users WHERE username = 'admin'").get() as { pw_hash: string }).pw_hash;
+    assert.match(now, /^scrypt\$32768\$8\$1\$/);
+    assert.equal(sec.needsRehash(now), false);
+    await e.auth.authenticate('web', 'admin', 'initial-admin-password', '5.5.5.3');   // and the new hash verifies
+    // malformed stored values never verify
+    assert.equal(await sec.verifyPasswordAsync('x', 'scrypt$1$8$1$AA==$AA=='), false);
+    assert.equal(await sec.verifyPasswordAsync('x', 'scrypt$999999999$8$1$AA==$AA=='), false);
+    assert.equal(await sec.verifyPasswordAsync('x', 'plain'), false);
+  } finally { if (prev === undefined) delete process.env.FLOWSCOPE_SCRYPT_LOG2N; else process.env.FLOWSCOPE_SCRYPT_LOG2N = prev; e.done(); }
+});
+
+test('parallel wrong guesses against one account still lock it', async () => {
+  const e = env();
+  try {
+    e.auth.bootstrap('initial-admin-password');
+    const a = e.settings.get('aaa'); a.local.lockout = 5; e.settings.set('aaa', a);
+    const results = await Promise.allSettled(Array.from({ length: 30 }, (_, i) => e.auth.authenticate('web', 'admin', 'guess-' + i, '6.6.6.' + i)));
+    const locked = results.filter(r => r.status === 'rejected' && /locked/.test((r.reason as Error).message)).length;
+    assert.ok(locked >= 24, 'only the first five guesses are checked; got ' + locked + ' locked');
+    // the right password is refused while locked
+    await assert.rejects(() => e.auth.authenticate('web', 'admin', 'initial-admin-password', '6.6.7.1'), /locked/);
+  } finally { e.done(); }
+});
+
+test('a flood of password checks gets "busy" instead of unbounded work', async () => {
+  const sec = await import('../src/secrets.js');
+  const h = sec.hashPassword('right');
+  const r = await Promise.allSettled(Array.from({ length: 120 }, () => sec.verifyPasswordAsync('right', h)));
+  const busy = r.filter(x => x.status === 'rejected' && x.reason instanceof sec.PasswordBusy).length;
+  assert.equal(r.filter(x => x.status === 'fulfilled').length, 66);   // 2 running + 64 queued
+  assert.equal(busy, 54);
+  // and it recovers
+  assert.equal(await sec.verifyPasswordAsync('right', h), true);
+});
+
+test('API token policy: lifetime limits, no expiry for admins only, revoked on reset, used-time written at most once a minute', async () => {
+  const e = env();
+  try {
+    e.auth.bootstrap('initial-admin-password');
+    const admin = (await e.auth.authenticate('api', 'admin', 'initial-admin-password', '7.7.7.1')).principal;
+    e.auth.createUser('admin', { username: 'snmpadm', password: 'long-secret-passphrase-3', role: 'snmp', mustChange: false });
+    const snmp = (await e.auth.authenticate('api', 'snmpadm', 'long-secret-passphrase-3', '7.7.7.2')).principal;
+    assert.throws(() => e.auth.createToken(snmp, { name: 'forever', days: 0 }), /Only administrators/);
+    assert.throws(() => e.auth.createToken(snmp, { name: 'long', days: 366 }), /up to 365 days/);
+    e.auth.createToken(snmp, { name: 'ok', days: 365 });
+    e.auth.createToken(admin, { name: 'forever', days: 0 });
+    e.auth.createToken(admin, { name: 'long', days: 1000 });
+    assert.throws(() => e.auth.createToken(admin, { name: 'x', days: 4000 }), /1 to 3650/);
+
+    // a reset ends the tokens of that user only
+    const uid = e.auth.listUsers().find(u => u.username === 'snmpadm')!.id;
+    const tk = e.auth.createToken(snmp, { name: 'script', days: 30 }).token;
+    const adminTk = e.auth.createToken(admin, { name: 'ops', days: 30 }).token;
+    assert.ok(e.auth.fromToken(tk));
+    e.auth.updateUser('admin', uid, { password: 'another-long-passphrase-9' });
+    assert.equal(e.auth.fromToken(tk), null);
+    assert.equal(e.auth.listTokens(admin).filter(t => t.username === 'snmpadm').length, 0);
+    assert.ok(e.auth.fromToken(adminTk), 'other users keep theirs');
+    // changing your own password is not a reset: scripts keep working
+    e.auth.changePassword('admin', 'initial-admin-password', 'a-brand-new-passphrase-1');
+    assert.ok(e.auth.fromToken(adminTk));
+
+    // last_used is not written on every request
+    const id = e.auth.listTokens(admin).find(t => t.name === 'ops')!.id;
+    const used = () => (e.cdb.db.prepare('SELECT last_used FROM api_tokens WHERE id = ?').get(id) as { last_used: number | null }).last_used!;
+    const first = used();
+    e.cdb.db.prepare('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(first - 1000, id);
+    e.auth.fromToken(adminTk);
+    assert.equal(used(), first - 1000, 'a use within a minute of the last is not written');
+    e.cdb.db.prepare('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(first - 61_000, id);
+    e.auth.fromToken(adminTk);
+    assert.ok(used() >= first, 'an older record is refreshed');
+  } finally { e.done(); }
 });

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { ConfigDb } from '../db/configdb.js';
 import type { Settings, Role, Service, Provider, AaaSettings } from '../settings.js';
 import type { Secrets } from '../secrets.js';
-import { hashPassword, verifyPassword, randomToken, sha256 } from '../secrets.js';
+import { hashPassword, hashPasswordAsync, verifyPassword, verifyPasswordAsync, needsRehash, PasswordBusy, randomToken, sha256 } from '../secrets.js';
 import type { AppLog } from '../logger.js';
 import * as radius from './radius.js';
 import { adLogin, groupMatches, ldapLogin } from './ldap.js';
@@ -49,7 +49,10 @@ export function validUsername(u: string): boolean { return /^[A-Za-z0-9][A-Za-z0
 
 export class AuthService {
   private limiter = new Limiter(10, 5 * 60_000);
-  private dummyHash = hashPassword(crypto.randomBytes(8).toString('hex'));
+  private chain = new Map<string, Promise<void>>();
+  private dummy: Promise<string> | null = null;
+  /** Checked against when the user does not exist or is disabled, so those take as long as a real check. */
+  private dummyHash(): Promise<string> { return this.dummy ??= hashPasswordAsync(crypto.randomBytes(8).toString('hex')); }
   private lastTouch = new Map<string, number>();
 
   constructor(private cdb: ConfigDb, private settings: Settings, private secrets: Secrets, private log: AppLog) { this.keepRadiusBehaviour(); }
@@ -132,6 +135,7 @@ export class AuthService {
       this.policyCheck(u.username, patch.password);
       this.cdb.db.prepare('UPDATE users SET pw_hash = ?, must_change = 1, failed = 0, locked_until = 0 WHERE id = ?').run(hashPassword(patch.password), id);
       this.revokeSessions(u.username);
+      this.revokeTokensOf(u.username);   // a reset is what you do when a credential may have leaked, and a token is one
       this.log.audit(actor, `Reset the password of ${u.username}`);
     }
     if (patch.unlock) { this.cdb.db.prepare('UPDATE users SET failed = 0, locked_until = 0 WHERE id = ?').run(id); this.log.audit(actor, `Unlocked ${u.username}`); }
@@ -144,7 +148,7 @@ export class AuthService {
     if (u.source === 'local' && u.role === 'admin' && this.enabledLocalAdmins(id) === 0) throw new AuthError('This is the last enabled local administrator', 409);
     this.cdb.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     this.revokeSessions(u.username);
-    this.cdb.db.prepare('DELETE FROM api_tokens WHERE username = ?').run(u.username);
+    this.revokeTokensOf(u.username);
     this.log.audit(actor, `Deleted user ${u.username}`);
   }
 
@@ -214,19 +218,41 @@ export class AuthService {
     return { ok: false, reason: 'This service does not use passwords' };
   }
 
-  private localLogin(username: string, password: string): { ok: boolean; role?: Role; reason?: string; mustChange?: boolean; name?: string } {
+  /** Runs checks for one account one after another, so parallel guesses cannot all pass the lockout test before the first one is counted. */
+  private serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.chain.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    const tail = run.then(() => undefined, () => undefined);
+    this.chain.set(key, tail);
+    void tail.then(() => { if (this.chain.get(key) === tail) this.chain.delete(key); });
+    return run;
+  }
+
+  private localLogin(username: string, password: string): Promise<{ ok: boolean; role?: Role; reason?: string; mustChange?: boolean; name?: string }> {
+    return this.serial(username.toLowerCase(), async () => {
+      try { return await this.localLoginNow(username, password); }
+      catch (e) { if (e instanceof PasswordBusy) throw new AuthError(e.message, 503); throw e; }
+    });
+  }
+
+  private async localLoginNow(username: string, password: string): Promise<{ ok: boolean; role?: Role; reason?: string; mustChange?: boolean; name?: string }> {
     const u = this.cdb.db.prepare("SELECT * FROM users WHERE username = ? AND source = 'local'").get(username) as unknown as { id: number; username: string; pw_hash: string; role: Role; failed: number; locked_until: number; disabled: number; must_change: number } | undefined;
-    if (!u) { verifyPassword(password, this.dummyHash); return { ok: false, reason: 'Wrong user name or password' }; }
+    if (!u) { await verifyPasswordAsync(password, await this.dummyHash()); return { ok: false, reason: 'Wrong user name or password' }; }
     const now = Date.now();
-    if (u.disabled) { verifyPassword(password, this.dummyHash); return { ok: false, reason: 'This account is disabled' }; }
+    if (u.disabled) { await verifyPasswordAsync(password, await this.dummyHash()); return { ok: false, reason: 'This account is disabled' }; }
     if (u.locked_until > now) return { ok: false, reason: `This account is locked for ${Math.ceil((u.locked_until - now) / 60000)} more minutes after too many wrong passwords` };
-    if (!verifyPassword(password, u.pw_hash)) {
+    if (!(await verifyPasswordAsync(password, u.pw_hash))) {
       const failed = u.failed + 1; const max = this.aaa().local.lockout;
-      if (max > 0 && failed >= max) { this.cdb.db.prepare('UPDATE users SET failed = 0, locked_until = ? WHERE id = ?').run(now + LOCK_MS, u.id); this.log.warn('auth', `Locked ${username} for 15 minutes after ${failed} wrong passwords`); }
+      if (max > 0 && failed >= max) { this.cdb.db.prepare('UPDATE users SET failed = 0, locked_until = ? WHERE id = ?').run(Date.now() + LOCK_MS, u.id); this.log.warn('auth', `Locked ${username} for 15 minutes after ${failed} wrong passwords`); }
       else this.cdb.db.prepare('UPDATE users SET failed = ? WHERE id = ?').run(failed, u.id);
       return { ok: false, reason: 'Wrong user name or password' };
     }
     this.cdb.db.prepare('UPDATE users SET failed = 0, locked_until = 0 WHERE id = ?').run(u.id);
+    if (needsRehash(u.pw_hash)) {
+      // the password is known to be right here, so move it to the current cost; only if nobody changed it while we were hashing
+      try { const h = await hashPasswordAsync(password); this.cdb.db.prepare('UPDATE users SET pw_hash = ? WHERE id = ? AND pw_hash = ?').run(h, u.id, u.pw_hash); }
+      catch { /* try again at the next sign-in */ }
+    }
     return { ok: true, role: u.role, mustChange: u.must_change === 1, name: u.username };
   }
 
@@ -239,12 +265,12 @@ export class AuthService {
     const a = this.aaa();
     const provider = a.services[service];
     let outcome: { ok: boolean; role?: Role; reason?: string; mustChange?: boolean; unreachable?: boolean; name?: string } & { source?: string };
-    if (provider === 'local') outcome = { ...this.localLogin(username, password), source: 'local' };
+    if (provider === 'local') outcome = { ...(await this.localLogin(username, password)), source: 'local' };
     else if (provider === 'saml') {
       // SAML signs in through the browser. The web form is the break-glass path for local administrators, so a SAML outage cannot lock everyone out.
       if (!a.fallback) outcome = { ok: false, reason: 'This service signs in through SAML in the browser' };
       else {
-        const local = this.localLogin(username, password);
+        const local = await this.localLogin(username, password);
         if (local.ok && local.role === 'admin') { outcome = { ...local, source: 'local' }; this.log.warn('auth', `${username} signed in with the local break-glass account while the web service uses SAML`, username); }
         else if (local.ok) outcome = { ok: false, reason: 'With SAML, the local sign-in is limited to local administrators' };
         else outcome = { ...local, source: 'local' };
@@ -256,7 +282,7 @@ export class AuthService {
       if (r.ok) { try { this.upsertRemote(username, r.role!, provider); outcome.name = (this.cdb.db.prepare('SELECT username FROM users WHERE username = ?').get(username) as { username: string }).username; } catch (e) { outcome = { ok: false, reason: (e as Error).message }; } }
       else if (r.unreachable && a.fallback) {
         // Break-glass: when the directory cannot be reached, local administrators may still sign in so the server is not locked out.
-        const local = this.localLogin(username, password);
+        const local = await this.localLogin(username, password);
         if (local.ok && local.role === 'admin') { outcome = { ...local, source: 'local' }; this.log.warn('auth', `${username} signed in with the local break-glass account because ${provider} is unreachable (${r.reason})`, username); }
         else outcome = { ok: false, reason: `${provider.toUpperCase()} is unreachable and the local fallback is limited to local administrators` };
       }
@@ -313,13 +339,23 @@ export class AuthService {
 
   /* ---------------------------------------------------------------- API tokens */
 
+  /** Longest lifetime for an API token made by anyone but an administrator, in days. Only administrators may make one that never expires. */
+  static readonly TOKEN_MAX_DAYS = 365;
+
+  revokeTokensOf(username: string): number {
+    return Number(this.cdb.db.prepare('DELETE FROM api_tokens WHERE username = ? COLLATE NOCASE').run(username).changes);
+  }
+
   createToken(p: Principal, o: { name: string; role?: Role; days?: number }): { token: string; id: number } {
     const name = (o.name || '').trim();
     if (!name || name.length > 64) throw new AuthError('Give the token a name of up to 64 characters', 400);
     const role = o.role ?? p.role;
     if (!ROLE_RANK[role] || ROLE_RANK[role] > ROLE_RANK[p.role]) throw new AuthError('A token cannot have more access than you do', 403);
     const days = o.days === undefined ? 90 : o.days;
-    if (!Number.isInteger(days) || days < 0 || days > 3650) throw new AuthError('Lifetime must be 0 (no expiry) to 3650 days', 400);
+    const admin = p.role === 'admin';
+    if (!Number.isInteger(days) || days < 0 || days > 3650) throw new AuthError('Lifetime must be 1 to 3650 days (0 for no expiry, administrators only)', 400);
+    if (days === 0 && !admin) throw new AuthError('Only administrators can create a token that never expires', 403);
+    if (!admin && days > AuthService.TOKEN_MAX_DAYS) throw new AuthError(`A token can last up to ${AuthService.TOKEN_MAX_DAYS} days. Administrators can create longer ones.`, 403);
     const token = 'fs_' + randomToken(32);
     const r = this.cdb.db.prepare('INSERT INTO api_tokens(username, role, name, token_hash, created_at, expires_at) VALUES (?,?,?,?,?,?)').run(p.username, role, name, sha256(token), Date.now(), days ? Date.now() + days * 86400_000 : null);
     this.log.audit(p.username, `Created API token "${name}" (${ROLE_LABEL[role]}, ${days ? days + ' days' : 'no expiry'})`);
@@ -341,12 +377,14 @@ export class AuthService {
 
   fromToken(token: string): Principal | null {
     if (!token.startsWith('fs_') || token.length > 200) return null;
-    const t = this.cdb.db.prepare('SELECT * FROM api_tokens WHERE token_hash = ?').get(sha256(token)) as unknown as { id: number; username: string; role: Role; expires_at: number | null } | undefined;
+    const t = this.cdb.db.prepare('SELECT * FROM api_tokens WHERE token_hash = ?').get(sha256(token)) as unknown as { id: number; username: string; role: Role; expires_at: number | null; last_used: number | null } | undefined;
     if (!t || (t.expires_at !== null && t.expires_at < Date.now())) return null;
     const u = this.cdb.db.prepare('SELECT role, disabled FROM users WHERE username = ?').get(t.username) as unknown as { role: Role; disabled: number } | undefined;
     if (!u || u.disabled) return null;
     const role = ROLE_RANK[t.role] <= ROLE_RANK[u.role] ? t.role : u.role;
-    this.cdb.db.prepare('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(Date.now(), t.id);
+    // recording every use would write to the database on every request; once a minute is enough to see that a token is in use
+    const now = Date.now();
+    if (t.last_used === null || now - t.last_used >= 60_000) this.cdb.db.prepare('UPDATE api_tokens SET last_used = ? WHERE id = ?').run(now, t.id);
     return { username: t.username, role, source: 'token', service: 'api', tokenId: t.id };
   }
 

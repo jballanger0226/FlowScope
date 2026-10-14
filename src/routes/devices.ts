@@ -2,6 +2,7 @@ import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { DeviceError } from '../snmp/devices.js';
 import { CredError, type CredInput } from '../snmp/creds.js';
+import { TargetPolicy } from '../snmp/allowed.js';
 import { int, str } from './util.js';
 
 /** Turns the service-level errors into HTTP errors with the right status. */
@@ -29,13 +30,25 @@ export function registerDevices(app: App): void {
   const who = (c: { user(): { username: string } }) => c.user().username;
 
   /* ---- devices ---- */
+  /** SNMP-role users may be limited to certain networks; administrators never are. */
+  const policy = () => new TargetPolicy(app.settings.get('snmpAccess').allowedNets);
+  const mayReach = (c: { user(): { role: string } }) => { const p = policy(); return c.user().role === 'admin' || p.open ? undefined : (ip: string) => p.allows(ip); };
+  const checkTarget = (c: { user(): { role: string } }, ip: string) => {
+    const ok = mayReach(c);
+    if (ok && !ok(ip)) throw new HttpError(403, `${ip} is outside the networks you may use. An administrator sets them under Admin, SNMP credentials.`);
+  };
+
   w.get('/api/devices', 'snmp', c => c.json({ devices: app.devices.list(), polling: app.collect().snmp }));
 
   w.post('/api/devices/test', 'snmp', async c => {
     const b = await c.body<{ ip?: string; port?: number; credId?: number }>(2000);
     const credId = b.credId ?? app.creds.defaultId();
     if (credId === null || credId === undefined) throw new HttpError(400, 'Create a credential set first');
-    const p = await guard(() => app.devices.test(str(b.ip, 64).trim(), int(b.port, 161, 1, 65535), credId));
+    const ip = str(b.ip, 64).trim(), port = int(b.port, 161, 1, 65535);
+    checkTarget(c, ip);
+    // a test sends the stored credential to the address, so it is recorded whether or not the device answers
+    app.log.audit(who(c), `Tested SNMP credential set "${app.creds.list().find(x => x.id === credId)?.name ?? credId}" against ${ip}:${port}`);
+    const p = await guard(() => app.devices.test(ip, port, credId));
     c.json({
       ok: true, sysName: p.info.sysName, sysDescr: p.info.sysDescr, uptimeSec: p.info.uptimeSec, interfaces: p.ifaces.length,
       policies: p.qos.length, classes: p.qos.reduce((a, q) => a + q.classes.length, 0), profile: p.profile
@@ -44,6 +57,7 @@ export function registerDevices(app: App): void {
 
   w.post('/api/devices', 'snmp', async c => {
     const b = await c.body<{ ip?: string; name?: string; port?: number; credId?: number; intervalSec?: number }>(5000);
+    checkTarget(c, str(b.ip, 64).trim());
     const d = await guard(() => app.devices.add({
       ip: str(b.ip, 64), name: str(b.name, 64) || undefined, port: b.port === undefined ? undefined : Number(b.port),
       credId: b.credId === undefined ? undefined : Number(b.credId), intervalSec: b.intervalSec === undefined ? undefined : Number(b.intervalSec)
@@ -118,7 +132,7 @@ export function registerDevices(app: App): void {
   /* ---- discovery ---- */
   w.post('/api/discovery', 'snmp', async c => {
     const b = await c.body<{ spec?: string; credId?: number; tryOthers?: boolean }>(5000);
-    const j = await guard(() => app.discovery.start(str(b.spec, 2000), who(c), b.credId === undefined ? undefined : Number(b.credId), b.tryOthers === true));
+    const j = await guard(() => app.discovery.start(str(b.spec, 2000), who(c), b.credId === undefined ? undefined : Number(b.credId), b.tryOthers === true, mayReach(c)));
     c.json({ job: j }, 202);
   });
   w.get('/api/discovery/:id', 'snmp', c => {
@@ -135,6 +149,18 @@ export function registerDevices(app: App): void {
 
   /* ---- credential sets: readable by the SNMP admin, changed only by the full admin ---- */
   w.get('/api/snmp/credentials', 'snmp', c => c.json({ credentials: app.creds.list(), canEdit: c.user().role === 'admin' }));
+
+  // Which networks SNMP-role users may send credentials to. Everyone with the role can read it; only a full admin changes it.
+  w.get('/api/snmp/access', 'snmp', c => c.json({ allowedNets: app.settings.get('snmpAccess').allowedNets, canEdit: c.user().role === 'admin' }));
+  w.put('/api/snmp/access', 'admin', async c => {
+    const b = await c.body<{ allowedNets?: string }>(5000);
+    const text = str(b.allowedNets, 2000).trim();
+    let p: TargetPolicy;
+    try { p = new TargetPolicy(text); } catch (e) { throw new HttpError(400, (e as Error).message); }
+    app.settings.set('snmpAccess', { allowedNets: p.entries.join(', ') });
+    app.log.audit(who(c), p.open ? 'SNMP users may send credentials to any address' : `SNMP users may send credentials only to ${p.entries.join(', ')}`);
+    c.json({ allowedNets: p.entries.join(', '), canEdit: true });
+  });
 
   w.post('/api/snmp/credentials', 'admin', async c => {
     const b = await c.body<Record<string, unknown>>(10_000);
