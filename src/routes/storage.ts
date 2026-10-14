@@ -21,8 +21,8 @@ export function registerStorage(app: App): void {
     c.json({
       retention: app.settings.get('retention'), defaults: DEFAULTS.retention,
       backend, activeBackend: app.store.kind, backends: [
-        { id: 'sqlite', name: 'Embedded SQLite', note: 'No setup. Suits sites up to a few thousand flows per second.', available: true },
-        { id: 'clickhouse', name: 'ClickHouse', note: 'For larger sites. Needs a ClickHouse server (set FLOWSCOPE_CLICKHOUSE_URL).', available: !!app.cfg.clickhouseUrl }
+        { id: 'sqlite', name: 'Embedded SQLite', note: 'Nothing to run. Suits small sites, up to a few thousand flows per second.', available: true },
+        { id: 'clickhouse', name: 'ClickHouse', note: 'The default for Docker, Linux and Proxmox installs. Needs a ClickHouse server (set FLOWSCOPE_CLICKHOUSE_URL).', available: !!app.cfg.clickhouseUrl }
       ],
       collecting: app.collecting(), collect: app.collect(),
       canEdit: c.user().role === 'admin',

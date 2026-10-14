@@ -17,8 +17,9 @@
 #   DNS           name server                           (default: the host's setting)
 #   STORAGE       storage for the root disk             (default: local-lvm if it exists, else local)
 #   TEMPLATE_STORAGE   storage that holds templates     (default: local)
-#   DISK_GB       root disk size in GB                  (default: 16; flow records need room, see the README)
-#   CORES, MEMORY (MB), SWAP (MB)                       (default: 2, 2048, 512)
+#   DISK_GB       root disk size in GB                  (default: 32; flow records and ClickHouse need room, see the README)
+#   CORES, MEMORY (MB), SWAP (MB)                       (default: 2, 4096, 512; ClickHouse is the default storage and wants the memory)
+#   STORAGE_BACKEND  clickhouse or sqlite               (default: clickhouse, installed inside the container; sqlite for a very small site, 2048 MB is then enough)
 #   ADMIN_PASSWORD  password for "admin"                (default: generated and printed at the end)
 #   TEMPLATE      a template file name such as debian-12-standard_12.12-1_amd64.tar.zst   (default: the newest Debian 12 one)
 #   START_ON_BOOT 1 or 0                                (default: 1)
@@ -52,6 +53,7 @@ push_and_install() {
   say "Installing inside container $id (downloads Node.js and the npm packages; takes a few minutes)"
   local env=(FLOWSCOPE_SRC=/root/flowscope-src.tgz)
   [ -n "$pw" ] && env+=("FLOWSCOPE_ADMIN_PASSWORD=$pw")
+  [ -n "${STORAGE_BACKEND:-}" ] && env+=("FLOWSCOPE_STORAGE=$STORAGE_BACKEND")
   local args=(); [ "$mode" = update ] && args=(--update)
   pct exec "$id" -- env "${env[@]}" bash /root/flowscope-install.sh "${args[@]}"
   pct exec "$id" -- rm -f /root/flowscope-src.tgz
@@ -71,7 +73,7 @@ fi
 # ---------------------------------------------------------------- create
 CTID="${CTID:-$(pvesh get /cluster/nextid)}"
 HOSTNAME_CT="${CT_HOSTNAME:-flowscope}"
-IP="${IP:-dhcp}"; BRIDGE="${BRIDGE:-vmbr0}"; DISK_GB="${DISK_GB:-16}"; CORES="${CORES:-2}"; MEMORY="${MEMORY:-2048}"; SWAP="${SWAP:-512}"
+IP="${IP:-dhcp}"; BRIDGE="${BRIDGE:-vmbr0}"; DISK_GB="${DISK_GB:-32}"; CORES="${CORES:-2}"; MEMORY="${MEMORY:-4096}"; SWAP="${SWAP:-512}"
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"; START_ON_BOOT="${START_ON_BOOT:-1}"
 if [ -z "${STORAGE:-}" ]; then pvesm status --content rootdir 2>/dev/null | awk 'NR>1{print $1}' | grep -qx local-lvm && STORAGE=local-lvm || STORAGE=local; fi
 pct status "$CTID" >/dev/null 2>&1 && die "Container id $CTID is already in use. Choose another with CTID=..."
@@ -120,5 +122,5 @@ FlowScope is installed in container $CTID.
   Exporters:    send NetFlow v5/v9 or IPFIX to ${addr:-<container ip>} UDP 2055 or 4739
   Logs:         pct exec $CTID -- flowscope-ctl logs
   Update:       packaging/proxmox/flowscope-lxc.sh update $CTID     (from an updated checkout)
-Back the container up with vzdump or Proxmox Backup Server; all FlowScope data is on its root disk (/var/lib/flowscope).
+Back the container up with vzdump or Proxmox Backup Server; all FlowScope data is on its root disk (/var/lib/flowscope, and /var/lib/clickhouse for flow records).
 DONE

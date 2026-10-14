@@ -20,8 +20,12 @@ export interface AppConfig {
   demo: boolean;
   /** Public base URL used for SAML callbacks when the app sits behind a proxy. */
   publicUrl: string;
-  /** Number of seconds a browser session may stay idle, unless overridden in the admin console. */
+  /** `http://user:pass@host:8123/database`. The Docker compose files, the Linux installer and the Proxmox installer and template set it. */
   clickhouseUrl: string;
+  /** Forces the storage backend for a new install ("sqlite" or "clickhouse"). Empty: ClickHouse when clickhouseUrl is set, else SQLite. */
+  backend: 'sqlite' | 'clickhouse' | '';
+  /** How long start-up waits for a configured ClickHouse server to answer before falling back to SQLite for this run. */
+  clickhouseWaitSec: number;
   trustProxy: boolean;
 }
 
@@ -62,6 +66,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     demo: env.FLOWSCOPE_DEMO === '1',
     publicUrl: (env.FLOWSCOPE_PUBLIC_URL || '').replace(/\/$/, ''),
     clickhouseUrl: env.FLOWSCOPE_CLICKHOUSE_URL || '',
+    backend: env.FLOWSCOPE_BACKEND === 'sqlite' || env.FLOWSCOPE_BACKEND === 'clickhouse' ? env.FLOWSCOPE_BACKEND : '',
+    clickhouseWaitSec: Math.max(0, Math.min(600, num(env.FLOWSCOPE_CLICKHOUSE_WAIT, 60))),
     trustProxy: env.FLOWSCOPE_TRUST_PROXY === '1'
   };
 }

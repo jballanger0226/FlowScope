@@ -19,7 +19,7 @@ RUN apt-get update \
       systemd systemd-sysv dbus libpam-systemd \
       ifupdown isc-dhcp-client iproute2 iputils-ping \
       openssh-server \
-      ca-certificates curl tar gzip xz-utils \
+      ca-certificates curl tar gzip xz-utils gnupg apt-transport-https \
       locales procps nano less tzdata \
  && rm -rf /var/lib/apt/lists/*
 
@@ -30,16 +30,24 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
  && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
  && node --version && npm --version
 
+# ClickHouse, FlowScope's storage, from ClickHouse's own repository (LTS line). Installed here, not by the FlowScope installer, so this layer is cached.
+# It listens on 127.0.0.1 only (the installer writes that setting). The user FlowScope connects as is made at each container's first boot.
+RUN curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=$(dpkg --print-architecture)] https://packages.clickhouse.com/deb lts main" > /etc/apt/sources.list.d/clickhouse.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends clickhouse-server clickhouse-client \
+ && rm -rf /var/lib/apt/lists/*
+
 # FlowScope itself. FLOWSCOPE_TEMPLATE_BUILD keeps a password out of the template; the first-boot service makes one per container.
 COPY . /tmp/flowscope-src
-RUN FLOWSCOPE_TEMPLATE_BUILD=1 FLOWSCOPE_NODE=system FLOWSCOPE_SKIP_APT=1 FLOWSCOPE_SKIP_SYSTEMD=1 FLOWSCOPE_LXC=1 \
+RUN FLOWSCOPE_TEMPLATE_BUILD=1 FLOWSCOPE_STORAGE=clickhouse FLOWSCOPE_NODE=system FLOWSCOPE_SKIP_APT=1 FLOWSCOPE_SKIP_SYSTEMD=1 FLOWSCOPE_LXC=1 \
     FLOWSCOPE_SRC=/tmp/flowscope-src bash /tmp/flowscope-src/packaging/proxmox/install.sh \
  && rm -rf /tmp/flowscope-src /root/.npm
 
 # Template extras: first-boot service and its drop-in for flowscope.service.
 COPY packaging/lxc-template/rootfs/ /
 RUN chmod 755 /usr/local/sbin/flowscope-firstboot \
- && systemctl enable flowscope.service flowscope-firstboot.service ssh.service
+ && systemctl enable clickhouse-server.service flowscope.service flowscope-firstboot.service ssh.service
 
 # Turn the Docker-flavoured Debian image into a normal system: no "do not start services" policy, no Docker apt tweaks.
 # Nothing machine-specific may ship in a template: empty machine-id (systemd makes a new one at first boot), no SSH host keys.

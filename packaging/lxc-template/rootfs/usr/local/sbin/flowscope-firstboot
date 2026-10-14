@@ -2,6 +2,7 @@
 # Runs at boot, before FlowScope, in a container made from the FlowScope Proxmox template.
 #   - every boot: makes SSH host keys if there are none (the template ships without, so no two containers share keys)
 #   - first boot only: makes the "admin" password, hands it to FlowScope for its first start, and tells the person at the console where to find it
+#   - first boot only: makes the ClickHouse user FlowScope stores its data with, with a password of its own, before the ClickHouse server starts
 # Paths can be overridden with environment variables so the script can be tested outside a container.
 set -eu
 
@@ -9,6 +10,8 @@ ETC="${FLOWSCOPE_ETC:-/etc/flowscope}"
 RUNENV="${FLOWSCOPE_FIRSTBOOT_ENV:-/run/flowscope-firstboot.env}"
 CREDS="${FLOWSCOPE_CREDS_FILE:-/root/flowscope-admin-password.txt}"
 MOTD="${FLOWSCOPE_MOTD:-/etc/motd}"
+OPT="${FLOWSCOPE_OPT:-/opt/flowscope}"
+CH_HELPER="$OPT/packaging/linux/clickhouse-setup.sh"
 MARKER="$ETC/.firstboot-done"
 
 if [ -z "${FLOWSCOPE_SKIP_SSH_KEYS:-}" ] && command -v ssh-keygen >/dev/null 2>&1; then
@@ -29,6 +32,18 @@ else
   note="The admin password is in $CREDS   (cat $CREDS)"
 fi
 
+# ClickHouse (FlowScope's storage). The template ships the server but no user for FlowScope. Like the admin password, this one is made
+# here, so containers cloned from one template never share it. It goes straight into the settings file; nothing else keeps a copy.
+# The helper is plain sh and only needs these three small functions.
+say() { :; }; warn() { :; }; die() { echo "flowscope-firstboot: $*" >&2; exit 1; }
+if [ -f "$CH_HELPER" ] && [ -d "${FLOWSCOPE_CH_ETC:-/etc/clickhouse-server}" ] && ! grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env" 2>/dev/null; then
+  # shellcheck source=/dev/null
+  . "$CH_HELPER"
+  ch_pw="$(ch_gen_password)"
+  ch_write_user "$ch_pw"
+  printf '\n# Storage: the ClickHouse server in this container, set up at first boot. Remove this line and restart to use another server.\nFLOWSCOPE_CLICKHOUSE_URL=%s\n' "$(ch_url "$ch_pw")" >> "$ETC/flowscope.env"
+fi
+
 umask 022
 cat > "$MOTD" <<MSG
 
@@ -38,6 +53,7 @@ cat > "$MOTD" <<MSG
     Sign in as:   admin
     $note
     Exporters:    send NetFlow v5/v9 or IPFIX to this address, UDP 2055 or 4739
+    Storage:      ClickHouse, inside this container (flowscope-ctl doctor shows its state)
     Commands:     flowscope-ctl status | doctor | logs | update | reset-password admin
     Not loading?  run: flowscope-ctl doctor
     Settings:     $ETC/flowscope.env   (then: systemctl restart flowscope)

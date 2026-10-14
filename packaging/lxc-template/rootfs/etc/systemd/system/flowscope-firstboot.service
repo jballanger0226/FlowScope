@@ -1,8 +1,8 @@
 [Unit]
-Description=FlowScope first boot (SSH host keys, admin password)
+Description=FlowScope first boot (SSH host keys, admin password, ClickHouse user)
 ConditionPathExists=/usr/local/sbin/flowscope-firstboot
 After=local-fs.target
-Before=flowscope.service ssh.service
+Before=flowscope.service clickhouse-server.service ssh.service
 
 [Service]
 Type=oneshot

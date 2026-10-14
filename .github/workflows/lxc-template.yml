@@ -54,6 +54,11 @@ jobs:
           done
           if [ "$ok" != 1 ]; then docker exec tpl systemctl status flowscope flowscope-firstboot --no-pager || true; docker exec tpl journalctl -u flowscope -u flowscope-firstboot --no-pager -n 80 || true; exit 1; fi
           docker exec tpl test -s /root/flowscope-admin-password.txt
+          # ClickHouse is the storage: running, listening on loopback only, and FlowScope has a password of its own for it (made at first boot)
+          docker exec tpl systemctl is-active --quiet clickhouse-server
+          docker exec tpl curl -fsS http://127.0.0.1:8123/ping
+          docker exec tpl sh -c 'grep -Eq "^FLOWSCOPE_CLICKHOUSE_URL=http://flowscope:[A-Za-z0-9]{24}@127\\.0\\.0\\.1:8123/flowscope$" /etc/flowscope/flowscope.env'
+          docker exec tpl sh -c 'ss -H -ltn | grep ":8123" | grep -qv "0.0.0.0:8123"'
           docker exec tpl sh -c '! grep -Eq "^FLOWSCOPE_ADMIN_PASSWORD=" /etc/flowscope/flowscope.env'
           docker exec tpl sh -c 'ls /etc/ssh/ssh_host_*_key >/dev/null'
           curl -ksf -o /dev/null https://localhost:18443/ && echo "web console answers"

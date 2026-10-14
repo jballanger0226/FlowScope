@@ -6,7 +6,7 @@ One Node.js 22 process, one data folder. Runs on Linux, macOS, Windows and as a 
 * **Flow explorer**: search with tokens (`src:10.1.0.0/16 port:443 qos:changed dscp:46 vlan:140 exporter:...`), see every hop a stream took, and see where its DSCP marking was changed. `ttl:expired` (or the **TTL expired only** button) lists streams whose TTL ran out before the destination.
 * **Links & QoS**: SNMP interface utilisation, errors/discards and Cisco CBQoS per-class drops, with charts and the streams crossing a link.
 * **Reports**: group by L2/L3/L4 fields, filter, top-N with "other", export CSV or JSON.
-* **Storage & retention**: raw, 1-minute, 1-hour and daily tiers with per-tier retention, size estimate, and a choice of embedded SQLite (default) or ClickHouse (experimental).
+* **Storage & retention**: raw, 1-minute, 1-hour and daily tiers with per-tier retention, size estimate, and a choice of ClickHouse (the default for the Docker, Linux and Proxmox installs, which set up a server) or embedded SQLite.
 * **Devices**: add SNMP devices one at a time or by discovery, with several credential sets tried in turn.
 * **Admin**: HTTPS certificate (self-signed, upload PEM/PKCS#12, generate a CSR with ECDSA/RSA/Ed25519, roll back), start/stop collection, per-service authentication (local, RADIUS, LDAP, Active Directory, SAML for the web console), roles and users, SNMP credential sets, application logs.
 * **Appearance**: light, dark or follow the operating system (System / Light / Dark switch at the top right and on the sign-in page; the choice is remembered in the browser).
@@ -66,11 +66,13 @@ Windows Defender Firewall may also ask about Node.js the first time it runs by h
 ### Container
 
 ```sh
-docker compose up -d                          # SQLite storage, data in the flowscope-data volume
-docker compose --profile clickhouse up -d     # also starts ClickHouse (see "ClickHouse" below)
+cp .env.example .env                          # then set CLICKHOUSE_PASSWORD in it (openssl rand -hex 16)
+docker compose up -d                          # FlowScope and ClickHouse; data in the flowscope-data and clickhouse-data volumes
 ```
 
-or `docker build -t flowscope . && docker run -d -p 8443:8443 -p 2055:2055/udp -p 4739:4739/udp -v flowscope-data:/data flowscope`.
+SQLite instead, with nothing else to run: `CLICKHOUSE_PASSWORD=unused FLOWSCOPE_BACKEND=sqlite docker compose up -d --no-deps flowscope`.
+
+or `docker build -t flowscope . && docker run -d -p 8443:8443 -p 2055:2055/udp -p 4739:4739/udp -v flowscope-data:/data flowscope`. A lone container has no ClickHouse server beside it, so it uses SQLite unless you pass `-e FLOWSCOPE_CLICKHOUSE_URL=...` for a server you run yourself.
 The image has a health check (`flowscope healthcheck`), keeps everything in `/data`, and runs the server as the unprivileged `node` user (it starts as root only to make `/data` writable, then drops privileges; `--user 1000:1000` skips that).
 Behind a TLS-terminating proxy set `FLOWSCOPE_TLS=off` (serves HTTP on 8080), `FLOWSCOPE_TRUST_PROXY=1` and `FLOWSCOPE_PUBLIC_URL`.
 If every exporter shows up as the Docker bridge address, use `docker compose -f docker-compose.host.yml up -d`.
@@ -81,7 +83,7 @@ Everything can be done in the Proxmox web interface, without a shell:
 
 1. Download the template `debian-12-flowscope_<version>_amd64.tar.zst` from this repository's **Releases** page (built by GitHub Actions; or build it yourself with `packaging/lxc-template/build.sh`).
 2. Proxmox: your node → a storage → **CT Templates** → **Upload**.
-3. **Create CT**, choose that template (Debian 12, 2 cores, 2 GiB, 16 GiB disk is a good start), start it, open **Console**, log in as `root`, and read the `admin` password from `/root/flowscope-admin-password.txt`.
+3. **Create CT**, choose that template (Debian 12, 2 cores, 4 GiB, 32 GiB disk is a good start; the template includes ClickHouse, which stores the flow records), start it, open **Console**, log in as `root`, and read the `admin` password from `/root/flowscope-admin-password.txt`.
 4. Open `https://<container address>:8443/`. Nothing needs to be started by hand. If the page does not load, run `flowscope-ctl doctor` in the console and see the troubleshooting part of the guide below (the container's **Nesting** option should be ticked).
 
 A walkthrough of each wizard tab, updating, backups and troubleshooting: **[docs/deployment.md](docs/deployment.md)**. The same document covers the command-line alternative (`packaging/proxmox/flowscope-lxc.sh`, which creates the container for you) and running the Docker image directly as an OCI application container on Proxmox VE 9.1 and newer.
@@ -90,7 +92,7 @@ A walkthrough of each wizard tab, updating, backups and troubleshooting: **[docs
 
 | OS | How |
 | --- | --- |
-| Linux | `sudo packaging/linux/install.sh` (systemd unit, dedicated user, settings in `/etc/flowscope/flowscope.env`, data in `/var/lib/flowscope`) |
+| Linux | `sudo packaging/linux/install.sh` (systemd unit, dedicated user, settings in `/etc/flowscope/flowscope.env`, data in `/var/lib/flowscope`; on Debian or Ubuntu it also installs ClickHouse, listening on 127.0.0.1 only, unless you set `FLOWSCOPE_STORAGE=sqlite`) |
 | Proxmox VE | CT template via the web interface (see above), or `packaging/proxmox/flowscope-lxc.sh` on the host; `packaging/proxmox/install.sh` is the installer both use |
 | macOS | `sudo packaging/macos/install.sh` (launchd daemon, data in `/Library/Application Support/FlowScope`, log `/var/log/flowscope.log`) |
 | Windows | elevated PowerShell: `.\packaging\windows\install.ps1` (scheduled task at boot as SYSTEM, firewall rules, settings in `%ProgramData%\FlowScope\flowscope.env`) |
@@ -112,7 +114,9 @@ All settings are environment variables.
 | `FLOWSCOPE_MASTER_KEY` | key file in the data dir | Encrypts stored secrets (SNMP communities/passwords, RADIUS secret, bind passwords, private keys). Set it if you want the key outside the data folder. |
 | `FLOWSCOPE_PUBLIC_URL` | | External URL, used for SAML callbacks |
 | `FLOWSCOPE_TRUST_PROXY` | off | Trust `X-Forwarded-*` from a reverse proxy |
-| `FLOWSCOPE_CLICKHOUSE_URL` | | `http://user:pass@host:8123/database` (database defaults to `flowscope`) |
+| `FLOWSCOPE_CLICKHOUSE_URL` | set by the Docker compose files, the Linux and Proxmox installers and the Proxmox template | `http://user:pass@host:8123/database` (database defaults to `flowscope`). With no value, FlowScope uses SQLite. |
+| `FLOWSCOPE_BACKEND` | | `sqlite` or `clickhouse`: which store a **new** install starts with. Empty: ClickHouse when `FLOWSCOPE_CLICKHOUSE_URL` is set, otherwise SQLite. |
+| `FLOWSCOPE_CLICKHOUSE_WAIT` | `60` | Seconds to wait at start-up for ClickHouse to answer before falling back to SQLite for that run (ClickHouse is often still starting after a reboot or `docker compose up`) |
 | `FLOWSCOPE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `FLOWSCOPE_DEMO` | off | Same as `--demo` |
 
@@ -120,8 +124,10 @@ Other commands: `flowscope reset-password <user>`, `flowscope healthcheck`, `flo
 
 ## Storage
 
-* **SQLite (default)**: one `ts.db` file in the data folder. Raw flows live in one table per day, so retention is a cheap drop. Rolled-up tiers (1m, 1h, 1d) are built from the raw rows exactly once, even when records arrive late. Good for a few thousand flows per second.
-* **ClickHouse (experimental)**: set `FLOWSCOPE_CLICKHOUSE_URL`, then choose it under Storage (collection must be stopped; the new backend starts empty and old data is not migrated). Uses ClickHouse's HTTP interface, so no extra native dependency. The 1-minute tier is maintained by a materialized view; 1h/1d are filled when each hour/day closes. If ClickHouse cannot be reached at start-up FlowScope falls back to SQLite and says so in Storage. For an HTTPS ClickHouse with a private CA, start Node with `NODE_EXTRA_CA_CERTS=/path/ca.pem`.
+* **ClickHouse (default for Docker, Linux and Proxmox)**: a column store for higher volume and long retention. The Docker compose files start a ClickHouse container beside FlowScope. The Linux installer and the Proxmox installer and template put ClickHouse on the same machine (official package, listening on `127.0.0.1` only, a database user with its own random password that is kept only in `flowscope.env`). FlowScope talks to it over its HTTP interface, so there is no extra native dependency. The 1-minute tier is maintained by a materialized view; 1h/1d are filled when each hour/day closes. If ClickHouse cannot be reached at start-up FlowScope waits up to `FLOWSCOPE_CLICKHOUSE_WAIT` seconds, then falls back to SQLite for that run and says so in Storage. For an HTTPS ClickHouse with a private CA, start Node with `NODE_EXTRA_CA_CERTS=/path/ca.pem`.
+* **SQLite**: one `ts.db` file in the data folder, nothing to run. Raw flows live in one table per day, so retention is a cheap drop. Rolled-up tiers (1m, 1h, 1d) are built from the raw rows exactly once, even when records arrive late. Good for small sites, up to a few thousand flows per second. It is also what FlowScope uses when no ClickHouse server is configured: `npm start`, Windows, macOS, and a lone container.
+
+**Which one a start-up uses.** A choice stored in the database (the Storage page) always wins. On a first start, FlowScope uses `FLOWSCOPE_BACKEND` if set; otherwise SQLite if the data folder already holds a SQLite store; otherwise ClickHouse when `FLOWSCOPE_CLICKHOUSE_URL` is set; otherwise SQLite. So **updating an existing install never moves it to ClickHouse or hides its data**. Switching is a choice under Storage (collection must be stopped; the new backend starts empty and old data is not migrated).
 
 Tiers and defaults (days): raw 7, 1-minute 30, 1-hour 395, daily 1095, SNMP raw 30, SNMP hourly 395. The audit log is always kept.
 

@@ -58,7 +58,7 @@ export class App {
     this.certs = new CertManager(this.cdb, this.secrets, this.log);
     this.creds = new CredentialStore(this.cdb, this.secrets, this.settings);
     this.collectCache = this.settings.get('collect');
-    this.store = new SwitchableStore(await this.openStore(this.settings.get('backend')));
+    this.store = new SwitchableStore(await this.openStore(this.resolveBackend(), cfg.clickhouseWaitSec));
     this.devices = new DeviceService(this.cdb, this.creds, this.store, this.log);
     this.discovery = new Discovery(this.devices, this.creds, this.log);
     this.hosts = new HostTracker(this.cdb, this.devices, this.log, () => this.settings.get('hosts'));
@@ -79,15 +79,49 @@ export class App {
     registerRoutes(this);
   }
 
-  /** Opens the chosen backend. Falls back to SQLite when ClickHouse cannot be reached, so start-up never fails because of it. */
-  async openStore(want: 'sqlite' | 'clickhouse'): Promise<TsStore> {
+  /**
+   * Chooses the storage backend. A choice made earlier (stored setting) always wins, so an upgrade never moves an install to a different store.
+   * For a first start: FLOWSCOPE_BACKEND, else SQLite if this data folder already holds a SQLite store, else ClickHouse when a ClickHouse
+   * server is configured (the Docker compose files, the Linux installer and the Proxmox installer and template all configure one), else SQLite.
+   * The result is stored, so it stays the same later even if the environment changes.
+   */
+  resolveBackend(): 'sqlite' | 'clickhouse' {
+    const stored = this.settings.raw('backend');
+    if (stored !== undefined) return this.settings.get('backend');
+    let pick: 'sqlite' | 'clickhouse';
+    if (this.cfg.backend) pick = this.cfg.backend;
+    else if (fs.existsSync(path.join(this.cfg.dataDir, 'ts', 'ts.db'))) pick = 'sqlite';
+    else pick = this.cfg.clickhouseUrl ? 'clickhouse' : 'sqlite';
+    this.settings.set('backend', pick);
+    this.log.info('store', `Storage backend for this install: ${pick}`);
+    return pick;
+  }
+
+  /**
+   * Opens the chosen backend. Falls back to SQLite when ClickHouse cannot be reached, so start-up never fails because of it.
+   * `waitSec` keeps trying for that long first, because ClickHouse is often still starting when FlowScope is (a reboot, `docker compose up`).
+   */
+  async openStore(want: 'sqlite' | 'clickhouse', waitSec = 0): Promise<TsStore> {
     if (want === 'clickhouse') {
-      try {
-        const { openClickHouse } = await import('./store/clickhouse.js');
-        return await openClickHouse(this.cfg.clickhouseUrl, this.log);
-      } catch (e) {
-        this.storeError = `ClickHouse is selected but could not be used (${(e as Error).message}). Falling back to the embedded SQLite store so nothing is lost.`;
-        this.log.error('store', this.storeError);
+      const { openClickHouse } = await import('./store/clickhouse.js');
+      const deadline = Date.now() + waitSec * 1000;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const s = await openClickHouse(this.cfg.clickhouseUrl, this.log);
+          this.storeError = null;
+          return s;
+        } catch (e) {
+          const msg = (e as Error).message;
+          const settingsProblem = /Invalid URL|is not set|must start with|database name may only/.test(msg);
+          if (!settingsProblem && Date.now() + 2000 < deadline) {
+            if (attempt === 1) this.log.warn('store', `ClickHouse is not answering yet (${msg}). Waiting up to ${waitSec} s for it.`);
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+          this.storeError = `ClickHouse is selected but could not be used (${msg}). Falling back to the embedded SQLite store so nothing is lost.`;
+          this.log.error('store', this.storeError);
+          break;
+        }
       }
     }
     return SqliteStore.open(path.join(this.cfg.dataDir, 'ts'));

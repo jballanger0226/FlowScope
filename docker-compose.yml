@@ -1,5 +1,9 @@
-# docker compose up -d                       FlowScope with embedded SQLite storage
-# docker compose --profile clickhouse up -d  also starts ClickHouse (experimental backend, pick it under Storage)
+# cp .env.example .env   (set CLICKHOUSE_PASSWORD, letters and digits only), then:
+#
+#   docker compose up -d                  FlowScope with ClickHouse storage (the default)
+#
+# SQLite instead (nothing else to run; compose still wants some value for the password, which is then unused):
+#   CLICKHOUSE_PASSWORD=unused FLOWSCOPE_BACKEND=sqlite docker compose up -d --no-deps flowscope
 # Exporters all look like one device (the Docker bridge address)? Use docker-compose.host.yml instead. Full directions: docs/deployment.md
 services:
   flowscope:
@@ -18,21 +22,31 @@ services:
       FLOWSCOPE_ADMIN_PASSWORD: ${FLOWSCOPE_ADMIN_PASSWORD:-}
       # FLOWSCOPE_TLS: "off"                 # serve plain HTTP on 8080 behind your own TLS proxy
       # FLOWSCOPE_PUBLIC_URL: https://flows.example.com   # needed for SAML behind a proxy
-      FLOWSCOPE_CLICKHOUSE_URL: ${FLOWSCOPE_CLICKHOUSE_URL:-}
+      FLOWSCOPE_CLICKHOUSE_URL: ${FLOWSCOPE_CLICKHOUSE_URL:-http://flowscope:${CLICKHOUSE_PASSWORD:-}@clickhouse:8123/flowscope}
+      # New installs use ClickHouse because the URL above is set. "sqlite" keeps the embedded store. A stored choice (Storage page) always wins.
+      FLOWSCOPE_BACKEND: ${FLOWSCOPE_BACKEND:-clickhouse}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
 
   clickhouse:
-    profiles: ["clickhouse"]
     image: clickhouse/clickhouse-server:25.8
     restart: unless-stopped
     environment:
       CLICKHOUSE_USER: flowscope
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     volumes:
       - clickhouse-data:/var/lib/clickhouse
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
-    # Not published: only FlowScope needs it. Set FLOWSCOPE_CLICKHOUSE_URL=http://flowscope:<password>@clickhouse:8123/flowscope
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    # Not published: only FlowScope needs it. Its data is in the clickhouse-data volume; back that up together with flowscope-data.
 
 volumes:
   flowscope-data:
