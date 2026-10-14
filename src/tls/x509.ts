@@ -109,7 +109,9 @@ export function buildSelfSigned(o: SelfSignedOpts): string {
   const nb = new Date(Date.now() - 5 * 60_000), na = new Date(Date.now() + o.days * 86400_000);
   const ski = crypto.createHash('sha1').update(pub).digest();
   const exts = [
-    d.seq(d.oid('2.5.29.19'), d.bool(true), d.octets(d.seq(d.bool(true)))),
+    // CA:FALSE (an empty sequence, because FALSE is the default). This is a server certificate: if someone installs it as trusted, it
+    // vouches for its own host names and cannot sign certificates for anything else.
+    d.seq(d.oid('2.5.29.19'), d.bool(true), d.octets(d.seq())),
     d.seq(d.oid('2.5.29.15'), d.bool(true), d.octets(d.bitString(Buffer.from([o.key.asymmetricKeyType === 'rsa' ? 0xa0 : 0x80]), o.key.asymmetricKeyType === 'rsa' ? 5 : 7))),
     d.seq(d.oid('2.5.29.37'), d.octets(d.seq(d.oid('1.3.6.1.5.5.7.3.1')))),
     d.seq(d.oid('2.5.29.14'), d.octets(d.octets(ski)))

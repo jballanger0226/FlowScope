@@ -19,13 +19,29 @@ for (const kt of KEY_TYPES.map(k => k.id) as KeyType[]) {
     assert.match(info.subject, /CN=flowscope.example.net/);
     assert.ok(info.sans.includes('10.0.0.5') && info.sans.includes('flowscope.example.net'));
     assert.ok(info.selfSigned);
+    assert.equal(info.isCa, false, 'a generated server certificate is not a CA');
+    assert.equal(new crypto.X509Certificate(cert).ca, false);
     assert.ok(new crypto.X509Certificate(cert).checkPrivateKey(key));
+    // it still works as the trust anchor for its own host name, which is how people trust a self-signed certificate
+    const srv = tls.createServer({ key: key.export({ type: 'pkcs8', format: 'pem' }), cert }, s => s.end('hi'));
+    await new Promise<void>(res => srv.listen(0, '127.0.0.1', () => res()));
+    try {
+      const port = (srv.address() as { port: number }).port;
+      const hello = (servername: string) => new Promise<string>((res, rej) => {
+        const c = tls.connect({ host: '127.0.0.1', port, ca: cert, servername }, () => { res(c.authorized ? 'ok' : String(c.authorizationError)); c.destroy(); });
+        c.on('error', e => rej(e));
+      });
+      assert.equal(await hello('flowscope.example.net'), 'ok');
+      await assert.rejects(() => hello('other.example.net'), /altnames|match/i);
+    } finally { srv.close(); }
     const csr = buildCsr(key, { cn: 'flowscope.example.net', o: 'Example' }, sans);
     if (hasOpenssl) {
       const c = path.join(tmp, kt + '.crt'), r = path.join(tmp, kt + '.csr');
       fs.writeFileSync(c, cert); fs.writeFileSync(r, csr);
       const v1 = spawnSync('openssl', ['verify', '-CAfile', c, c], { encoding: 'utf8' });
       assert.equal(v1.status, 0, v1.stdout + v1.stderr);
+      const txt = spawnSync('openssl', ['x509', '-in', c, '-noout', '-text'], { encoding: 'utf8' }).stdout;
+      assert.match(txt, /CA:FALSE/);
       const v2 = spawnSync('openssl', ['req', '-in', r, '-noout', '-verify', '-text'], { encoding: 'utf8' });
       assert.equal(v2.status, 0, v2.stdout + v2.stderr);
       assert.match(v2.stdout + v2.stderr, /verify OK/);
