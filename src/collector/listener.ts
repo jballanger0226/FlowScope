@@ -14,7 +14,15 @@ export interface CollectorOpts {
   /** Called for each new exporter IP, so the device list can be linked to it. */
   onExporter?: (ip: string) => void;
   maxBuffered?: number; flushMs?: number; flushRecords?: number;
+  /**
+   * Accepted range for flow times, in ms since the epoch. Records outside it are dropped and counted, because the flow time chooses the
+   * storage table and a wrong or forged time creates tables nothing will ever read or remove. Default: the year 2000 up to one day ahead.
+   */
+  timeWindow?: () => { minMs: number; maxMs: number };
 }
+
+const DAY = 86_400_000;
+const Y2000 = Date.UTC(2000, 0, 1);
 
 /** UDP listener for NetFlow v5, v9 and IPFIX. Records are batched and handed to the store. */
 export class FlowCollector {
@@ -28,6 +36,7 @@ export class FlowCollector {
   private timer: NodeJS.Timeout | null = null;
   private dropped = 0;
   private lastDropLog = 0;
+  private lastTimeLog = new Map<string, number>();
   boundPorts: number[] = [];
 
   constructor(private o: CollectorOpts) {}
@@ -87,6 +96,8 @@ export class FlowCollector {
       return;
     }
     if (!recs.length) return;
+    recs = this.inWindow(recs, info, now);
+    if (!recs.length) return;
     info.records += recs.length; this.stats.records += recs.length;
     const max = this.o.maxBuffered ?? 500_000;
     if (this.buf.length + recs.length > max) {
@@ -96,6 +107,24 @@ export class FlowCollector {
     }
     for (const r of recs) this.buf.push(r);
     if (this.buf.length >= (this.o.flushRecords ?? 5000)) void this.flush();
+  }
+
+  /** Drops records whose flow times are not usable and says so, at most once every 10 minutes per exporter. */
+  private inWindow(recs: FlowRecord[], info: ExporterInfo, now: number): FlowRecord[] {
+    const w = this.o.timeWindow?.() ?? { minMs: Y2000, maxMs: now + DAY };
+    const ok = recs.filter(r => Number.isFinite(r.ts0) && Number.isFinite(r.ts1) && r.ts1 >= w.minMs && r.ts1 <= w.maxMs && r.ts0 >= w.minMs && r.ts0 <= w.maxMs);
+    const bad = recs.length - ok.length;
+    if (bad) {
+      this.stats.badTime = (this.stats.badTime ?? 0) + bad;
+      info.lastError = `${bad} record${bad === 1 ? '' : 's'} with flow times outside the accepted range (is the exporter's clock set?)`;
+      const last = this.lastTimeLog.get(info.ip) ?? 0;
+      if (now - last > 600_000) {
+        if (this.lastTimeLog.size > 5000) this.lastTimeLog.clear();
+        this.lastTimeLog.set(info.ip, now);
+        this.o.log.warn('collector', `${info.ip}: dropped ${bad} record${bad === 1 ? '' : 's'} with flow times outside ${new Date(w.minMs).toISOString().slice(0, 10)} to ${new Date(w.maxMs).toISOString().slice(0, 10)}. Check the exporter's clock.`);
+      }
+    }
+    return ok;
   }
 
   async flush(): Promise<void> {

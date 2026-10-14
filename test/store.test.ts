@@ -92,3 +92,42 @@ test('collector receives v5, v9 and IPFIX over UDP and stores them', async () =>
     assert.equal(c.stats.discarded, 1);
   } finally { await c.stop(); await store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('collector drops records whose flow times are outside the accepted window', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-coll-time-'));
+  const store = await SqliteStore.open(dir);
+  const warnings: string[] = [];
+  const log = { info() {}, warn(_s: string, m: string) { warnings.push(m); }, error() {} };
+  const c = new FlowCollector({ bind: '127.0.0.1', ports: [0], log, ingest: store, flushMs: 50 });
+  await c.start();
+  try {
+    const port = c.boundPorts[0];
+    const sock = dgram.createSocket('udp4');
+    const send = (b: Buffer) => new Promise<void>(res => sock.send(b, port, '127.0.0.1', () => res()));
+    const good = rec({ srcIp: '10.6.0.1', sport: 1111, vlan: null, srcMac: null, dstMac: null, postTos: null, ttlMin: null, ttlMax: null });
+    const epoch = rec({ srcIp: '10.6.0.2', sport: 2222, vlan: null, srcMac: null, dstMac: null, postTos: null, ttlMin: null, ttlMax: null });
+    await send(buildV5([epoch], { uptime: 7_200_000, nowMs: 86_400_000 + 1000 }));   // exporter clock never set: 1970
+    await send(buildV5([good], { uptime: 7_200_000, nowMs: NOW }));
+    for (let i = 0; i < 50 && c.stats.records < 1; i++) await new Promise(r => setTimeout(r, 40));
+    await c.flush();
+    sock.close();
+    assert.equal(c.stats.records, 1);
+    assert.equal(c.stats.badTime, 1);
+    assert.ok(warnings.some(w => /clock/.test(w)));
+    const res = await store.searchStreams({ range: { from: 0, to: NOW + 3600_000 }, conds: [], sort: 'time', dir: 'desc', limit: 10 });
+    assert.deepEqual(res.rows.map(r => r.srcIp), ['10.6.0.1']);
+  } finally { await c.stop(); await store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('the store refuses flow times that would create unreadable tables', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-ts-'));
+  const store = await SqliteStore.open(dir);
+  try {
+    const base = rec({});
+    await store.insertFlows([{ ...base, ts0: 1e16, ts1: 1e16 }, { ...base, ts0: Number.NaN, ts1: Number.NaN }, { ...base, ts0: 3e14, ts1: 3e14 }, base]);
+    const st = await store.stats();
+    assert.equal(st.ingested, 4);   // counted as received
+    const res = await store.searchStreams({ range: { from: 0, to: NOW + 3600_000 }, conds: [], sort: 'time', dir: 'desc', limit: 10 });
+    assert.equal(res.rows.length, 1);
+  } finally { await store.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});

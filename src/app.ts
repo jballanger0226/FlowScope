@@ -65,7 +65,9 @@ export class App {
     this.poller = new Poller(this.devices, this.store, this.log, { isEnabled: () => this.collectCache.snmp, hosts: () => this.settings.get('hosts') }, this.hosts);
     this.collector = new FlowCollector({
       bind: cfg.flowBind, ports: cfg.flowPorts, log: { info: (s, m) => this.log.info(s, m), warn: (s, m) => this.log.warn(s, m), error: (s, m) => this.log.error(s, m) },
-      ingest: this.store, onExporter: ip => this.noteExporter(ip)
+      ingest: this.store, onExporter: ip => this.noteExporter(ip),
+      // Raw tables older than the raw retention are removed at the next maintenance run, so such records are not worth storing.
+      timeWindow: () => { const now = Date.now(); return { minMs: now - (this.settings.get('retention').raw + 1) * 86_400_000, maxMs: now + 86_400_000 }; }
     });
     this.collector.enabled = this.collectCache.flow;
 
