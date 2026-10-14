@@ -117,9 +117,8 @@ id flowscope >/dev/null 2>&1 || useradd --system --home-dir "$VAR" --shell /usr/
 install -d -m 755 "$ETC"
 install -d -m 750 -o flowscope -g flowscope "$VAR"
 
-running=0
 if command -v systemctl >/dev/null 2>&1 && [ -z "${FLOWSCOPE_SKIP_SYSTEMD:-}" ] && systemctl is-active --quiet flowscope 2>/dev/null; then
-  running=1; say "Stopping the running service"; systemctl stop flowscope
+  say "Stopping the running service"; systemctl stop flowscope
 fi
 
 new="$OPT.new"; rm -rf "$new"; mkdir -p "$new"
