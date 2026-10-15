@@ -111,7 +111,7 @@ export interface Series { name: string; color: string; points: { t: number; v: n
 export const PALETTE = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)', 'var(--s6)', 'var(--s7)', 'var(--s8)'];
 
 /** A line chart drawn with SVG. Shaded bands mark time spans (events). */
-export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; fmtT: (t: number) => string; /** Precise value text for the hover readout (defaults to unit) */ fmtV?: (v: number) => string; /** Full timestamp for the hover readout */ fmtFull?: (t: number) => string; wide?: boolean }): VNode {
+export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; fmtT: (t: number) => string; /** Precise value text for the hover readout (defaults to unit) */ fmtV?: (v: number) => string; /** Full timestamp for the hover readout */ fmtFull?: (t: number) => string; /** Charts sharing this name on a page follow each other's hover: pointing at one marks the same moment on the rest */ sync?: string; wide?: boolean }): VNode {
   const W = o.wide ? 1100 : 520, H = 190, L = 76, R = 10, T = 8, B = 22;
   const all = o.series.flatMap(s => s.points.map(p => p.v));
   const maxV = o.yMax ?? Math.max(o.threshold ?? 0, ...all, 1e-9) * 1.1;
@@ -121,7 +121,7 @@ export function lineChart(o: { title: string; unit: (v: number) => string; serie
   const xt = [0, 0.25, 0.5, 0.75, 1].map(f => o.from + f * (o.to - o.from));
   return h('figure', { class: 'chart' },
     h('figcaption', null, o.title),
-    h('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': o.aria, class: 'chartsvg', style: `aspect-ratio:${W}/${H}` },
+    h('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': o.aria, class: 'chartsvg', 'data-sync': o.sync, style: `aspect-ratio:${W}/${H}`, ref: (el: Element) => { (el as any).__lc = { o, g: { W, L, R, x, y } }; } },
       grid.map((g, i) => h('g', { key: 'g' + i }, h('line', { x1: L, x2: W - R, y1: y(g), y2: y(g), class: 'gridline' }), h('text', { x: L - 6, y: y(g) + 4, class: 'axis', 'text-anchor': 'end' }, o.unit(g)))),
       (o.bands ?? []).map((b, i) => h('rect', { key: 'b' + i, x: x(Math.max(o.from, b.a)), y: T, width: Math.max(2, x(Math.min(o.to, b.b)) - x(Math.max(o.from, b.a))), height: H - T - B, class: 'band' })),
       o.threshold !== undefined ? h('line', { key: 'thr', x1: L, x2: W - R, y1: y(o.threshold), y2: y(o.threshold), class: 'thr' }) : null,
@@ -132,10 +132,10 @@ export function lineChart(o: { title: string; unit: (v: number) => string; serie
       o.series.map((s, i) => h('circle', { key: 'd' + i, class: 'hoverdot', r: 4, cx: L, cy: T, visibility: 'hidden', style: `stroke:${s.color};fill:var(--panel)` })),
       h('rect', {
         key: 'hz', class: 'hoverzone', x: L, y: T, width: W - L - R, height: H - T - B, fill: 'transparent',
-        onpointermove: (e: PointerEvent) => hoverChart(e, o, { W, L, R, x, y }),
-        onpointerdown: (e: PointerEvent) => hoverChart(e, o, { W, L, R, x, y }),
-        onpointerleave: (e: PointerEvent) => hoverOff(e),
-        onpointercancel: (e: PointerEvent) => hoverOff(e)
+        onpointermove: (e: PointerEvent) => hoverChart(e),
+        onpointerdown: (e: PointerEvent) => hoverChart(e),
+        onpointerleave: hoverOff,
+        onpointercancel: hoverOff
       })));
 }
 
@@ -157,10 +157,51 @@ function typicalStep(pts: { t: number }[]): number {
   return Math.max(1, d[d.length >> 1]);
 }
 
-function hoverChart(e: PointerEvent, o: ChartOpts, g: { W: number; L: number; R: number; x: (t: number) => number; y: (v: number) => number }): void {
-  const zone = e.currentTarget as SVGElement;
-  const svg = zone.ownerSVGElement;
-  if (!svg) return;
+interface LC { o: ChartOpts; g: { W: number; L: number; R: number; x: (t: number) => number; y: (v: number) => number } }
+const lcOf = (svg: Element): LC | undefined => (svg as any).__lc;
+
+/** Puts the guide line at time t and a dot on each series' sample nearest to it. Returns the readout rows, or null when no series has data there. */
+function mark(svg: Element, t: number, always: boolean): TipRow[] | null {
+  const lc = lcOf(svg);
+  if (!lc) return null;
+  const { o, g } = lc;
+  const dots = svg.querySelectorAll<SVGCircleElement>('.hoverdot');
+  const rows: TipRow[] = [];
+  o.series.forEach((s, i) => {
+    const dot = dots[i];
+    const show = (on: boolean) => { if (dot) dot.setAttribute('visibility', on ? 'visible' : 'hidden'); };
+    if (!s.points.length) { show(false); return; }
+    const p = s.points[nearest(s.points, t)];
+    if (Math.abs(p.t - t) > typicalStep(s.points) * 1.5) { show(false); return; }
+    rows.push({ color: s.color, label: s.name, value: (o.fmtV ?? o.unit)(p.v) });
+    if (dot) { dot.setAttribute('cx', g.x(p.t).toFixed(1)); dot.setAttribute('cy', g.y(p.v).toFixed(1)); }
+    show(true);
+  });
+  const line = svg.querySelector('.hoverline');
+  if (rows.length || (always && t >= o.from && t <= o.to)) {
+    const lx = g.x(t).toFixed(1);
+    line?.setAttribute('x1', lx); line?.setAttribute('x2', lx); line?.setAttribute('visibility', 'visible');
+  } else line?.setAttribute('visibility', 'hidden');
+  return rows.length ? rows : null;
+}
+
+function clear(svg: Element): void {
+  svg.querySelector('.hoverline')?.setAttribute('visibility', 'hidden');
+  svg.querySelectorAll('.hoverdot').forEach(d => d.setAttribute('visibility', 'hidden'));
+}
+
+/** The other charts in the same sync group as this one, if it has one. */
+function siblings(svg: Element): Element[] {
+  const grp = svg.getAttribute('data-sync');
+  if (!grp) return [];
+  return Array.from(svg.ownerDocument.querySelectorAll('svg.chartsvg[data-sync]')).filter(x => x !== svg && x.getAttribute('data-sync') === grp);
+}
+
+function hoverChart(e: PointerEvent): void {
+  const svg = (e.currentTarget as SVGElement).ownerSVGElement;
+  const lc = svg && lcOf(svg);
+  if (!svg || !lc) return;
+  const { o, g } = lc;
   const box = svg.getBoundingClientRect();
   if (!box.width) return;
   const vx = (e.clientX - box.left) * (g.W / box.width);
@@ -173,33 +214,15 @@ function hoverChart(e: PointerEvent, o: ChartOpts, g: { W: number; L: number; R:
     const dist = Math.abs(p.t - tCursor);
     if (dist < best) { best = dist; snapT = p.t; }
   }
-  const line = svg.querySelector<SVGLineElement>('.hoverline');
-  const dots = svg.querySelectorAll<SVGCircleElement>('.hoverdot');
-  if (snapT === null) { hoverOff(e); return; }
-  const rows: TipRow[] = [];
-  let any = false;
-  o.series.forEach((s, i) => {
-    const dot = dots[i];
-    const show = (on: boolean) => { if (dot) dot.setAttribute('visibility', on ? 'visible' : 'hidden'); };
-    if (!s.points.length) { show(false); return; }
-    const p = s.points[nearest(s.points, snapT!)];
-    if (Math.abs(p.t - snapT!) > typicalStep(s.points) * 1.5) { show(false); return; }
-    any = true;
-    rows.push({ color: s.color, label: s.name, value: (o.fmtV ?? o.unit)(p.v) });
-    if (dot) { dot.setAttribute('cx', g.x(p.t).toFixed(1)); dot.setAttribute('cy', g.y(p.v).toFixed(1)); }
-    show(true);
-  });
-  if (!any) { hoverOff(e); return; }
-  if (line) { const lx = g.x(snapT).toFixed(1); line.setAttribute('x1', lx); line.setAttribute('x2', lx); line.setAttribute('visibility', 'visible'); }
+  const rows = snapT === null ? null : mark(svg, snapT, false);
+  if (snapT === null || !rows) { hoverOff(e); return; }
+  for (const other of siblings(svg)) mark(other, snapT, true);
   const inBand = (o.bands ?? []).some(b => snapT! >= b.a && snapT! <= b.b);
   showTip({ title: (o.fmtFull ?? stamp)(snapT), rows, note: inBand ? 'Inside a shaded drop period' : undefined }, e.clientX, e.clientY);
 }
 
-function hoverOff(e: PointerEvent): void {
+function hoverOff(e: Event): void {
   const svg = (e.currentTarget as SVGElement).ownerSVGElement;
-  if (svg) {
-    svg.querySelector('.hoverline')?.setAttribute('visibility', 'hidden');
-    svg.querySelectorAll('.hoverdot').forEach(d => d.setAttribute('visibility', 'hidden'));
-  }
+  if (svg) { clear(svg); for (const other of siblings(svg)) clear(other); }
   hideTip();
 }
