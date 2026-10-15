@@ -1,0 +1,12 @@
+[Unit]
+Description=FlowScope appliance first boot (one-time console password)
+ConditionPathExists=!/etc/flowscope/.vm-firstboot-done
+Before=getty.target serial-getty@ttyS0.service ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/flowscope-vm-firstboot
+
+[Install]
+WantedBy=multi-user.target

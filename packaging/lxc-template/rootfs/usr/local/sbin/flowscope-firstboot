@@ -13,6 +13,8 @@ MOTD="${FLOWSCOPE_MOTD:-/etc/motd}"
 OPT="${FLOWSCOPE_OPT:-/opt/flowscope}"
 CH_HELPER="$OPT/packaging/linux/clickhouse-setup.sh"
 MARKER="$ETC/.firstboot-done"
+# The same script runs in the virtual machine appliance (packaging/vm), which marks itself with /etc/flowscope-vm.
+if [ -f "${FLOWSCOPE_VM_MARK:-/etc/flowscope-vm}" ]; then KIND="virtual machine"; ADDR_HINT="hostname -I"; else KIND="container"; ADDR_HINT="hostname -I, or the container's Summary tab"; fi
 
 if [ -z "${FLOWSCOPE_SKIP_SSH_KEYS:-}" ] && command -v ssh-keygen >/dev/null 2>&1; then
   ssh-keygen -A >/dev/null 2>&1 || true
@@ -37,7 +39,7 @@ fi
 # The helper is plain sh and only needs these three small functions.
 CH_DIR="${FLOWSCOPE_CH_ETC:-/etc/clickhouse-server}"
 # A template built without ClickHouse (STORAGE_BACKEND=sqlite) has no such folder: nothing to set up, FlowScope uses its SQLite file.
-if [ -d "$CH_DIR" ]; then storage_note="ClickHouse, inside this container (flowscope-ctl doctor shows its state)"; else storage_note="SQLite (embedded, in /var/lib/flowscope)"; fi
+if [ -d "$CH_DIR" ]; then storage_note="ClickHouse, inside this $KIND (flowscope-ctl doctor shows its state)"; else storage_note="SQLite (embedded, in /var/lib/flowscope)"; fi
 say() { :; }; warn() { :; }; die() { echo "flowscope-firstboot: $*" >&2; exit 1; }
 if [ -f "$CH_HELPER" ] && [ -d "$CH_DIR" ] && ! grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env" 2>/dev/null; then
   # shellcheck source=/dev/null
@@ -57,9 +59,9 @@ fi
 umask 022
 cat > "$MOTD" <<MSG
 
-  FlowScope is installed in this container.
+  FlowScope is installed in this $KIND.
 
-    Web console:  https://<this container's address>/      (address: hostname -I, or the container's Summary tab)
+    Web console:  https://<this $KIND's address>/      (address: $ADDR_HINT)
     Sign in as:   admin
     $note
     Exporters:    send NetFlow v5/v9 or IPFIX to this address, UDP 2055 or 4739

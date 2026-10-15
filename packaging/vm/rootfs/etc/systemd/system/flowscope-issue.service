@@ -1,0 +1,10 @@
+[Unit]
+Description=FlowScope console login notice (address and first-use passwords)
+After=flowscope-firstboot.service flowscope-vm-firstboot.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/flowscope-issue
+
+[Install]
+WantedBy=multi-user.target

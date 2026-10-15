@@ -1,0 +1,11 @@
+# FlowScope with ClickHouse as its store. Create the Secret first (letters and digits only, because the password goes into a URL):
+#   kubectl create namespace flowscope
+#   kubectl -n flowscope create secret generic clickhouse-auth --from-literal=password="$(head -c 48 /dev/urandom | base64 | tr -dc A-Za-z0-9 | head -c 24)"
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../flowscope.yaml
+  - clickhouse.yaml
+patches:
+  - path: flowscope-env.yaml
+    target: { kind: Deployment, name: flowscope }

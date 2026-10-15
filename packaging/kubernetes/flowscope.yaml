@@ -1,0 +1,119 @@
+# FlowScope on Kubernetes (VMware vSphere with Tanzu / Tanzu Kubernetes Grid, Nutanix Kubernetes Platform, or any conformant cluster).
+# Directions, and what is and is not tested: docs/deployment.md ("Kubernetes").
+#
+#   kubectl apply -k packaging/kubernetes                 FlowScope with the embedded SQLite store (one pod, one volume)
+#   kubectl apply -k packaging/kubernetes/clickhouse      FlowScope with ClickHouse (create the clickhouse-auth Secret first)
+#
+# Optional first: choose the admin password for the first sign-in (12+ characters; if you skip this one is generated and printed in the pod log)
+#   kubectl create namespace flowscope
+#   kubectl -n flowscope create secret generic flowscope-admin --from-literal=FLOWSCOPE_ADMIN_PASSWORD='choose-a-long-password'
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flowscope
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flowscope-data
+  namespace: flowscope
+spec:
+  accessModes: [ReadWriteOnce]
+  # storageClassName: vsphere-csi        # leave out to use the cluster's default storage class
+  resources:
+    requests:
+      storage: 10Gi                      # settings and, with the SQLite store, the flow records
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flowscope
+  namespace: flowscope
+  labels: { app.kubernetes.io/name: flowscope }
+spec:
+  # One pod only: the data volume is ReadWriteOnce and FlowScope is a single collector. Recreate (not a rolling update) so the old pod has
+  # released the volume before the new one starts.
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: flowscope }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: flowscope }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000                  # the "node" user of the image
+        runAsGroup: 1000
+        fsGroup: 1000                    # makes the volume writable by that user
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: flowscope
+          image: ghcr.io/jballanger0226/flowscope:latest    # pin a version tag (v1.2.3) for production; a private package needs imagePullSecrets
+          imagePullPolicy: IfNotPresent
+          env:
+            # Above 1024, so the pod needs no extra capability. The web Service below maps 443 to it.
+            - { name: FLOWSCOPE_HTTPS_PORT, value: "8443" }
+            - { name: FLOWSCOPE_FLOW_PORTS, value: "2055,4739" }
+            - name: FLOWSCOPE_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: flowscope-admin, key: FLOWSCOPE_ADMIN_PASSWORD, optional: true }
+            # FLOWSCOPE_PUBLIC_URL: https://flows.example.com      # needed for SAML, and behind an ingress or load balancer with its own name
+          ports:
+            - { name: https, containerPort: 8443, protocol: TCP }
+            - { name: netflow, containerPort: 2055, protocol: UDP }
+            - { name: ipfix, containerPort: 4739, protocol: UDP }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          # The image's own health check (the same one Docker runs)
+          startupProbe:
+            exec: { command: [node, dist/src/cli.js, healthcheck] }
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            exec: { command: [node, dist/src/cli.js, healthcheck] }
+            periodSeconds: 30
+            timeoutSeconds: 6
+            failureThreshold: 3
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: flowscope-data }
+---
+# The web console, inside the cluster. HTTPS with a self-signed certificate until you install your own (Admin).
+# To reach it from outside use an Ingress that talks HTTPS to this Service, or change "type" to LoadBalancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: flowscope-web
+  namespace: flowscope
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: flowscope }
+  ports:
+    - { name: https, port: 443, targetPort: https, protocol: TCP }
+---
+# Where the routers and switches send NetFlow / IPFIX. FlowScope tells exporters apart by the source address of the packets, so
+# "externalTrafficPolicy: Local" is essential: with the default (Cluster) kube-proxy rewrites the source to a node address and every
+# exporter looks like the same device. It is a separate Service from the web one because not every load balancer (NSX Advanced Load
+# Balancer, MetalLB, cloud providers) accepts TCP and UDP in one Service. Exporters send to this Service's external address.
+apiVersion: v1
+kind: Service
+metadata:
+  name: flowscope-flows
+  namespace: flowscope
+  # annotations:                          # load balancer specific, for example:
+  #   metallb.universe.tf/loadBalancerIPs: 192.0.2.50
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector: { app.kubernetes.io/name: flowscope }
+  ports:
+    - { name: netflow, port: 2055, targetPort: netflow, protocol: UDP }
+    - { name: ipfix, port: 4739, targetPort: ipfix, protocol: UDP }

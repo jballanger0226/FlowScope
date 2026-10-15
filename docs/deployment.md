@@ -15,6 +15,8 @@ Pick one of these:
 3. [Proxmox VE from the command line](#proxmox-command-line-script) — one script on the Proxmox host that builds the same kind of container.
 4. [Proxmox VE 9.1 or newer, running the Docker image as an LXC "application container"](#proxmox-oci).
 5. [A service on a plain Linux, macOS or Windows machine](#plain-service).
+6. [VMware ESXi / vSphere](#vmware-esxi--vsphere-ova) or [Nutanix AHV](#nutanix-ahv-qcow2): a ready-made virtual machine appliance (an OVA and a qcow2 image).
+7. [Kubernetes](#kubernetes) (VMware Tanzu, Nutanix Kubernetes Platform, or any cluster): manifests that run the Docker image.
 
 What has and has not been tested for each is in [verification.md](verification.md). The Proxmox paths have not been run on a real Proxmox host.
 
@@ -305,6 +307,49 @@ Proxmox VE 9.1 and newer can create an LXC container from an OCI image ("applica
 6. Start it, open `https://<container address>/`.
 
 The image's entrypoint takes care of ownership of `/data`: it starts as root (which is an unprivileged uid on the host for an unprivileged container), makes `/data` writable for the `node` user and drops to it. If the container keeps restarting with a permission error about `/data`, look at the log (Proxmox's task/console output, or `pct console`) first.
+
+## VMware ESXi / vSphere (OVA)
+
+A ready-made virtual machine: Debian 12, FlowScope as a service, ClickHouse as its storage, cloud-init and VMware Tools. `.github/workflows/vm-image.yml` builds it and publishes `flowscope-vm_<version>_amd64.ova` on the Releases page (`vm-latest` is the newest build of `main`). The same page has `flowscope-vm-sqlite_...`, which leaves ClickHouse out for small sites. To build it yourself: `sudo packaging/vm/build.sh` (needs Docker, `qemu-img`, `sgdisk`, `mkfs.vfat` and `mkfs.ext4`).
+
+1. **Deploy.** vSphere Client: right-click a host, cluster or folder → **Deploy OVF Template** → **Local file** → choose the `.ova`. Pick a name, compute resource, a datastore (**thin provision** is fine; the disk is 20 GB) and the VM network. ESXi shows a notice that the OVA is not signed; continue.
+2. **Size it.** The OVA asks for 2 vCPUs, 4 GB of memory and a 20 GB disk, which suits a small to medium network on ClickHouse. Change them before the first power-on if you need to (more disk: grow it in vSphere; the root partition and file system grow by themselves at the next boot). The SQLite variant runs in 2 GB.
+3. **Optional settings in the wizard.** *Host name* and *SSH public key* (for the user `debian`). Leave them empty to use DHCP and the console. For a static address, host name, a password or a full cloud-init configuration, attach cloud-init data as the `guestinfo.userdata` / `guestinfo.metadata` extra configuration parameters (base64, `guestinfo.userdata.encoding = base64`); the VM reads them through VMware Tools.
+4. **Power on and sign in.** The console login screen shows the web address, the `admin` password for the web console and a one-time `root` password (you must change it at the first console login). Open `https://<address>/` and sign in as `admin`. Delete `/root/flowscope-admin-password.txt` once you have saved the password, and the line disappears from the console screen at the next boot. Root cannot sign in over SSH with a password; use the SSH key from step 3 (user `debian`, then `sudo -i`) or the console.
+5. **Point the exporters** at the VM's address, UDP 2055 (NetFlow v5/v9/IPFIX) or 4739 (IPFIX). The VM keeps its own address, so nothing rewrites the source of the packets.
+
+What is in the image: BIOS and UEFI boot (it starts on either firmware), the `vmxnet3`, LSI Logic and virtio drivers, cloud-init with the `NoCloud`, `ConfigDrive`, `VMware` and `OVF` data sources, `open-vm-tools` and the QEMU guest agent. Updating works as on Proxmox: `flowscope-ctl update` inside the VM (it needs internet access), and `apt` for the system. Back up with a snapshot or your backup product; stop collection first (Admin) for a consistent copy.
+
+## Nutanix AHV (qcow2)
+
+The same appliance as a disk image for AHV (it also boots on KVM, Proxmox and OpenStack). Download `flowscope-vm_<version>_amd64.qcow2` (or the `-sqlite` one) from the Releases page.
+
+1. **Upload the image.** Prism Central or Prism Element: **Settings → Image Configuration → Upload Image**. Give it a name, type **Disk**, and either upload the file or give it a URL. Choose a storage container.
+2. **Create the VM.** **VMs → Create VM**: 2 vCPUs, 4 GB of memory (2 GB for the SQLite variant), a NIC on your network, and a disk **Clone from Image Service** with that image. For a larger disk, set the size above 20 GB when adding the disk; the file system grows at first boot. Either **Legacy BIOS** or **UEFI** works. Leave **Secure Boot** off (the boot loader is not signed for it).
+3. **Optional customisation.** Under **Custom Script** (cloud-init), paste cloud-config with an SSH key, host name or network settings, for example `#cloud-config` with `ssh_authorized_keys` for the user `debian`. Without it the VM asks for an address by DHCP.
+4. **Power on, open the console** from Prism: it shows the web address, the `admin` password and the one-time `root` password, exactly as in the VMware steps above. Then open `https://<address>/`.
+5. **Exporters** send to the VM's address, UDP 2055 or 4739. Network devices and AHV's own virtual switches that export flows can also be pointed at it.
+
+## Kubernetes
+
+For VMware vSphere with Tanzu, Tanzu Kubernetes Grid, Nutanix Kubernetes Platform and other clusters. `packaging/kubernetes` has plain manifests (no chart or operator) that run the published image `ghcr.io/jballanger0226/flowscope`; see "Pulling a prebuilt image" above if the package is private (add `imagePullSecrets`).
+
+```sh
+kubectl apply -k packaging/kubernetes                  # embedded SQLite store, one pod and one 10 Gi volume
+# or, with ClickHouse (create its Secret first; the comments in packaging/kubernetes/clickhouse/kustomization.yaml have the command):
+kubectl apply -k packaging/kubernetes/clickhouse
+```
+
+Everything lives in the `flowscope` namespace. Choose the first `admin` password with a `flowscope-admin` Secret (commands at the top of `flowscope.yaml`) or read the generated one from `kubectl -n flowscope logs deploy/flowscope`. The pod runs as the unprivileged `node` user on port 8443 with all capabilities dropped; the `flowscope-web` Service maps 443 to it.
+
+**Things that matter on a cluster:**
+
+* **Exporters' source address.** FlowScope tells devices apart by the source address of their packets. The `flowscope-flows` Service is therefore `type: LoadBalancer` with `externalTrafficPolicy: Local`, which keeps the real source. With the default policy kube-proxy rewrites it to a node address and every exporter looks like one device. It needs a load balancer that supports UDP (NSX Advanced Load Balancer / Avi on Tanzu, MetalLB or the one NKP ships), and it is a separate Service from the web console because many load balancers refuse TCP and UDP together. No load balancer? Use `type: NodePort` (still `Local`), or `hostNetwork: true` on the pod, and point exporters at the node that runs it.
+* **SNMP polling goes out from the pod.** Most clusters translate the pod's address to the node's address on the way out, so devices must allow SNMP from the cluster nodes' addresses (all of them, unless the pod is pinned to a node).
+* **Web console access.** `flowscope-web` is a ClusterIP Service. Use an Ingress that speaks HTTPS to it (for NGINX: annotation `nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"`), or change its `type` to `LoadBalancer`. Set `FLOWSCOPE_PUBLIC_URL` to the address people use, which SAML needs. To terminate TLS at the Ingress instead, set `FLOWSCOPE_TLS=off` and `FLOWSCOPE_TRUST_PROXY=1` and point the Service at the plain HTTP port 8080.
+* **One pod.** FlowScope is a single collector with a ReadWriteOnce volume, so `replicas: 1` and the `Recreate` strategy are deliberate. A node failure means a restart elsewhere, and flow packets sent in between are lost, as with any single collector.
+* **Storage class.** The volumes use the cluster's default storage class. Set `storageClassName` (for example the vSphere CSI or Nutanix CSI class) in `flowscope.yaml` and `clickhouse/clickhouse.yaml` if you want another.
+* **Upgrade.** Change the image tag and `kubectl apply -k` again; the volume is kept. Pin a version tag rather than `latest` for production.
 
 ## Plain service
 

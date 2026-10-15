@@ -1,0 +1,17 @@
+# Points FlowScope at the ClickHouse in this namespace. $(CLICKHOUSE_PASSWORD) is expanded by Kubernetes from the variable declared just before it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flowscope
+spec:
+  template:
+    spec:
+      containers:
+        - name: flowscope
+          env:
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: clickhouse-auth, key: password }
+            - { name: FLOWSCOPE_CLICKHOUSE_URL, value: "http://flowscope:$(CLICKHOUSE_PASSWORD)@clickhouse:8123/flowscope" }
+            # New installs use ClickHouse because the URL is set. A choice made on the Storage page always wins.
+            - { name: FLOWSCOPE_BACKEND, value: clickhouse }

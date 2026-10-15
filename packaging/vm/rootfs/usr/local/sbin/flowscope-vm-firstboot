@@ -1,0 +1,15 @@
+#!/bin/sh
+# First boot of the FlowScope virtual machine appliance, before any login prompt: gives root a random one-time password so the console is
+# usable when nothing else (cloud-init, an SSH key) provided a way in. The password must be changed at the first login. It is shown on
+# the console login screen only (/etc/issue.d, readable by root alone, see flowscope-issue) and is not kept anywhere else.
+set -eu
+ETC="${FLOWSCOPE_ETC:-/etc/flowscope}"
+MARK="$ETC/.vm-firstboot-done"
+[ -f "$MARK" ] && exit 0
+umask 077
+mkdir -p "$ETC"
+pw="$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)"
+echo "root:$pw" | chpasswd
+chage -d 0 root
+printf '%s\n' "$pw" > "$ETC/.root-temp-pw"
+touch "$MARK"

@@ -15,6 +15,9 @@ FROM ${DEBIAN_IMAGE}
 ARG CLICKHOUSE_VERSION=25.8
 # clickhouse (the default) or sqlite: a template without ClickHouse, for small sites. build.sh sets it (STORAGE_BACKEND=sqlite).
 ARG STORAGE_BACKEND=clickhouse
+# lxc (the Proxmox container template) or vm (the root filesystem packaging/vm/build.sh turns into a bootable disk). A VM is a real machine with
+# its own kernel, so the LXC-only systemd sandbox relaxations are not applied to it. packaging/vm/build.sh sets it.
+ARG TEMPLATE_KIND=lxc
 ENV DEBIAN_FRONTEND=noninteractive
 # What a Proxmox container needs from the inside: an init system, a DHCP client and ifupdown (Proxmox writes /etc/network/interfaces),
 # login tools for setting the root password, and SSH for key-based access. Also what the installer and `flowscope-ctl update` use.
@@ -50,7 +53,8 @@ RUN if [ "$STORAGE_BACKEND" = clickhouse ]; then \
 COPY . /tmp/flowscope-src
 # the commit the template is built from (build.sh passes it; the source copy has no .git folder)
 ARG GIT_SHA=unknown
-RUN FLOWSCOPE_REVISION=$GIT_SHA FLOWSCOPE_TEMPLATE_BUILD=1 FLOWSCOPE_STORAGE=$STORAGE_BACKEND FLOWSCOPE_NODE=system FLOWSCOPE_SKIP_APT=1 FLOWSCOPE_SKIP_SYSTEMD=1 FLOWSCOPE_LXC=1 \
+RUN if [ "$TEMPLATE_KIND" = lxc ]; then export FLOWSCOPE_LXC=1; fi; \
+    FLOWSCOPE_REVISION=$GIT_SHA FLOWSCOPE_TEMPLATE_BUILD=1 FLOWSCOPE_STORAGE=$STORAGE_BACKEND FLOWSCOPE_NODE=system FLOWSCOPE_SKIP_APT=1 FLOWSCOPE_SKIP_SYSTEMD=1 \
     FLOWSCOPE_SRC=/tmp/flowscope-src bash /tmp/flowscope-src/packaging/proxmox/install.sh \
  && rm -rf /tmp/flowscope-src /root/.npm
 
