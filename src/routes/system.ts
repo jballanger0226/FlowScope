@@ -1,5 +1,6 @@
 import type { App } from '../app.js';
 import { VERSION } from '../app.js';
+import { BUILD, shortRevision } from '../buildinfo.js';
 import { appByName, APPS } from '../query/apps.js';
 
 export function registerSystem(app: App): void {
@@ -10,7 +11,7 @@ export function registerSystem(app: App): void {
     const col = app.collect();
     const devs = app.devices.list();
     c.json({
-      version: VERSION, uptimeSec: Math.floor((Date.now() - app.startedAt) / 1000), demo: app.demo,
+      version: VERSION, revision: shortRevision(BUILD.revision), uptimeSec: Math.floor((Date.now() - app.startedAt) / 1000), demo: app.demo,
       collect: col, collecting: app.collecting(),
       flow: { packets: app.collector.stats.packets, records: app.collector.stats.records, errors: app.collector.stats.errors, dropped: app.collector.droppedRecords, exporters: app.collector.exporters.size },
       snmp: { devices: devs.length, ok: devs.filter(d => d.status === 'ok').length, failing: devs.filter(d => d.status === 'error').length, paused: devs.filter(d => d.status === 'paused').length },

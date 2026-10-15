@@ -21,6 +21,7 @@ cd "$repo"
 [ -f package.json ] || die "package.json not found in $repo"
 version="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' package.json | head -n1)"
 [ -n "$version" ] || die "Could not read the version from package.json."
+rev="${GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || true)}"; rev="${rev:-unknown}"
 OUT="${OUT:-template-out}"; PLATFORM="${PLATFORM:-linux/amd64}"
 case "$PLATFORM" in linux/amd64) arch=amd64;; linux/arm64) arch=arm64;; *) die "PLATFORM must be linux/amd64 or linux/arm64";; esac
 STORAGE_BACKEND="${STORAGE_BACKEND:-clickhouse}"
@@ -29,7 +30,7 @@ name="debian-12-flowscope${variant}_${version}_${arch}.tar.zst"
 mkdir -p "$OUT"
 
 say "Building the root filesystem (Debian 12 + FlowScope $version, $PLATFORM, storage: $STORAGE_BACKEND)"
-DOCKER_BUILDKIT=1 docker build --platform "$PLATFORM" --build-arg "STORAGE_BACKEND=$STORAGE_BACKEND" -f packaging/lxc-template/Dockerfile \
+DOCKER_BUILDKIT=1 docker build --platform "$PLATFORM" --build-arg "STORAGE_BACKEND=$STORAGE_BACKEND" --build-arg "GIT_SHA=$rev" -f packaging/lxc-template/Dockerfile \
   --output "type=tar,dest=$OUT/rootfs.tar" .
 
 say "Compressing to $OUT/$name"

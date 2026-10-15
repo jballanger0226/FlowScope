@@ -116,6 +116,16 @@ elif [ -n "${FLOWSCOPE_REPO:-}" ]; then
 else
   die "No source given. Set FLOWSCOPE_SRC (a tarball or checkout) or FLOWSCOPE_REPO (owner/name)."
 fi
+# Which commit this is, for `flowscope version`: given by the caller, else asked of git, else read from the name of the GitHub tarball folder
+# (owner-repo-<commit>). The build below runs on a copy with no .git folder, so it has to be settled here.
+if [ -z "${FLOWSCOPE_REVISION:-}" ] && command -v git >/dev/null 2>&1 && [ -d "$src/.git" ]; then
+  FLOWSCOPE_REVISION="$(git -C "$src" rev-parse HEAD 2>/dev/null || true)"
+  [ -n "$FLOWSCOPE_REVISION" ] && [ -n "$(git -C "$src" status --porcelain --untracked-files=no 2>/dev/null)" ] && FLOWSCOPE_REVISION="$FLOWSCOPE_REVISION-dirty"
+fi
+if [ -z "${FLOWSCOPE_REVISION:-}" ] && [ -n "${FLOWSCOPE_REPO:-}" ]; then
+  FLOWSCOPE_REVISION="$(basename "$src" | sed -n 's/.*-\([0-9a-f]\{7,40\}\)$/\1/p')"
+fi
+export FLOWSCOPE_REVISION="${FLOWSCOPE_REVISION:-unknown}"
 [ -f "$src/package.json" ] && [ -f "$src/packaging/linux/flowscope.service" ] || die "$src does not look like a FlowScope checkout."
 # shellcheck source=../linux/clickhouse-setup.sh
 . "$src/packaging/linux/clickhouse-setup.sh"

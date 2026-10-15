@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { App } from '../app.js';
 import { VERSION } from '../app.js';
+import { BUILD } from '../buildinfo.js';
 import { HttpError } from '../server/http.js';
 import { AuthError, ROLE_RANK } from '../auth/service.js';
 import { CertError } from '../tls/manager.js';
@@ -113,7 +114,7 @@ export function registerAdmin(app: App): void {
     let free: number | null = null;
     try { const st = fs.statfsSync(app.cfg.dataDir); free = Number(st.bavail) * Number(st.bsize); } catch { /* not available everywhere */ }
     c.json({
-      version: VERSION, node: process.version, platform: `${process.platform} ${process.arch}`, os: `${os.type()} ${os.release()}`, container: inContainer(),
+      version: VERSION, revision: BUILD.revision, builtAt: BUILD.builtAt, node: process.version, platform: `${process.platform} ${process.arch}`, os: `${os.type()} ${os.release()}`, container: inContainer(),
       dataDir: path.resolve(app.cfg.dataDir), freeBytes: free, ports: app.ports, flowPorts: app.collector.boundPorts, tls: app.cfg.tls, store: stats,
       uptimeSec: Math.floor((Date.now() - app.startedAt) / 1000), memoryMb: Math.round(process.memoryUsage().rss / 1048576), demo: app.demo
     });

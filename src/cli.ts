@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { loadConfig, defaultDataDir, applyDemoDefaults } from './config.js';
 import { VERSION } from './app.js';
+import { describeVersion } from './buildinfo.js';
 
 const HELP = `FlowScope ${VERSION}: NetFlow / IPFIX collector with SNMP link and QoS monitoring
 
@@ -69,7 +70,7 @@ async function main(): Promise<number> {
     }
     case 'healthcheck': return healthcheck();
     case 'reset-password': return resetPassword(args[1]);
-    case 'version': case '--version': case '-v': console.log(VERSION); return 0;
+    case 'version': case '--version': case '-v': console.log(describeVersion(VERSION)); return 0;
     case 'help': case '--help': case '-h': console.log(HELP); return 0;
     default: console.error(`Unknown command "${cmd}"\n\n${HELP}`); return 2;
   }
