@@ -45,6 +45,8 @@ let ifSearch = '';
 let hostsRes: HostsRes | null = null; let hostsLoading = false; let hostsError = '';
 let findQ = ''; let found: Located | null = null; let findError = ''; let finding = false;
 let readingHosts = false; let readMsg = '';
+interface ArpRow { ip: string; mac: string; ifIndex: number; ifName: string; lastSeen: number }
+let arpRes: { rows: ArpRow[]; readAt: number | null } | null = null; let arpQ = '';
 let nbRes: NbRes | null = null; let nbError = ''; let nbLoading = false;
 let wlan: WlanRes | null = null; let wlanError = ''; let wlanLoading = false; let clientFilter = '';
 let devId = 0; let ifIndex = 0;
@@ -113,7 +115,7 @@ function select_(d: number, i: number, tab?: DevTab): void {
   if (d !== prevDev) { devTab = 'overview'; graphZoom = null; resZoom = null; quality = null; }
   if (tab) devTab = tab;
   devId = d; ifIndex = i; series = null; quality = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
-  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); void loadResHist(); healthRes = null; void loadHealth(); }
+  if (d !== prevDev) { arpRes = null; arpQ = ''; void loadArp(); nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); void loadResHist(); healthRes = null; void loadHealth(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
@@ -178,6 +180,14 @@ async function loadStreams(): Promise<void> {
   streamsLoading = false; redraw();
 }
 
+let aseq = 0;
+async function loadArp(): Promise<void> {
+  if (!devId) return;
+  const my = ++aseq, d = devId;
+  try { const r = await get<{ rows: ArpRow[]; readAt: number | null }>('/api/links/arp' + qs({ dev: d })); if (my === aseq && d === devId) arpRes = r; } catch { if (my === aseq) arpRes = null; }
+  if (my === aseq) redraw();
+}
+
 let nseq = 0;
 async function loadNeighbors(): Promise<void> {
   if (!devId) return;
@@ -218,7 +228,7 @@ async function readHostsNow(): Promise<void> {
   try {
     const r = await post<{ macs: number; arp: number; neighbors: number; note: string }>(`/api/devices/${devId}/read-hosts`, {});
     readMsg = `Read ${num(r.macs)} MAC addresses, ${num(r.arp)} ARP entries and ${num(r.neighbors)} neighbours.${r.note ? ' ' + r.note : ''}`;
-    await load(true); await loadHosts(); await loadNeighbors(); await loadWlan(true);
+    await load(true); await loadHosts(); await loadNeighbors(); await loadArp(); await loadWlan(true);
   } catch (e) { readMsg = (e as Error).message; }
   readingHosts = false; redraw();
 }
@@ -366,6 +376,28 @@ function nbCell(ns: Neighbor[]): VNode {
 }
 
 /** Every CDP / LLDP neighbour of the device by port; a neighbour that is a polled device opens in this page. */
+/** The device's ARP / neighbour cache: which MAC address each IP address was seen at, and on which interface. Shown for routers and firewalls, and for any device that has entries. */
+function arpPanel(dev: Dev): VNode | null {
+  const rows = arpRes?.rows ?? [];
+  if (!rows.length && dev.role !== 'router' && dev.role !== 'firewall') return null;
+  const q = arpQ.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const shown = rows.filter(r => !q.length || q.every(t => `${r.ip} ${r.mac} ${r.ifName}`.toLowerCase().includes(t)));
+  const cols = 'minmax(150px,1.2fr) 150px minmax(110px,1fr) 110px';
+  return h('div', { class: 'col', style: 'gap:8px' },
+    h('div', { class: 'row', style: 'justify-content:space-between' },
+      h('div', { class: 'col', style: 'gap:2px' }, h('b', null, 'ARP and neighbour cache'),
+        h('span', { class: 'muted', style: 'font-size:12px' }, rows.length ? `${num(rows.length)} entries from ${dev.name}, last read ${arpRes?.readAt ? ago(arpRes.readAt) : 'not yet'} with the host tables (IP-MIB ipNetToPhysicalTable, or ipNetToMediaTable on older agents).`
+          : `${dev.name} has not returned any ARP entries. Use "Read tables now", or "Check what this device publishes" on the SNMP devices tab to see whether it publishes IP-MIB.`)),
+      rows.length > 8 ? textInput(arpQ, v => { arpQ = v; redraw(); }, { placeholder: 'Search address, MAC or interface', aria: 'Search the ARP cache', width: '260px' }) : null),
+    rows.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:560px` },
+      h('div', { class: 'tr head' }, ...['IP address', 'MAC address', 'Interface', 'Last seen'].map(t => h('span', null, t))),
+      h('div', { class: 'scroll', style: 'max-height:360px' }, shown.map(r => h('div', { key: r.ip + r.mac + r.ifIndex, class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, r.ip), h('span', { class: 'mono', style: 'font-size:12px' }, r.mac),
+        r.ifName ? h('button', { type: 'button', class: 'lnk', style: 'text-align:left', onclick: () => select_(dev.id, r.ifIndex, 'interfaces') }, r.ifName) : h('span', { class: 'dim' }, '—'),
+        h('span', { class: 'muted' }, ago(r.lastSeen))))),
+      !shown.length ? empty('No entry matches that search.') : null)) : null);
+}
+
 function neighborsPanel(dev: Dev): VNode {
   const ports = nbRes?.ports ?? [];
   const cols = 'minmax(90px,0.8fr) minmax(170px,1.4fr) minmax(130px,1fr) minmax(130px,1fr) 90px minmax(150px,0.9fr)';
@@ -792,7 +824,7 @@ function tabBody(dev: Dev, tab: DevTab): VNode {
       resourcesPanel(dev), healthSummary(healthRes))
     : tab === 'interfaces' ? ifTable(dev)
     : tab === 'hardware' ? hardwarePanel({ data: healthRes })
-    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes }), neighborsPanel(dev))
+    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes }), arpPanel(dev), neighborsPanel(dev))
     : wlanPanel(dev);
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:14px' }, body);
 }

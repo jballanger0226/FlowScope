@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runChecks, cleanOid, formatValue } from '../src/snmp/diagnose.js';
+import { runChecks, cleanOid, expectFor, formatValue, vendorOf } from '../src/snmp/diagnose.js';
 import { OID } from '../src/snmp/oids.js';
 import type { SnmpValue } from '../src/snmp/client.js';
 
 /** A device made of whole columns: the walker returns the rows registered under each OID, or an empty table. */
-function fake(tables: Record<string, Record<string, SnmpValue>>, fail: string[] = []) {
-  return { column: async (oid: string) => { if (fail.includes(oid)) throw new Error('No response from the device (timeout).'); return new Map(Object.entries(tables[oid] ?? {})); } };
+function fake(tables: Record<string, Record<string, SnmpValue>>, fail: string[] = [], scalars: Record<string, SnmpValue> = {}, asked: string[] = []) {
+  return {
+    column: async (oid: string) => { asked.push(oid); if (fail.includes(oid)) throw new Error('No response from the device (timeout).'); return new Map(Object.entries(tables[oid] ?? {})); },
+    get: async (oids: string[]) => { asked.push(...oids); return new Map(oids.filter(o => scalars[o] !== undefined).map(o => [o, { oid: o, type: 2, value: scalars[o] }])) as never; }
+  };
 }
 const byId = (cs: Awaited<ReturnType<typeof runChecks>>) => Object.fromEntries(cs.map(c => [c.id, c]));
 
@@ -16,8 +19,8 @@ test('a firewall that publishes no LLDP is reported as missing, with the AgentX 
   assert.equal(c.lldp.state, 'fail');
   assert.match(c.lldp.hint ?? '', /AgentX/);
   assert.match(c.lldp.hint ?? '', /\.1\.0\.8802/);
-  assert.equal(c.cdp.state, 'na');
-  assert.equal(c.mac.state, 'na');          // a router is not expected to have a MAC table
+  assert.equal(c.cdp, undefined);           // only Cisco devices publish CDP, so it is not asked for elsewhere
+  assert.equal(c.mac, undefined);           // a router is not expected to have a MAC table
   assert.equal(c.arp.state, 'warn');        // but a router is expected to have an ARP cache
 });
 
@@ -76,4 +79,63 @@ test('LLDP missing while lldpd runs on the device: named as an AgentX gap, with 
   assert.doesNotMatch(sw.lldp.detail, /lldpd is not running/, 'a switch is not expected to run lldpd');
   const noTable = byId(await runChecks(fake({ [OID.ifName]: { '1': 'igb0' } }, [HR_NAME]), f));
   assert.equal(noTable.lldp.state, 'fail', 'an unreadable process table does not break the check');
+});
+
+const OIDS = { ospf: '1.3.6.1.2.1.14.10.1.6', juniper: '1.3.6.1.4.1.2636.', huawei: '1.3.6.1.4.1.2011.', h3c: '1.3.6.1.4.1.25506.', fortinet: '1.3.6.1.4.1.12356.', pan: '1.3.6.1.4.1.25461.', aruba: '1.3.6.1.4.1.14823.', cisco: '1.3.6.1.4.1.9.' };
+
+test('a Cisco switch is only asked for what a Cisco switch has: no Juniper, Huawei, Fortinet or Wi-Fi tables', async () => {
+  const asked: string[] = [];
+  const cs = await runChecks(fake({ [OID.ifName]: { '1': 'Gi1/0/1' } }, [], {}, asked), { role: 'switch', cisco: true, objectId: '1.3.6.1.4.1.9.1.2504', descr: 'Cisco IOS Software, Catalyst L3 Switch' });
+  for (const v of ['juniper', 'huawei', 'h3c', 'fortinet', 'pan', 'aruba'] as const) assert.equal(asked.some(o => o.startsWith(OIDS[v])), false, v);
+  assert.ok(asked.some(o => o.startsWith(OIDS.cisco)), 'Cisco MIBs were asked for');
+  const ids = cs.map(c => c.id);
+  for (const id of ['cdp', 'mac', 'vlans', 'sensors', 'poe', 'stp', 'quality', 'qos', 'resources']) assert.ok(ids.includes(id), id);
+  assert.ok(!ids.includes('wifi'), 'a switch is not asked about Wi-Fi');
+  const c = byId(cs);
+  assert.equal(c.sensors.state, 'warn', 'a Cisco switch should have sensors');
+  assert.match(c.sensors.hint ?? '', /CISCO-ENTITY-SENSOR/);
+  assert.equal(c.poe.state, 'na'); assert.equal(c.qos.state, 'na'); assert.match(c.qos.title, /Cisco CBQoS/);
+  assert.equal(c.resources.state, 'fail'); assert.match(c.resources.hint ?? '', /CISCO-PROCESS-MIB/);
+});
+
+test('a Juniper router is asked for Junos CoS and its own resource MIB, not Cisco CDP or CBQoS', async () => {
+  const asked: string[] = [];
+  const cs = await runChecks(fake({}, [], {}, asked), { role: 'router', cisco: false, objectId: '1.3.6.1.4.1.2636.1.1.1.2.21', descr: 'Juniper Networks MX204' });
+  const ids = cs.map(c => c.id);
+  assert.ok(!ids.includes('cdp') && !ids.includes('mac') && !ids.includes('vlans') && !ids.includes('poe') && !ids.includes('stp') && !ids.includes('wifi'));
+  assert.ok(ids.includes('ospf') && ids.includes('bgp') && ids.includes('arp'));
+  const c = byId(cs);
+  assert.match(c.qos.title, /Juniper CoS/); assert.match(c.resources.hint ?? '', /jnxOperatingTable/);
+  assert.equal(asked.some(o => o.startsWith('1.3.6.1.4.1.9.')), false, 'no Cisco MIBs');
+  assert.equal(c.arp.state, 'warn');
+});
+
+test('an OPNsense firewall (net-snmp) is checked for UCD resources, ARP and link counters, and not for sensors, PoE, spanning tree or switch tables', async () => {
+  const cs = await runChecks(fake({ [OID.ifName]: { '1': 'igb0' }, [OID.ipNetToMediaPhysAddress]: { '1.10.0.0.5': Buffer.from([0, 1, 2, 3, 4, 5]) }, '1.3.6.1.2.1.2.2.1.14': { '1': 0 }, '1.3.6.1.2.1.31.1.1.1.3': { '1': 5 } }, [],
+    { '1.3.6.1.2.1.25.1.1.0': 8640000, '1.3.6.1.4.1.2021.11.11.0': 90, '1.3.6.1.4.1.2021.4.5.0': 1000000, '1.3.6.1.4.1.2021.4.6.0': 600000 }),
+    { role: 'firewall', cisco: false, objectId: '1.3.6.1.4.1.8072.3.2.8', descr: 'FreeBSD OPNsense.local 14.1 amd64' });
+  const c = byId(cs), ids = cs.map(x => x.id);
+  assert.equal(c.resources.state, 'ok'); assert.match(c.resources.detail, /CPU 10%/); assert.match(c.resources.detail, /UCD-SNMP-MIB/);
+  assert.equal(c.arp.state, 'ok'); assert.equal(c.arp.count, 1);
+  assert.equal(c.quality.state, 'ok', 'a net-snmp agent has no EtherLike-MIB, which is normal');
+  for (const id of ['sensors', 'poe', 'stp', 'mac', 'vlans', 'cdp', 'wifi']) assert.ok(!ids.includes(id), id);
+  assert.ok(ids.includes('ospf') && ids.includes('bgp'));
+  assert.equal(ids.includes('qos'), false, 'DiffServ is only listed when the device publishes it');
+});
+
+test('an empty ARP cache on a firewall is a warning, since a firewall is the router; an access point is asked for Wi-Fi tables and fails without them', async () => {
+  assert.equal(byId(await runChecks(fake({ [OID.ifName]: { '1': 'igb0' } }), { role: 'firewall', cisco: false, objectId: '1.3.6.1.4.1.8072.3.2.8', descr: 'FreeBSD' })).arp.state, 'warn');
+  const ap = byId(await runChecks(fake({ [OID.ifName]: { '1': 'eth0' } }), { role: 'ap', cisco: false, objectId: '1.3.6.1.4.1.14823.1.1.1', descr: 'ArubaOS Instant', ifaces: [{ index: 1, name: 'eth0' }] }));
+  assert.equal(ap.wifi.state, 'fail'); assert.match(ap.wifi.hint ?? '', /AI-AP-MIB/);
+  for (const id of ['sensors', 'poe', 'stp', 'ospf', 'bgp', 'qos', 'mac', 'cdp']) assert.equal(ap[id], undefined, id);
+});
+
+test('checks are listed by group, and vendors are told from the sysObjectID or the description', async () => {
+  const cs = await runChecks(fake({ [OID.ifName]: { '1': 'a' } }), { role: 'switch', cisco: true, objectId: '1.3.6.1.4.1.9.1.1' });
+  const order = ['basics', 'neighbours', 'hosts', 'hardware', 'routing', 'quality', 'wifi'];
+  assert.deepEqual(cs.map(c => order.indexOf(c.group)), [...cs.map(c => order.indexOf(c.group))].sort((a, b) => a - b));
+  assert.equal(vendorOf('1.3.6.1.4.1.12356.101.1.1', ''), 'fortinet');
+  assert.equal(vendorOf('', 'FreeBSD pfSense 2.7'), 'netsnmp');
+  assert.equal(vendorOf('1.3.6.1.4.1.99999.1', 'Some box'), 'other');
+  assert.equal(expectFor({ role: 'switch', cisco: false, objectId: '1.3.6.1.4.1.2011.2.23.1' }).sensors, 'must');
 });

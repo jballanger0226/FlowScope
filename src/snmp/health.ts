@@ -163,7 +163,9 @@ export async function readSensors(c: SnmpClient, objectId = ''): Promise<Sensor[
   let sensors: Sensor[] = [];
   if (cisco) sensors = await entitySensors(col, CSENS as unknown as typeof ESENS, names, true, 'cisco');
   if (!sensors.length) sensors = await entitySensors(col, ESENS, names, false, 'ent');
-  if (!sensors.length && !cisco) sensors = await entitySensors(col, CSENS as unknown as typeof ESENS, names, true, 'cisco');
+  // Cisco's sensor MIB is also tried on a device of unknown make, but not on one known to be another vendor's
+  const otherVendor = /^1\.3\.6\.1\.4\.1\.(2636|2011|25506|11|12356|25461|30065|8072|14823|41112|25053|14988)\./.test(objectId);
+  if (!sensors.length && !cisco && !otherVendor) sensors = await entitySensors(col, CSENS as unknown as typeof ESENS, names, true, 'cisco');
   // Cisco's older MIB covers fans and supplies on boxes whose ENTITY-SENSOR has temperatures and optics only
   if (cisco && !sensors.some(s => s.kind === 'fan' || s.kind === 'power')) sensors = [...sensors, ...(await envmonSensors(col)).filter(s => !(sensors.some(x => x.kind === 'temperature') && s.kind === 'temperature'))];
   if (!sensors.length) {

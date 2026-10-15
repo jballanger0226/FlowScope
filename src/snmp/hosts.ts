@@ -176,6 +176,11 @@ export class HostTracker {
   }
 
   /** Hosts learned on one port, with the IP addresses their MACs have in any ARP table. */
+  /** The ARP and IPv6 neighbour cache last read from one device (a router or firewall holds the addresses of everything on its networks). */
+  arpOf(devId: number, limit = 2000): { ip: string; mac: string; ifIndex: number; lastSeen: number }[] {
+    return (this.db.prepare('SELECT ip, mac, if_index AS ifIndex, MAX(last_seen) AS lastSeen FROM arp WHERE dev_id = ? GROUP BY ip, mac, if_index ORDER BY if_index, ip LIMIT ?').all(devId, limit) as unknown as { ip: string; mac: string; ifIndex: number; lastSeen: number }[]);
+  }
+
   portHosts(devId: number, ifIndex: number, limit = 200): PortHost[] {
     const since = this.activeSince();
     const rows = this.db.prepare('SELECT mac, vlan, first_seen AS firstSeen, last_seen AS lastSeen, since FROM fdb WHERE dev_id = ? AND if_index = ? ORDER BY last_seen DESC, mac LIMIT ?').all(devId, ifIndex, limit) as unknown as { mac: string; vlan: number; firstSeen: number; lastSeen: number; since: number }[];

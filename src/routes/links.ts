@@ -90,6 +90,15 @@ export function registerLinks(app: App): void {
     });
   });
 
+  // The ARP cache of a device, as last read, with the interface each entry was learned on
+  w.get('/api/links/arp', 'ro', c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9);
+    const d = app.devices.row(dev);
+    if (!d) throw new HttpError(404, 'No such device');
+    const names = new Map(app.devices.interfaces(dev).map(i => [i.ifIndex, i.name]));
+    c.json({ rows: app.hosts.arpOf(dev).map(r => ({ ...r, ifName: names.get(r.ifIndex) ?? '' })), readAt: d.hosts_at });
+  });
+
   // Wi-Fi state of an access point: the AP itself, its radios, its SSIDs and the clients connected to it
   w.get('/api/links/wlan', 'ro', c => {
     const dev = int(c.query.get('dev'), 0, 0, 1e9);

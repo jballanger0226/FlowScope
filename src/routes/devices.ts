@@ -4,7 +4,7 @@ import { DeviceError } from '../snmp/devices.js';
 import { CredError, type CredInput } from '../snmp/creds.js';
 import { TargetPolicy } from '../snmp/allowed.js';
 import { attachment, int, str, stamp } from './util.js';
-import { runChecks, cleanOid } from '../snmp/diagnose.js';
+import { runChecks, cleanOid, vendorOf } from '../snmp/diagnose.js';
 import { WalkJobs, WalkBusy, jobView, filterRows, exportRows, EXPORT_FORMATS, type ExportFormat } from '../snmp/walkjobs.js';
 
 /** Turns the service-level errors into HTTP errors with the right status. */
@@ -124,9 +124,9 @@ export function registerDevices(app: App): void {
   w.post('/api/devices/:id/check', 'snmp', async c => {
     const r = await withDevice(c, async (d, cl) => {
       try { await cl.get(['1.3.6.1.2.1.1.2.0']); } catch (e) { throw new HttpError(502, (e as Error).message); }
-      const checks = await runChecks(cl, { role: d.role ?? 'device', cisco: (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.') });
+      const checks = await runChecks(cl, { role: d.role ?? 'device', cisco: (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.'), objectId: d.sys_object_id ?? '', descr: d.sys_descr ?? '', ifaces: app.devices.interfaces(d.id).map(i => ({ index: i.ifIndex, name: i.name })) });
       app.log.audit(who(c), `Checked what ${d.name} publishes over SNMP`);
-      return { device: d.name, checkedAt: Date.now(), checks };
+      return { device: d.name, checkedAt: Date.now(), checks, vendor: vendorOf(d.sys_object_id ?? '', d.sys_descr ?? ''), role: d.role ?? 'device' };
     });
     c.json(r);
   });
