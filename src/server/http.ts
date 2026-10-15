@@ -226,7 +226,8 @@ export class WebServer {
     }
     const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
     res.setHeader('ETag', etag);
-    res.setHeader('Cache-Control', file.endsWith('index.html') ? 'no-cache' : 'public, max-age=3600');
+    // The script and style files have fixed names, so a browser that kept them for an hour would run the old interface after an update. no-cache means "ask first": the ETag makes that a cheap 304.
+    res.setHeader('Cache-Control', 'no-cache');
     if (req.headers['if-none-match'] === etag) { res.writeHead(304); res.end(); return; }
     // Files are read and compressed once per version of the file (size and modification time), not once per request.
     let hit = this.statics.get(file);

@@ -70,5 +70,6 @@ test('static files are compressed once and served again from memory, and a chang
     const idx = await raw(s.base + '/index.html');
     assert.equal((await raw(s.base + '/index.html', { 'if-none-match': idx.headers.etag as string })).status, 304);
     assert.ok(tag);
+    assert.equal(first.headers['cache-control'], 'no-cache', 'scripts are revalidated, so an update shows at once');
   } finally { await s.done(); }
 });
