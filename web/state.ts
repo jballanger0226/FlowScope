@@ -4,7 +4,7 @@ export interface Caps { flows: boolean; links: boolean; reports: boolean; storag
 export interface Me { username: string; role: 'ro' | 'snmp' | 'admin'; source: string; csrf: string | null; mustChange: boolean; caps: Caps; collect: { flow: boolean; snmp: boolean; flowAt: number; snmpAt: number }; demo: boolean; idleMinutes: number }
 export interface Status { version: string; revision: string; uptimeSec: number; demo: boolean; collect: Me['collect']; collecting: boolean; flow: { packets: number; records: number; errors: number; dropped: number; exporters: number }; snmp: { devices: number; ok: number; failing: number; paused: number }; storeNote: string | null }
 
-export type View = 'explorer' | 'ports' | 'links' | 'devices' | 'storage' | 'reports' | 'admin' | 'account';
+export type View = 'overview' | 'explorer' | 'ports' | 'links' | 'devices' | 'storage' | 'reports' | 'admin' | 'account';
 
 export const session = {
   csrf: '' as string,
@@ -12,7 +12,7 @@ export const session = {
   status: null as Status | null,
   meta: null as { vlans: { id: number; name: string }[]; devices: { id: number; name: string; ip: string; role: string }[]; apps: { name: string; ports: number[] }[]; examples: string[] } | null,
   authCfg: null as { provider: string; saml: boolean; fallback: boolean; demo: boolean } | null,
-  view: 'explorer' as View,
+  view: 'overview' as View,
   params: new URLSearchParams(),
   onExpired: null as null | (() => void),
   redraw: (() => undefined) as () => void
@@ -29,7 +29,7 @@ export function go(view: View, params: Record<string, string | number | undefine
 
 export function parseHash(): { view: View; params: URLSearchParams } {
   const m = /^#\/([a-z]+)(?:\?(.*))?$/.exec(location.hash);
-  const views: View[] = ['explorer', 'ports', 'links', 'devices', 'storage', 'reports', 'admin', 'account'];
-  const v = (m && views.includes(m[1] as View) ? m[1] : 'explorer') as View;
+  const views: View[] = ['overview', 'explorer', 'ports', 'links', 'devices', 'storage', 'reports', 'admin', 'account'];
+  const v = (m && views.includes(m[1] as View) ? m[1] : 'overview') as View;
   return { view: v, params: new URLSearchParams(m?.[2] ?? '') };
 }

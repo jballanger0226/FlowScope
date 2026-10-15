@@ -28,6 +28,49 @@ export const MIBS = [
 
 interface Event { ts0: number; ts1: number; devId: number; dev: string; ifIndex: number; ifName: string; kind: 'drop' | 'util' | 'errors'; cls?: string; peak: number; text: string; severity: 'warn' | 'bad' }
 
+/** Interfaces and QoS classes for every polled device, with the latest rates. The Network health page and the Overview both read this. */
+export async function linkDevices(app: App, minutes: number) {
+  const since = Date.now() - minutes * 60_000;
+  const [ifl, cll] = await Promise.all([app.store.ifLatest(since), app.store.classLatest(since)]);
+  const ifBy = new Map<string, IfLatest>(ifl.map(i => [`${i.dev}/${i.ifIndex}`, i]));
+  const clBy = new Map<string, ClassLatest[]>();
+  for (const k of cll) { const key = `${k.dev}/${k.ifIndex}`; const a = clBy.get(key); if (a) a.push(k); else clBy.set(key, [k]); }
+  const al = app.settings.get('alerts');
+  const counts = app.hosts.portCounts();
+  const devices = app.devices.list().map(d => ({
+    id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
+    qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
+    interfaces: app.devices.interfaces(d.id).map(i => {
+      const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
+      // VLAN and SVI interfaces carry routed traffic for a whole subnet and are never listed under "needs attention"
+      const vlanIf = isVlanInterface(i);
+      return {
+        ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
+        portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList,
+        isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0,
+        utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
+        classes: i.classes.map(def => {
+          const k = cls.find(x => x.cls === def.cls);
+          return { cls: def.cls, label: def.cls.replace(/^in:/, ''), dir: def.cls.startsWith('in:') ? 'in' : 'out', dscps: def.dscps, bw: def.bw, queue: def.queue, dropPct: k?.dropPct ?? null, dropPkts: k?.dropPkts ?? 0, dropBytes: k?.dropBytes ?? 0, sentBps: k?.sentBps ?? null, qdepth: k?.qdepth ?? null };
+        }),
+        worstDropPct: cls.length ? Math.max(...cls.map(x => x.dropPct)) : null,
+        flagged: !vlanIf && ((!!l && Math.max(l.utilIn, l.utilOut) >= al.util) || cls.some(x => x.dropPct >= al.drop))
+      };
+    })
+  }));
+  return { devices, thresholds: al };
+}
+
+/** Sensors, PoE, spanning tree, routing neighbours and the link quality of each interface of one device, as last read. */
+export function linkHealth(app: App, dev: number) {
+  const ifs = new Map(app.devices.interfaces(dev).map(i => [i.ifIndex, i]));
+  const extra = [...app.devices.ifExtra(dev)].map(([ifIndex, x]) => {
+    const i = ifs.get(ifIndex);
+    return { ifIndex, ...x, warnings: i ? linkWarnings(x, i.oper, i.speedMbps) : [] };
+  });
+  return { health: app.devices.health(dev), ifExtra: extra };
+}
+
 export function registerLinks(app: App): void {
   const w = app.web;
   const alerts = () => app.settings.get('alerts');
@@ -35,47 +78,15 @@ export function registerLinks(app: App): void {
   // Interfaces and QoS classes for every polled device, with the latest rates
   w.get('/api/links', 'ro', async c => {
     const minutes = int(c.query.get('minutes'), 10, 1, 1440);
-    const since = Date.now() - minutes * 60_000;
-    const [ifl, cll] = await Promise.all([app.store.ifLatest(since), app.store.classLatest(since)]);
-    const ifBy = new Map<string, IfLatest>(ifl.map(i => [`${i.dev}/${i.ifIndex}`, i]));
-    const clBy = new Map<string, ClassLatest[]>();
-    for (const k of cll) { const key = `${k.dev}/${k.ifIndex}`; const a = clBy.get(key); if (a) a.push(k); else clBy.set(key, [k]); }
-    const al = alerts();
-    const counts = app.hosts.portCounts();
-    const devices = app.devices.list().map(d => ({
-      id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
-      qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
-      interfaces: app.devices.interfaces(d.id).map(i => {
-        const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
-        // VLAN and SVI interfaces carry routed traffic for a whole subnet and are never listed under "needs attention"
-        const vlanIf = isVlanInterface(i);
-        return {
-          ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
-          portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList,
-          isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0,
-          utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
-          classes: i.classes.map(def => {
-            const k = cls.find(x => x.cls === def.cls);
-            return { cls: def.cls, label: def.cls.replace(/^in:/, ''), dir: def.cls.startsWith('in:') ? 'in' : 'out', dscps: def.dscps, bw: def.bw, queue: def.queue, dropPct: k?.dropPct ?? null, dropPkts: k?.dropPkts ?? 0, dropBytes: k?.dropBytes ?? 0, sentBps: k?.sentBps ?? null, qdepth: k?.qdepth ?? null };
-          }),
-          worstDropPct: cls.length ? Math.max(...cls.map(x => x.dropPct)) : null,
-          flagged: !vlanIf && ((!!l && Math.max(l.utilIn, l.utilOut) >= al.util) || cls.some(x => x.dropPct >= al.drop))
-        };
-      })
-    }));
-    c.json({ devices, windowMinutes: minutes, thresholds: al, mibs: MIBS });
+    const r = await linkDevices(app, minutes);
+    c.json({ devices: r.devices, windowMinutes: minutes, thresholds: r.thresholds, mibs: MIBS });
   });
 
   // Sensors, PoE, spanning tree, routing neighbours and the link quality of each interface, as last read
   w.get('/api/links/health', 'ro', c => {
     const dev = int(c.query.get('dev'), 0, 0, 1e9);
     if (!app.devices.row(dev)) throw new HttpError(404, 'No such device');
-    const ifs = new Map(app.devices.interfaces(dev).map(i => [i.ifIndex, i]));
-    const extra = [...app.devices.ifExtra(dev)].map(([ifIndex, x]) => {
-      const i = ifs.get(ifIndex);
-      return { ifIndex, ...x, warnings: i ? linkWarnings(x, i.oper, i.speedMbps) : [] };
-    });
-    c.json({ health: app.devices.health(dev), ifExtra: extra });
+    c.json(linkHealth(app, dev));
   });
 
   // Hosts learned on one port (from the switch's MAC address table, with IP addresses from ARP) and what LLDP/CDP says is at the other end

@@ -13,7 +13,7 @@ interface ReportBody {
   q?: string; f2?: string; f3?: string; f4?: string; dims?: string[]; prefix?: number; bidir?: boolean; topN?: number; sortBy?: string; tier?: string; exporter?: string; format?: string; range?: string; from?: string | number; to?: string | number;
 }
 
-function chooseTier(app: App, range: TimeRange, want: string | undefined): ReportSpec['tier'] {
+export function chooseTier(app: App, range: TimeRange, want: string | undefined): ReportSpec['tier'] {
   if (want === 'raw' || want === 'm1' || want === 'h1' || want === 'd1') return want;
   const r = app.settings.get('retention'); const now = Date.now();
   if (range.from >= now - r.raw * 86400_000) return range.to - range.from <= 6 * 3600_000 ? 'raw' : 'm1';

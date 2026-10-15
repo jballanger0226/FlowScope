@@ -27,7 +27,7 @@ async function changePw(forced: boolean): Promise<void> {
       session.me.mustChange = false;
       const m = await get('/api/auth/me').catch(() => null);
       if (m) { session.me = m; session.csrf = m.csrf ?? r.csrf; }
-      location.hash = '#/explorer'; location.reload();
+      location.hash = '#/overview'; location.reload();
       return;
     }
   } catch (e) { pwOk = false; pwMsg = (e as Error).message; }
@@ -85,5 +85,5 @@ export function render(): VNode {
         tokens.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:1.2fr 80px 130px 110px 90px;--w:620px' },
           h('div', { class: 'tr head' }, ...['Name', 'Role', 'Created', 'Last used', ''].map(t => h('span', null, t))),
           tokens.map(t => h('div', { key: t.id, class: 'tr' }, h('span', null, t.name, me.role === 'admin' && t.username !== me.username ? h('span', { class: 'dim' }, ' · ' + t.username) : null), h('span', { class: 'muted' }, t.role), h('span', { class: 'mono', style: 'font-size:12px' }, stamp(t.createdAt).slice(0, 10)), h('span', { class: 'muted' }, ago(t.lastUsed)), btn('Revoke', { small: true, kind: 'danger', onclick: () => void revoke(t) }))))) : empty('You have no API tokens.')))),
-    btn('Back to the flow explorer', { kind: 'ghost', onclick: () => go('explorer') }));
+    btn('Back to the overview', { kind: 'ghost', onclick: () => go('overview') }));
 }
