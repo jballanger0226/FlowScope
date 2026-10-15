@@ -26,6 +26,7 @@ interface NbRes { ports: NbPort[]; readAt: number | null; note: string; tracking
 interface HostsRes { hosts: PortHost[]; neighbors: Neighbor[]; readAt: number | null; note: string; tracking: boolean }
 interface Attach { devId: number; dev: string; ifIndex: number; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; lastSeen: number; active: boolean; mac: string; confidence?: 'high' | 'medium' | 'low' }
 interface Located { query: string; ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
+type Conf = 'high' | 'medium' | 'low';
 interface StreamRow { id: string; srcIp: string; dstIp: string; sport: number; dport: number; app: string; appPort: number | null; protoName: string; bytes: number; qosChanged: boolean }
 
 let data: Overview | null = null; let loadError = ''; let loading = false;
@@ -241,7 +242,7 @@ function policyCell(i: Iface): VNode {
 }
 
 function ifTable(dev: Dev): VNode {
-  const cols = 'minmax(88px,0.8fr) minmax(120px,1fr) minmax(130px,1fr) minmax(140px,1.1fr) 52px 58px 118px 118px 64px minmax(84px,0.8fr)';
+  const cols = 'minmax(88px,0.8fr) minmax(120px,1fr) minmax(130px,1fr) minmax(140px,1.1fr) 52px 58px 118px 118px 64px minmax(84px,0.8fr) 70px';
   const nbOf = (ix: number): Neighbor[] => nbRes?.ports.find(p => p.ifIndex === ix)?.neighbors ?? [];
   const rows = filterIfaces(dev.interfaces);
   return h('div', { class: 'col', style: 'gap:8px' },
@@ -250,8 +251,8 @@ function ifTable(dev: Dev): VNode {
       ifSearch.trim() ? btn('Clear', { kind: 'ghost', small: true, onclick: () => { ifSearch = ''; redraw(); } }) : null,
       h('span', { class: 'muted', role: 'status', 'aria-live': 'polite' }, ifSearch.trim() ? `${rows.length} of ${dev.interfaces.length} interfaces` : `${dev.interfaces.length} interfaces`),
       h('span', { class: 'dim', style: 'font-size:12px' }, 'Words must all match. A number is a VLAN id; vlan:20 matches only VLANs.')),
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1150px` },
-      h('div', { class: 'tr head' }, ...['Interface', 'Description', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', 'In', 'Out', 'Discards', 'Service policy'].map(t => h('span', null, t))),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1230px` },
+      h('div', { class: 'tr head' }, ...['Interface', 'Description', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', 'In', 'Out', 'Discards', 'Service policy', 'Flows'].map(t => h('span', null, t))),
       h('div', { class: 'scroll' }, rows.map(i => h('div', { key: i.ifIndex, class: 'tr pick', 'aria-current': i.ifIndex === ifIndex ? 'true' : undefined, onclick: () => select_(dev.id, i.ifIndex) },
         h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex); } }, i.name), i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
         h('span', { class: 'muted' }, i.alias || '—'),
@@ -261,7 +262,8 @@ function ifTable(dev: Dev): VNode {
         h('span', null, i.oper === 'up' ? statusEl('ok', 'up') : statusEl(i.oper === 'down' ? 'bad' : 'off', i.oper)),
         utilCell(i.utilIn, i.inBps), utilCell(i.utilOut, i.outBps),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(i.disc + i.err)),
-        policyCell(i))),
+        policyCell(i),
+        h('span', null, btn('Flows', { small: true, kind: 'ghost', title: `Flows by port: the busiest flows entering or leaving ${i.name}`, aria: `Flows through ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); go('ports', { dev: dev.id, if: i.ifIndex }); } })))),
         !dev.interfaces.length ? empty('This device has not reported any interfaces yet.') : !rows.length ? empty('No interface matches that search.') : null))));
 }
 const shortName = (n: Neighbor): string => (n.name ? n.name.split('.')[0] || n.name : n.ip) || 'unnamed';
@@ -354,14 +356,31 @@ function locator(): VNode {
     h('p', { class: 'muted' }, 'Where is an IP or MAC address plugged in? Answered from the switches\' MAC address and ARP tables.'),
     h('div', { class: 'row', style: 'flex-wrap:nowrap' }, textInput(findQ, v => { findQ = v; }, { placeholder: '10.1.20.5 or aa:bb:cc:dd:ee:ff', aria: 'IP or MAC address to find', mono: true, onenter: () => void findHost() }), btn(finding ? '…' : 'Find', { kind: 'primary', disabled: finding || !findQ.trim(), onclick: () => void findHost() })),
     findError ? note(findError, 'bad', true) : null,
-    f ? h('div', { class: 'col', style: 'gap:6px' },
-      f.attach ? h('button', { type: 'button', class: 'cardbtn', onclick: () => select_(f.attach!.devId, f.attach!.ifIndex) },
-        h('span', { class: 't' }, `${f.attach.dev} · ${f.attach.ifName}`),
-        h('span', { class: 's' }, [f.attach.vlan ? `VLAN ${f.attach.vlan}` : null, `${f.attach.macCount} address${f.attach.macCount === 1 ? '' : 'es'} on the port`, f.attach.confidence ? `${f.attach.confidence} confidence` : null].filter(Boolean).join(' · '))) : null,
-      f.macs.length ? h('span', { class: 'muted', style: 'font-size:12px' }, 'MAC ', h('span', { class: 'mono' }, f.macs.join(', ')), f.ip ? ` · IP ${f.ip}` : '') : null,
-      f.note ? h('span', { class: 'muted', style: 'font-size:12px' }, f.note) : null,
-      f.others.length ? h('details', null, h('summary', { class: 'muted' }, `Also seen on ${f.others.length} other port${f.others.length === 1 ? '' : 's'}`),
-        h('div', { class: 'col', style: 'gap:2px;padding-top:4px' }, f.others.map(o => h('span', { key: o.devId + '/' + o.ifIndex, class: 'muted', style: 'font-size:12px' }, `${o.dev} · ${o.ifName}${o.edge ? '' : ' (uplink)'}`)))) : null) : null);
+    f ? foundBlock(f) : null);
+}
+
+/** Result of Find a host: confident ports as cards, low-confidence ones tucked away but still clickable, plus jumps to the flow pages. */
+function foundBlock(f: Located): VNode {
+  const cands: Attach[] = f.attach ? [f.attach, ...(f.others as Attach[])] : (f.others as Attach[]);
+  const strong = cands.filter(a => a.confidence !== 'low');
+  const primary = strong.length ? strong : (f.attach ? [f.attach] : []);
+  const rest = cands.filter(a => !primary.includes(a));
+  const flowsBtn = (a: Attach) => btn('Flows by port', { small: true, kind: 'ghost', title: `Open ${a.ifName} on ${a.dev} in Flows by port`, aria: `Flows by port for ${a.ifName} on ${a.dev}`, onclick: () => go('ports', { dev: a.devId, if: a.ifIndex }) });
+  const q = f.ip ? 'ip:' + f.ip : f.macs.length ? 'mac:' + f.macs[0] : '';
+  return h('div', { class: 'col', style: 'gap:6px' },
+    ...primary.map(a => h('div', { key: a.devId + '/' + a.ifIndex, class: 'col', style: 'gap:4px' },
+      h('button', { type: 'button', class: 'cardbtn', onclick: () => select_(a.devId, a.ifIndex) },
+        h('span', { class: 't' }, `${a.dev} · ${a.ifName}`),
+        h('span', { class: 's' }, [a.vlan ? `VLAN ${a.vlan}` : null, `${a.macCount} address${a.macCount === 1 ? '' : 'es'} on the port`, a.confidence ? `${a.confidence} confidence` : null].filter(Boolean).join(' · '))),
+      h('div', { class: 'row' }, flowsBtn(a)))),
+    q ? h('div', { class: 'row' }, btn(f.ip ? 'Flows with this IP in Flow explorer' : 'Flows with this MAC in Flow explorer', { small: true, kind: 'ghost', onclick: () => go('explorer', { q, range: '1h' }) })) : null,
+    f.macs.length ? h('span', { class: 'muted', style: 'font-size:12px' }, 'MAC ', h('span', { class: 'mono' }, f.macs.join(', ')), f.ip ? ` · IP ${f.ip}` : '') : null,
+    f.note ? h('span', { class: 'muted', style: 'font-size:12px' }, f.note) : null,
+    rest.length ? h('details', null, h('summary', { class: 'muted' }, `Also seen on ${rest.length} other port${rest.length === 1 ? '' : 's'}`),
+      h('div', { class: 'col', style: 'gap:4px;padding-top:4px' }, rest.map(o => h('div', { key: o.devId + '/' + o.ifIndex, class: 'row', style: 'gap:8px;font-size:12px' },
+        h('button', { type: 'button', class: 'lnk', title: `Show ${o.ifName}`, onclick: () => select_(o.devId, o.ifIndex) }, `${o.dev} · ${o.ifName}`),
+        h('span', { class: 'muted' }, o.edge ? 'low confidence' : 'uplink'),
+        flowsBtn(o))))) : null);
 }
 
 /* ------------------------------------------------------------------ graphs */

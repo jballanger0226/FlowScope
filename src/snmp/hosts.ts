@@ -27,7 +27,7 @@ export interface HostLocation {
   query: string; ip: string | null; macs: string[]; macSource: 'arp' | 'flow' | 'given' | 'none';
   attach: (Attachment & { confidence: 'high' | 'medium' | 'low' }) | null;
   /** Other places the address was seen: uplink ports, and other edge ports when it was seen on more than one. */
-  others: Attachment[];
+  others: (Attachment & { confidence: 'high' | 'medium' | 'low' })[];
   note: string;
 }
 export interface PortHost { mac: string; vlan: number; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean }
@@ -205,7 +205,9 @@ export class HostTracker {
       const best = uplinks.slice().sort((a, b) => a.macCount - b.macCount)[0];
       note = `The address was only seen on ports that lead to other switches or routers (nearest: ${best.dev} ${best.ifName}). The switch the host is plugged into is probably not in the device list.`;
     }
-    const others = all.filter(a => a !== (attach ? pick : null)).slice(0, 12);
+    // every other place gets a confidence too, so the console can offer them: a port that leads to another switch, one that is no longer in the MAC table, and one of several host ports are all low
+    const conf = (a: Attachment): 'high' | 'medium' | 'low' => (a.edge && a.active && edges.length === 1 ? (hasNb.has(a.devId) && source !== 'flow' ? 'high' : 'medium') : 'low');
+    const others = all.filter(a => a !== (attach ? pick : null)).slice(0, 12).map(a => ({ ...a, confidence: conf(a) }));
     return { query: q, ip, macs, macSource: source, attach, others, note };
   }
 }
