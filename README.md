@@ -3,7 +3,7 @@
 A NetFlow / IPFIX collector with per-hop stream tracing, SNMP link and QoS monitoring, reports and an admin console.
 One Node.js 22 process, one data folder. Runs on Linux, macOS, Windows and as a container.
 
-* **Flow explorer**: search with tokens (`src:10.1.0.0/16 port:443 qos:changed dscp:46 vlan:140 exporter:...`), see every hop a stream took, and see where its DSCP marking was changed. `ttl:expired` (or the **TTL expired only** button) lists streams whose TTL ran out before the destination.
+* **Flow explorer**: search with tokens (`src:10.1.0.0/16 port:443 qos:changed dscp:46 vlan:140 exporter:...`), see every hop a stream took, and see where its DSCP marking was changed. Ports the exporter did not report (a switch that exports on input only shows "out —") are filled in from the other direction of the stream, the CDP/LLDP neighbour tables or host tracking, and marked "worked out". Each port lists its CDP/LLDP neighbours, and a neighbour that is one of your SNMP devices opens that device and port in Links & QoS. `ttl:expired` (or the **TTL expired only** button) lists streams whose TTL ran out before the destination.
 * **Links & QoS**: SNMP interface utilisation, errors/discards and Cisco CBQoS per-class drops, with charts and the streams crossing a link.
 * **Reports**: group by L2/L3/L4 fields, filter, top-N with "other", export CSV or JSON.
 * **Storage & retention**: raw, 1-minute, 1-hour and daily tiers with per-tier retention, size estimate, and a choice of ClickHouse (the default for the Docker, Linux and Proxmox installs, which set up a server) or embedded SQLite.

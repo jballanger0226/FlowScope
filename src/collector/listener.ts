@@ -31,6 +31,12 @@ export class FlowCollector {
   readonly exporters = new Map<string, ExporterInfo>();
   private sockets: dgram.Socket[] = [];
   private decoder = new TemplateDecoder();
+
+  /** What an exporter sends, for explaining why a screen has no MAC, VLAN or TTL for it: its protocol and the field ids in its templates. */
+  exporterFields(ip: string): { version: string; ids: Set<number> | null } | null {
+    const e = this.exporters.get(ip);
+    return e ? { version: e.version, ids: this.decoder.fieldsOf(ip) } : null;
+  }
   private buf: FlowRecord[] = [];
   private flushing = false;
   private timer: NodeJS.Timeout | null = null;

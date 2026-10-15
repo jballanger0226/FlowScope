@@ -181,6 +181,17 @@ export class TemplateDecoder {
     return out;
   }
 
+  /** The standard field ids this exporter's data templates carry (not option templates), or null when it has sent none. */
+  fieldsOf(exporter: string): Set<number> | null {
+    const out = new Set<number>(); let any = false;
+    for (const [k, t] of this.templates) {
+      if (t.options || !k.startsWith(exporter + '|')) continue;
+      any = true;
+      for (const f of t.fields) if (f.pen === 0) out.add(f.id);
+    }
+    return any ? out : null;
+  }
+
   private key(exporter: string, domain: number, id: number): string { return exporter + '|' + domain + '|' + id; }
 
   private readTemplates(body: Buffer, exporter: string, hdr: Hdr, options: boolean, out: FlowRecord[]): void {

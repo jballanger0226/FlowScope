@@ -119,6 +119,11 @@ export class HostTracker {
     return this.db.prepare('SELECT proto, rem_name AS name, rem_port AS port, rem_ip AS ip, kind, caps FROM neighbors WHERE dev_id = ? AND if_index = ? ORDER BY proto').all(devId, ifIndex) as unknown as { proto: string; name: string; port: string; ip: string; kind: string; caps: string }[];
   }
 
+  /** Every neighbour a device reports, on any port. */
+  neighborsOfDevice(devId: number): { ifIndex: number; proto: string; name: string; port: string; ip: string; kind: string; caps: string }[] {
+    return this.db.prepare('SELECT if_index AS ifIndex, proto, rem_name AS name, rem_port AS port, rem_ip AS ip, kind, caps FROM neighbors WHERE dev_id = ? ORDER BY if_index, proto').all(devId) as unknown as { ifIndex: number; proto: string; name: string; port: string; ip: string; kind: string; caps: string }[];
+  }
+
   /** Hosts learned on one port, with the IP addresses their MACs have in any ARP table. */
   portHosts(devId: number, ifIndex: number, limit = 200): PortHost[] {
     const since = this.activeSince();

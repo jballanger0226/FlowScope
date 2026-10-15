@@ -1,3 +1,6 @@
+import { enrichPath } from '../analysis/path.js';
+import { notExported } from '../analysis/exported.js';
+import { pathEnv } from './pathenv.js';
 import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { parseQuery } from '../query/tokens.js';
@@ -101,6 +104,13 @@ export function registerFlows(app: App): void {
       classDrops: (ip, outIf, _a, _b, dscp) => (drops.get(`${ip}|${outIf}`) ?? []).filter(d => d.dscps.includes(dscp)).map(d => ({ cls: d.cls, dropPct: d.dropPct, dropPkts: d.dropPkts }))
     });
     if (!detail) throw new HttpError(404, 'No records for that stream');
+    // Say which details an exporter never sends, so a blank MAC, VLAN or TTL is understood as not exported.
+    for (const hp of [...detail.forward, ...detail.reverse]) {
+      const f = app.collector.exporterFields(hp.exporter);
+      if (f) { const n = notExported(f.version, f.ids); if (n.length) hp.notExported = n; }
+    }
+    // Fill in ports the exporter did not report and list the CDP/LLDP neighbour at each port; both are extras, so a failure leaves the plain path.
+    try { enrichPath(detail, pathEnv(app), ip => app.devices.deviceIdForExporter(ip)); } catch (e) { app.log.warn('query', `Could not add neighbour detail to a stream: ${(e as Error).message}`); }
     let multicast: (NonNullable<typeof detail.multicast> & { location: ReturnType<typeof app.hosts.locate> | null }) | null = null;
     if (detail.multicast) {
       // The source of a multicast stream is not "behind" the first device that reported it: every switch on the tree reports the same packets.

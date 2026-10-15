@@ -341,6 +341,7 @@ Compare the revision with the commit list on GitHub (`https://github.com/jballan
 | Symptom | Likely cause |
 | --- | --- |
 | All flows appear to come from one device, with the Docker bridge address | Use `docker-compose.host.yml`, or run FlowScope in an LXC container |
+| A followed stream shows no MAC addresses, VLAN or TTL for a device | Not a FlowScope fault: the exporter does not send them. The hop says "Not sent: …" under the exporter address, read from the templates it sent. NetFlow v5 carries none of them. For v9 and IPFIX the exporter's flow record must include them: on Cisco IOS XE Flexible NetFlow that is `match datalink mac source address input`, `match datalink mac destination address input`, `match datalink vlan input` and `collect ipv4 ttl minimum` / `maximum` (command names vary by release and platform; check yours). FlowScope reads the ingress fields (IPFIX 56, 80, 58, 52, 53); output-side fields (57, 81, 59) are not shown, and the hop says so when those are all it gets |
 | No flows at all | Firewall in the way; exporter pointed at the wrong port; the log shows `new exporter <address>` when the first packet from a device arrives |
 | Container exits with `EACCES` or `unable to open database file` on `/data` | The data directory is not writable. Run without `--user` so the entrypoint can fix ownership, or `chown 1000:1000` the directory |
 | Only port 22 is open on a new container | See *If the web console does not answer* above; start with `flowscope-ctl doctor` |
