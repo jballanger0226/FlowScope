@@ -405,8 +405,8 @@ function wlanPanel(dev: Dev): VNode {
     wlanError ? note(wlanError, 'bad', true) : null,
     wlanLoading && !w ? spinner('Loading Wi-Fi…') : null,
     w && w.aps.length ? h('div', { class: 'cards' }, w.aps.map(a => h('div', { key: a.mac, class: 'cardbtn', style: 'cursor:default' },
-      h('span', { class: 't' }, a.name || a.mac), h('span', { class: 's' }, [a.model ? 'model ' + a.model : null, a.role || null, `up ${dur(a.uptimeSec * 1000)}`].filter(Boolean).join(' · ')),
-      h('span', { class: 's' }, known(a.cpuPct) ? `CPU ${a.cpuPct}%` : null, a.memTotal ? ` · memory ${Math.round((a.memTotal - a.memFree) / a.memTotal * 100)}% used of ${bytes(a.memTotal)}` : '')))) : null,
+      h('span', { class: 't' }, a.name || a.mac), h('span', { class: 's' }, [a.model ? 'model ' + a.model : null, a.role || null].filter(Boolean).join(' · ') || null),
+      h('div', { style: 'margin-top:6px' }, resourceTiles(apResources(a)))))) : null,
     w && w.radios.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1.2fr) 90px 90px minmax(150px,1fr) minmax(150px,1fr) 80px 70px;--w:880px' },
       h('div', { class: 'tr head' }, ...['Radio', 'Power', 'Noise floor', 'Channel busy (4 s)', 'Channel busy (64 s)', 'Clients', 'State'].map(t => h('span', null, t))),
       w.radios.map(r => h('div', { key: r.apMac + r.idx, class: 'tr' },
@@ -534,17 +534,33 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
         : h('span', { class: 'dim' }, names.length ? 'No shown class went above the threshold in this window.' : 'There are no queue classes on this interface.')));
 }
 
-/** Uptime, CPU, memory and disk of the selected device. Shown for every kind of device, switches included. */
-const sevStyle = (p: number | null, warn = 75, bad = 90): string | undefined => (p === null ? undefined : p >= bad ? 'color:var(--bad)' : p >= warn ? 'color:var(--warn)' : undefined);
-function resourcesPanel(dev: Dev): VNode | null {
-  const r = dev.resources;
-  if (!r) return dev.lastOk === null ? null : h('span', { class: 'dim', style: 'font-size:12px' }, 'This device does not publish uptime, CPU or memory through HOST-RESOURCES-MIB, UCD-SNMP-MIB or the Cisco process and memory MIBs.');
+/** The tiles for uptime, CPU, memory and disks, the same for switches, routers, firewalls and access points. */
+function resourceTileList(r: Resources): VNode[] {
   const tiles: VNode[] = [];
   if (r.uptimeSec !== null) tiles.push(stat('Uptime', dur(r.uptimeSec * 1000)));
   if (r.cpuPct !== null) tiles.push(stat('CPU', h('span', { style: sevStyle(r.cpuPct) }, `${Math.round(r.cpuPct)}%`), [r.cores ? `${r.cores} cores` : null, r.load ? `load ${r.load.map(x => x.toFixed(2)).join(' / ')}` : null].filter(Boolean).join(' · ') || undefined));
   else if (r.load) tiles.push(stat('Load average', r.load.map(x => x.toFixed(2)).join(' / '), '1, 5 and 15 minutes'));
   if (r.memPct !== null) tiles.push(stat('Memory', h('span', { style: sevStyle(r.memPct) }, `${Math.round(r.memPct)}%`), r.memTotal !== null && r.memUsed !== null ? `${bytes(r.memUsed)} of ${bytes(r.memTotal)}${r.swapPct !== null ? ` · swap ${Math.round(r.swapPct)}%` : ''}` : undefined));
   for (const d of r.disks) tiles.push(stat(`Disk ${d.name}`, h('span', { style: sevStyle(d.usedPct, 80, 95) }, `${d.usedPct < 10 ? d.usedPct.toFixed(1) : Math.round(d.usedPct)}%`), `${bytes(d.usedBytes)} of ${bytes(d.totalBytes)}`));
+  return tiles;
+}
+function resourceTiles(r: Resources): VNode | null {
+  const tiles = resourceTileList(r);
+  return tiles.length ? h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' }, tiles) : null;
+}
+/** An access point's own readings in the same shape as any other device's. Memory used is total minus free. */
+function apResources(a: WlanAp): Resources {
+  const mem = a.memTotal > 0 ? Math.max(0, a.memTotal - a.memFree) : null;
+  return { uptimeSec: a.uptimeSec > 0 ? a.uptimeSec : null, cpuPct: known(a.cpuPct) ? a.cpuPct : null, cores: null, load: null,
+    memPct: mem !== null ? Math.round(mem / a.memTotal * 1000) / 10 : null, memTotal: mem !== null ? a.memTotal : null, memUsed: mem, swapPct: null, disks: [], source: '', readAt: 0 };
+}
+
+/** Uptime, CPU, memory and disk of the selected device. Shown for every kind of device, switches included. */
+const sevStyle = (p: number | null, warn = 75, bad = 90): string | undefined => (p === null ? undefined : p >= bad ? 'color:var(--bad)' : p >= warn ? 'color:var(--warn)' : undefined);
+function resourcesPanel(dev: Dev): VNode | null {
+  const r = dev.resources;
+  if (!r) return dev.lastOk === null ? null : h('span', { class: 'dim', style: 'font-size:12px' }, 'This device does not publish uptime, CPU or memory through HOST-RESOURCES-MIB, UCD-SNMP-MIB or the Cisco process and memory MIBs.');
+  const tiles = resourceTileList(r);
   if (!tiles.length) return null;
   return h('div', { class: 'col', style: 'gap:6px' },
     h('div', { class: 'row', style: 'gap:10px;align-items:stretch' }, tiles),
