@@ -254,7 +254,7 @@ export function render(): VNode {
     verdictHead(d),
     loadError ? note('Could not refresh: ' + loadError + '. Showing the last data received.', 'warn', true) : null,
     tiles(d),
-    section('Traffic', h('div', { class: 'ovgrid' }, appsBox(d), flowsBox(d), portsBox(d), exportersBox(d), unusualBox(d), talkersBox(d))),
+    section('Traffic', h('div', { class: 'ovgrid' }, appsBox(d), flowsBox(d), talkersBox(d), portsBox(d), unusualBox(d), exportersBox(d))),
     attention(d),
     section('Devices and system', h('div', { class: 'ovgrid' }, devicesBox(d), logsBox(d))),
     h('div', { style: 'height:24px' }));
