@@ -1,3 +1,5 @@
+import { neighborViews } from '../analysis/path.js';
+import { pathEnv } from './pathenv.js';
 import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { int, parseRange } from './util.js';
@@ -60,8 +62,9 @@ export function registerLinks(app: App): void {
     const dev = int(c.query.get('dev'), 0, 0, 1e9), ifx = int(c.query.get('if'), 0, 0, 1e9);
     const d = app.devices.row(dev);
     if (!d) throw new HttpError(404, 'No such device');
+    const env = pathEnv(app);
     c.json({
-      hosts: app.hosts.portHosts(dev, ifx, 300).map(h => ({ ...h, vlanName: h.vlan ? app.vlanName(h.vlan) : '' })), neighbors: app.hosts.neighborsOf(dev, ifx),
+      hosts: app.hosts.portHosts(dev, ifx, 300).map(h => ({ ...h, vlanName: h.vlan ? app.vlanName(h.vlan) : '' })), neighbors: neighborViews(app.hosts.neighborsOf(dev, ifx).map(n => ({ ...n, ifIndex: ifx })), env, env.devices()),
       readAt: d.hosts_at, note: d.hosts_note ?? '', tracking: app.settings.get('hosts').enabled
     });
   });

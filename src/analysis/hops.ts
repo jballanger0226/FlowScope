@@ -26,12 +26,29 @@ export function isMulticast(ip: string): boolean {
 export type ObsKind = 'loss' | 'slow' | 'remark' | 'qdrop' | 'nat' | 'path' | 'ttl' | 'info';
 export interface Observation { kind: ObsKind; text: string; severity: 'info' | 'warn' | 'bad' }
 
+/** What CDP / LLDP says is at the other end of a port, and which polled device that is when it is one of ours. */
+export interface NeighborView {
+  /** Both protocols when the device reports itself over CDP and LLDP. */
+  protos: ('cdp' | 'lldp')[];
+  name: string; port: string; ip: string; kind: string; caps: string[];
+  /** The SNMP target this neighbour is, and the port on it that the cable ends in, so the console can open them. */
+  device: { id: number; name: string } | null;
+  devicePort: { ifIndex: number; name: string } | null;
+}
+/** Where a port name on a hop came from: the flow record itself, or filled in because the exporter did not report it. */
+export type PortSource = 'flow' | 'reverse' | 'neighbor' | 'host';
+
 export interface HopView {
   n: number;
   exporter: string;
   dev: string;
   role: string;
   inIf: string; outIf: string;
+  /** SNMP ifIndex of the in and out interfaces as reported by the exporter; 0 when it did not say. */
+  inIfIndex: number; outIfIndex: number;
+  /** Set by the path enrichment (path.ts): the polled device for this exporter, how a missing port was worked out, and what is cabled to each port. */
+  devId?: number | null; inFrom?: PortSource; outFrom?: PortSource;
+  inNeighbors?: NeighborView[]; outNeighbors?: NeighborView[];
   /** Every interface the traffic left through, busiest first. More than one on a multicast stream means the device replicated it. */
   outIfs: string[];
   /** Set on a multicast stream when SNMP data says the source host is plugged into this device: the port it is on, and whether the flow's ingress interface agrees. */
@@ -166,7 +183,7 @@ function buildHops(recs: FlowRecord[], ctx: HopContext, multicast = false): HopV
     }
     hops.push({
       n: i + 1, exporter: a.exporter, dev, role: ctx.deviceRole(a.exporter),
-      inIf: ctx.ifName(a.exporter, a.inIf), outIf: ctx.ifName(a.exporter, a.outIf), outIfs: [...new Set(a.outIfs)].filter(x => x).map(x => ctx.ifName(a.exporter, x)),
+      inIf: ctx.ifName(a.exporter, a.inIf), outIf: ctx.ifName(a.exporter, a.outIf), inIfIndex: a.inIf, outIfIndex: a.outIf, outIfs: [...new Set(a.outIfs)].filter(x => x).map(x => ctx.ifName(a.exporter, x)),
       frameSrc: a.macS, frameDst: a.macD, vlan: a.vlan, vlanName: a.vlan && ctx.vlanName ? ctx.vlanName(a.vlan) : '',
       ttl: a.ttl, ttlExpired: a.ttlWhy, dscpIn: a.tosIn, dscpOut, dscpInS: dscpName(a.tosIn), dscpOutS: dscpOut === null ? 'not reported' : dscpName(dscpOut), qosChanged,
       pkts: a.pkts, bytes: a.bytes, firstSeen: a.t0, lastSeen: a.t1, linkMs, cumMs,

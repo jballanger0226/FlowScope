@@ -4,6 +4,7 @@ import { redraw, go } from '../state.js';
 import { bar, btn, chip, empty, heading, lineChart, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
 import { ago, bps, bytes, clock, dayClock, dur, num, pct, debounce } from '../util.js';
 import { post } from '../api.js';
+import { neighborLines, type Neighbor } from '../neighbors.js';
 
 interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
 interface Iface {
@@ -20,7 +21,6 @@ interface SeriesRes {
   step: number; tier: string;
 }
 interface PortHost { mac: string; vlan: number; vlanName: string; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean }
-interface Neighbor { proto: string; name: string; port: string; ip: string; kind: string; caps: string }
 interface HostsRes { hosts: PortHost[]; neighbors: Neighbor[]; readAt: number | null; note: string; tracking: boolean }
 interface Attach { devId: number; dev: string; ifIndex: number; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; lastSeen: number; active: boolean; mac: string; confidence?: 'high' | 'medium' | 'low' }
 interface Located { query: string; ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
@@ -263,7 +263,6 @@ function classTable(itf: Iface): VNode {
 
 /* ------------------------------------------------------------------ hosts on a port */
 
-const KIND_TEXT: Record<string, string> = { infra: 'switch or router', phone: 'IP phone', ap: 'wireless access point', host: 'end host', unknown: 'unknown device' };
 
 function hostsPanel(dev: Dev, itf: Iface): VNode {
   const r = hostsRes;
@@ -275,8 +274,7 @@ function hostsPanel(dev: Dev, itf: Iface): VNode {
     dev.hostsNote ? note(dev.hostsNote, 'warn') : null,
     hostsLoading && !r ? spinner('Loading hosts…') : hostsError ? note(hostsError, 'bad', true) : null,
     r && !r.tracking ? note('Host tracking is turned off, so no tables are being read automatically. Tables can still be read with the button above.', 'info') : null,
-    r && r.neighbors.length ? h('div', { class: 'row', style: 'gap:8px' }, r.neighbors.map(n => h('span', { key: n.proto + n.name + n.port, class: 'chip ' + (n.kind === 'infra' ? 'info' : 'default'), title: `${n.proto.toUpperCase()} neighbour${n.ip ? ' ' + n.ip : ''}` },
-      `${n.proto.toUpperCase()}: ${n.name || n.ip || 'unnamed'}${n.port ? ' · ' + n.port : ''} (${KIND_TEXT[n.kind] ?? n.kind})`))) : null,
+    r && r.neighbors.length ? neighborLines(r.neighbors) : null,
     r && r.neighbors.some(n => n.kind === 'infra') ? h('span', { class: 'dim', style: 'font-size:12px' }, 'This port leads to another switch or router. Addresses below are just what that device has forwarded, not hosts plugged in here.') : null,
     r && r.hosts.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1fr) minmax(130px,1fr) minmax(140px,1fr) 110px 110px;--w:700px' },
       h('div', { class: 'tr head' }, ...['MAC address', 'IP address', 'VLAN', 'First seen', 'Last seen'].map(t => h('span', null, t))),

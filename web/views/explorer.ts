@@ -2,6 +2,7 @@ import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { session, redraw, go } from '../state.js';
 import { btn, chip, empty, field, heading, note, seg, select, spinner, status as statusEl, dot } from '../components.js';
+import { neighborLines, portLink, type Neighbor, type PortSource } from '../neighbors.js';
 import { bytes, clock, dayClock, dur, ms, num, RANGES, stamp, debounce } from '../util.js';
 
 interface Row {
@@ -15,6 +16,7 @@ interface Hop {
   ttl: number | null; ttlExpired: 'ttl' | 'icmp' | null; dscpInS: string; dscpOutS: string; qosChanged: boolean; pkts: number; bytes: number; linkMs: number | null; cumMs: number | null; policy: string | null;
   obs: { kind: string; text: string; severity: 'info' | 'warn' | 'bad' }[]; firstSeen: number; lastSeen: number;
   outIfs?: string[]; sourcePort?: string | null; sourceConfirmed?: boolean;
+  devId?: number | null; inFrom?: PortSource; outFrom?: PortSource; inNeighbors?: Neighbor[]; outNeighbors?: Neighbor[];
 }
 interface Attach { dev: string; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; confidence?: 'high' | 'medium' | 'low' }
 interface Located { ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
@@ -226,6 +228,7 @@ function strip(hops: Hop[], d: Detail): VNode {
       h('span', { class: 'flag' }, loss ? 'loss' : slow ? 'slow' : '')));
     items.push(h('div', { key: 'n' + i, class: 'node' + (hp.qosChanged || hp.ttlExpired ? ' remark' : '') },
       h('b', null, hp.dev), h('span', null, hp.role), h('span', { class: 'mono' }, `${hp.inIf} → ${hp.outIf}`),
+      hp.outNeighbors && hp.outNeighbors.length ? h('span', { title: 'What CDP/LLDP says is connected to the outgoing port' }, '→ ' + hp.outNeighbors.map(n => n.name || n.ip).join(', ')) : null,
       hp.policy ? h('span', null, 'policy ' + hp.policy) : null, hp.qosChanged ? h('span', { style: 'color:var(--bad)' }, `${hp.dscpInS} → ${hp.dscpOutS}`) : null, hp.ttlExpired ? h('span', { style: 'color:var(--bad)' }, hp.ttlExpired === 'icmp' ? 'TTL exceeded notice' : `TTL ${hp.ttl ?? 1}: expired here`) : null));
   });
   items.push(h('div', { key: 'lend', class: 'link' }, h('span'), h('i'), h('span')));
@@ -276,7 +279,7 @@ function multicastTable(hops: Hop[]): VNode {
     h('div', { class: 'tr head' }, ...['Device', 'Interfaces', 'Frame in (L2)', 'VLAN', 'TTL', 'DSCP', 'Packets', 'Bytes', 'Observations'].map(t => h('span', null, t))),
     hops.map((hp, i) => h('div', { key: i, class: 'tr' },
       h('div', null, h('div', { style: 'font-weight:600' }, hp.dev), h('div', { class: 'dim', style: 'font-size:12px' }, hp.role), h('div', { class: 'dim mono', style: 'font-size:11.5px' }, hp.exporter)),
-      h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'in '), hp.inIf || '—'), h('div', null, h('span', { class: 'dim' }, 'out '), (hp.outIfs && hp.outIfs.length ? hp.outIfs : [hp.outIf]).join(', ') || '—'),
+      h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'in '), hp.inIf || '—'), neighborLines(hp.inNeighbors), h('div', null, h('span', { class: 'dim' }, 'out '), (hp.outIfs && hp.outIfs.length ? hp.outIfs : [hp.outIf]).join(', ') || '—'), neighborLines(hp.outNeighbors),
         hp.sourcePort ? h('div', { style: 'color:var(--accent)' }, `source host on ${hp.sourcePort}`) : null),
       h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'src '), hp.frameSrc ?? '—'), h('div', null, h('span', { class: 'dim' }, 'dst '), hp.frameDst ?? '—')),
       h('span', { class: 'mono', style: 'font-size:12px' }, hp.vlan ? String(hp.vlan) : '—', ' ', h('span', { class: 'dim' }, hp.vlanName)),
@@ -296,7 +299,9 @@ function hopsTable(hops: Hop[]): VNode {
       return h('div', { key: i, class: 'tr' },
         h('span', { class: 'mono muted' }, String(hp.n)),
         h('div', null, h('div', { style: 'font-weight:600' }, hp.dev), h('div', { class: 'dim', style: 'font-size:12px' }, hp.role), h('div', { class: 'dim mono', style: 'font-size:11.5px' }, hp.exporter)),
-        h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'in '), hp.inIf), h('div', null, h('span', { class: 'dim' }, 'out '), hp.outIf)),
+        h('div', { class: 'mono', style: 'font-size:12px' },
+          h('div', null, h('span', { class: 'dim' }, 'in '), portLink(hp.dev, hp.inIf, hp.inFrom, hp.devId != null)), neighborLines(hp.inNeighbors),
+          h('div', null, h('span', { class: 'dim' }, 'out '), portLink(hp.dev, hp.outIf, hp.outFrom, hp.devId != null)), neighborLines(hp.outNeighbors)),
         h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'src '), hp.frameSrc ?? '—'), h('div', null, h('span', { class: 'dim' }, 'dst '), hp.frameDst ?? '—')),
         h('span', { class: 'mono', style: 'font-size:12px' }, hp.vlan ? String(hp.vlan) : '—', ' ', h('span', { class: 'dim' }, hp.vlanName)),
         h('span', { class: 'mono', style: 'font-size:12px' }, hp.ttl === null ? '—' : String(hp.ttl)),
