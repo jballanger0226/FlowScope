@@ -187,6 +187,11 @@ function walkPanel(d: Dev): VNode {
       h('span', { class: running ? 'muted' : wJob.state === 'done' ? 'muted' : 'warn-text', style: 'font-size:12.5px', role: 'status', 'aria-live': 'polite' }, stateText),
       wJob.error ? note(wJob.error, 'warn') : null,
       wJob.truncated && !wJob.error ? note(`Only the first ${num(wJob.maxRows)} rows are kept. Walk a narrower OID to see the rest.`, 'warn') : null,
+      wJob.rows && !running && wMatched ? h('div', { class: 'row', style: 'gap:8px;align-items:center;padding:8px 12px;border:1px solid var(--line2);border-radius:8px' },
+        h('b', { style: 'font-size:13px' }, 'Download'),
+        h('span', { class: 'muted', style: 'font-size:12.5px' }, `${wQ.trim() ? num(wMatched) + ' matching rows' : 'all ' + num(wMatched) + ' rows'} as`),
+        ...[['txt', 'Text (.txt)'], ['json', 'JSON'], ['csv', 'CSV'], ['xml', 'XML']].map(([f, label]) => h('a', { key: f, class: 'btn small', href: walkExport(d, f), download: '' }, label)),
+        wQ.trim() ? h('span', { class: 'dim', style: 'font-size:12px' }, 'Clear the filter to download everything.') : null) : null,
       wJob.rows ? h('div', { class: 'row', style: 'gap:10px;align-items:center' },
         h('div', { style: 'flex:1 1 260px;max-width:420px' }, textInput(wQ, v => { wQ = v; filterWalk(d); }, { placeholder: 'Filter rows: every word must match the OID, type or value', aria: 'Filter walk rows', width: '100%' })),
         wQ.trim() ? btn('Clear', { kind: 'ghost', small: true, onclick: () => { wQ = ''; wOff = 0; void pollWalk(d); } }) : null,
@@ -196,9 +201,7 @@ function walkPanel(d: Dev): VNode {
       wRows.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:700px` },
         h('div', { class: 'tr head' }, ...['OID', 'Type', 'Value'].map(t => h('span', null, t))),
         h('div', { class: 'scroll', style: 'max-height:420px' }, wRows.map((r, i) => h('div', { key: wOff + i, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px;word-break:break-all' }, r.oid), h('span', { class: 'dim', style: 'font-size:12px' }, r.type), h('span', { class: 'mono', style: 'font-size:12px;word-break:break-all' }, r.text)))))) : !running && !wJob.rows ? h('span', { class: 'dim', style: 'font-size:12.5px' }, `Nothing under ${from}. The device does not publish it, or this credential may not read it.`) : null,
-      wJob.rows && wMatched ? h('div', { class: 'row', style: 'gap:8px;align-items:center' },
-        h('span', { class: 'muted', style: 'font-size:12.5px' }, `Export ${wQ.trim() ? num(wMatched) + ' matching' : 'all ' + num(wMatched)} rows as`),
-        ...[['txt', 'Text'], ['json', 'JSON'], ['csv', 'CSV'], ['xml', 'XML']].map(([f, label]) => h('a', { key: f, class: 'btn small', href: walkExport(d, f), download: '' }, label))) : null) : null);
+    ) : null);
 }
 
 function diagnostics(d: Dev): VNode {
