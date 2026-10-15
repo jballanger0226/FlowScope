@@ -110,3 +110,29 @@ test('hop detail points at the router where the TTL ran out', () => {
   const mdns = analyzeStream('k', recs.slice(0, 1).map(r => ({ ...r, dstIp: '224.0.0.251', ttlMin: 1, ttlMax: 1 })), ctx)!;
   assert.equal(mdns.ttlExpired, false);
 });
+
+test('well-known ports below 1024 are named, and the name and the number both search', async () => {
+  const { wellKnownName, wellKnownPorts } = await import('../src/query/wellknown.js');
+  assert.equal(appName(6, 40000, 119), 'nntp');
+  assert.equal(appName(6, 119, 40000), 'nntp', 'either side can be the server port');
+  assert.equal(appName(17, 40000, 520), 'router', 'UDP 520 is RIP');
+  assert.equal(appName(6, 40000, 520), 'efs', 'and TCP 520 is not');
+  assert.equal(appName(6, 40000, 514), 'syslog', 'a port the app list already knows keeps that name');
+  assert.equal(appName(17, 40000, 319), 'ptp-event');
+  assert.equal(appName(6, 40000, 1000), '1000', 'a port below 1024 with no registered service shows as its number');
+  assert.equal(appName(6, 40000, 51000), 'tcp/40000', 'above 1023 nothing changes');
+  assert.equal(wellKnownName(119, 6), 'nntp'); assert.equal(wellKnownName(65000, 6), null);
+  assert.deepEqual(wellKnownPorts('NNTP'), [119]); assert.deepEqual(wellKnownPorts('www'), [80]); assert.deepEqual(wellKnownPorts('netbios'), [137, 138, 139]);
+  assert.equal(wellKnownPorts('nothing'), null);
+
+  const ok = parseQuery('port:nntp app:ftp-data 119 microsoft-ds port:domain,22 dport:ptp', res);
+  assert.deepEqual(ok.errors, []);
+  assert.deepEqual((ok.conds[0] as any).ports, [119]);
+  assert.deepEqual(ok.conds[1], { kind: 'port', ports: [20] });
+  assert.deepEqual((ok.conds[2] as any).ports, [119], 'the bare number still searches');
+  assert.deepEqual((ok.conds[3] as any).ports, [445], 'a bare service name searches its port');
+  assert.deepEqual((ok.conds[4] as any).ports, [53, 22]);
+  assert.deepEqual((ok.conds[5] as any).ports, [319, 320]);
+  assert.equal(parseQuery('port:notaservice', res).errors.length, 1);
+  assert.deepEqual(parseQuery('app:https', res).conds[0], { kind: 'port', ports: [443, 8443] }, 'the app list is still consulted first');
+});

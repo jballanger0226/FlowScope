@@ -1,4 +1,6 @@
-/** Well-known services. Used for the app: search token and to label streams. */
+import { wellKnownName, wellKnownPorts } from './wellknown.js';
+
+/** Well-known services. Used for the app: search token and to label streams. Ports 0-1023 that are not listed here are named from wellknown.ts. */
 export interface AppDef { name: string; ports: number[]; proto: number[] }
 
 const TCP = 6, UDP = 17;
@@ -30,8 +32,16 @@ export function appName(proto: number, sport: number, dport: number): string {
   for (const p of [dport, sport]) {
     for (const a of APPS) if (a.ports.includes(p) && a.proto.includes(proto)) return a.name;
   }
-  const lo = Math.min(sport, dport);
+  // the other well-known ports: the server side is the lower port, and only a port below 1024 is read as a service
+  const lo = Math.min(sport, dport), hi = Math.max(sport, dport);
+  for (const p of [lo, hi]) { if (p > 0 && p < 1024) { const n = wellKnownName(p, proto); if (n) return n; } }
   return lo > 0 && lo < 1024 ? String(lo) : (proto === TCP ? 'tcp/' : 'udp/') + Math.min(sport, dport);
+}
+
+/** The ports a service name stands for: the app list first (https, dns, ...), then any well-known service name (nntp, ftp-data, ...). */
+export function servicePorts(name: string): number[] | null {
+  const a = appByName(name);
+  return a ? a.ports : wellKnownPorts(name);
 }
 
 export function appByName(name: string): AppDef | undefined {
