@@ -14,6 +14,14 @@ export function bps(n: number | null | undefined): string {
   while (v >= 1000 && i < u.length - 1) { v /= 1000; i++; }
   return (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + ' ' + u[i];
 }
+/** Rounds a maximum up to 1, 2, 4, 8 or 10 times a power of ten, so axis gridlines at quarter steps land on round numbers. */
+export function niceCeil(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 1;
+  const e = 10 ** Math.floor(Math.log10(v)), f = v / e;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 4 ? 4 : f <= 8 ? 8 : 10) * e;
+}
+/** Short rate label for graph axes: "0" at the origin, otherwise bps(). */
+export function bpsAxis(n: number): string { return n === 0 ? '0' : bps(n); }
 export function num(n: number | null | undefined): string { return n === null || n === undefined || !Number.isFinite(n) ? '—' : Math.round(n).toLocaleString('en-US'); }
 export function pct(n: number | null | undefined, d = 1): string { return n === null || n === undefined || !Number.isFinite(n) ? '—' : n.toFixed(d) + '%'; }
 export function ms(n: number | null | undefined): string { return n === null || n === undefined ? '—' : n < 1 ? '<1 ms' : n.toFixed(n < 10 ? 1 : 0) + ' ms'; }

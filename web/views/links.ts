@@ -1,8 +1,8 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw, go } from '../state.js';
-import { bar, btn, chip, empty, heading, lineChart, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
-import { ago, bps, bytes, clock, dayClock, dur, num, pct, debounce, svcLabel } from '../util.js';
+import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
+import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, rangeMs, svcLabel } from '../util.js';
 import { post } from '../api.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
@@ -52,8 +52,7 @@ let streams: StreamRow[] = []; let streamsTotal = 0; let streamsLoading = false;
 let pendingName: { dev: string; ifn: string } | null = null;
 let timer: number | undefined;
 
-const GRAPH_RANGES: [string, string][] = [['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days']];
-const RANGE_MS: Record<string, number> = { '1h': 3600e3, '6h': 6 * 3600e3, '24h': 24 * 3600e3, '7d': 7 * 86400e3 };
+const GRAPH_RANGES: [string, string][] = [['15m', 'Last 15 minutes'], ['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days']];
 const THRESHOLDS: [string, string][] = [['0.5', '0.5%'], ['1', '1%'], ['2', '2%'], ['5', '5%']];
 
 export function enter(p: URLSearchParams): void {
@@ -494,28 +493,34 @@ function events(s: SeriesRes, names: string[]): Ev[] {
 
 function graphs(s: SeriesRes, itf: Iface): VNode {
   const names = s.classes.map(c => c.cls);
-  const to = Date.now(); const from = to - RANGE_MS[graphRange];
+  const spanMs = rangeMs(graphRange) ?? 6 * 3600e3;
+  const to = Date.now(); const from = to - spanMs;
   const shown = s.classes.filter(c => !hidden.has(c.cls));
   const evs = events(s, names);
   const bands = evs.map(e => ({ a: e.a - s.step / 2, b: e.b + s.step / 2 }));
-  const fmtT = (t: number) => (RANGE_MS[graphRange] > 86400e3 ? dayClock(t) : clock(t, false));
+  const fmtT = (t: number) => (spanMs > 86400e3 ? dayClock(t) : clock(t, false));
   const mk = (pick: (p: SeriesRes['classes'][0]['points'][0]) => number): Series[] => shown.map(c => ({ name: c.cls, color: classColor(c.cls, names), points: c.points.map(p => ({ t: p.ts, v: pick(p) })) }));
   const peak = (c: SeriesRes['classes'][0]) => Math.max(0, ...c.points.map(p => p.dropPct));
   return h('div', { class: 'col', style: 'gap:14px' },
     h('div', { class: 'row end' },
-      select(graphRange, GRAPH_RANGES, v => { graphRange = v; void loadSeries(); }, { aria: 'Graph time range', width: '176px' }),
+      rangePicker('links-graphs', graphRange, GRAPH_RANGES, v => { graphRange = v; void loadSeries(); }, { aria: 'Graph time range' }),
       h('label', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted' }, 'Mark drops above'), select(String(dropThr), THRESHOLDS, v => { dropThr = Number(v); redraw(); }, { aria: 'Drop threshold', width: '96px' })),
       s.tier === 'h1' ? chip('hourly averages', 'info', 'The range is older than the per-poll samples kept, so hourly summaries are shown') : null),
     names.length ? h('div', { role: 'group', 'aria-label': 'Classes shown', class: 'row', style: 'gap:8px' },
       s.classes.map(c => h('button', { key: c.cls, type: 'button', class: 'cbtn', 'aria-pressed': !hidden.has(c.cls), onclick: () => { if (hidden.has(c.cls)) hidden.delete(c.cls); else hidden.add(c.cls); redraw(); } },
         h('i', { class: 'sw', style: `background:${classColor(c.cls, names)};margin:0` }), h('span', null, c.cls), h('span', { class: 'dim' }, 'peak ' + pct(peak(c), 2))))) : null,
-    names.length ? h('div', { class: 'charts' },
-      lineChart({ title: 'Packets dropped (% of the class)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '%', series: mk(p => p.dropPct), from, to, threshold: dropThr, bands, fmtT, aria: `Drop percentage per class on ${itf.name}` }),
-      lineChart({ title: 'Bytes dropped (per second)', unit: v => bytes(v) + '/s', series: mk(p => p.dropBps / 8), from, to, bands, fmtT, aria: `Bytes dropped per class on ${itf.name}` })) : null,
-    h('div', { class: 'charts' }, lineChart({
-      wide: true, title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut))), threshold: data?.thresholds.util, from, to, fmtT,
-      series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }], aria: `Utilisation of ${itf.name}`
-    })),
+    chartGrid(names.length ? 4 : 2, size => [
+      names.length ? lineChart({ ...size, sync: 'iface', title: 'Packets dropped (% of the class)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '%', series: mk(p => p.dropPct), from, to, threshold: dropThr, bands, fmtT, fmtV: v => pct(v, 2), aria: `Drop percentage per class on ${itf.name}` }) : null,
+      names.length ? lineChart({ ...size, sync: 'iface', title: 'Bytes dropped (per second)', unit: v => bytes(v) + '/s', series: mk(p => p.dropBps / 8), from, to, bands, fmtT, aria: `Bytes dropped per class on ${itf.name}` }) : null,
+      lineChart({
+        ...size, sync: 'iface', title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
+        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }], aria: `Utilisation of ${itf.name}`
+      }),
+      lineChart({
+        ...size, sync: 'iface', title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)))), from, to, fmtT,
+        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }], aria: `Throughput of ${itf.name} in bits per second`
+      })
+    ]),
     h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
     h('div', { class: 'col', style: 'gap:6px' },
       h('b', null, 'Drop events above the threshold'),
