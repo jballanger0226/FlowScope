@@ -4,14 +4,14 @@ import { pathEnv } from './pathenv.js';
 import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { parseQuery } from '../query/tokens.js';
-import { appName, dscpName, protoName } from '../query/apps.js';
+import { appName, dscpName, protoName, service } from '../query/apps.js';
 import { analyzeStream, type HopContext } from '../analysis/hops.js';
 import type { StreamRow } from '../store/types.js';
 import { int, parseRange, str } from './util.js';
 
 export function streamView(app: App, r: StreamRow) {
   return {
-    id: r.skey, srcIp: r.srcIp, dstIp: r.dstIp, sport: r.sport, dport: r.dport, proto: r.proto, protoName: protoName(r.proto), app: appName(r.proto, r.sport, r.dport),
+    id: r.skey, srcIp: r.srcIp, dstIp: r.dstIp, sport: r.sport, dport: r.dport, proto: r.proto, protoName: protoName(r.proto), app: appName(r.proto, r.sport, r.dport), appPort: service(r.proto, r.sport, r.dport).port,
     vlan: r.vlan, vlanName: r.vlan ? app.vlanName(r.vlan) : '', t0: r.t0, t1: r.t1, bytes: r.bytes, pkts: r.pkts, fwdBytes: r.fwdBytes, revBytes: r.revBytes,
     hopCount: r.exporters.length, hops: r.exporters.map(e => app.devices.deviceName(e)), qosChanged: r.qosChanged,
     ttlExpired: r.ttlExpired, ttlReason: r.ttlReason, ttlLow: r.ttlLow,

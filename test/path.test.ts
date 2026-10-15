@@ -36,7 +36,7 @@ const hop = (n: number, exporter: string, inIx: number, outIx: number, devId: nu
 const exporterDev = (ip: string) => ({ '192.168.254.1': 1, '192.168.100.10': 2 } as Record<string, number>)[ip] ?? null;
 function detail(forward: HopView[], reverse: HopView[], dst = '192.168.10.39'): StreamDetail {
   return {
-    skey: 'k', initiator: { ip: '192.168.254.248', port: 56270 }, responder: { ip: dst, port: 554 }, proto: 6, protoName: 'TCP', app: 'RTSP', t0: 0, t1: 1,
+    skey: 'k', initiator: { ip: '192.168.254.248', port: 56270 }, responder: { ip: dst, port: 554 }, proto: 6, protoName: 'TCP', app: 'RTSP', appPort: 554, t0: 0, t1: 1,
     forward, reverse, qosChanged: false, ttlExpired: false, totals: { fwdBytes: 0, revBytes: 0, fwdPkts: 0, revPkts: 0 }, note: null, multicast: null
   };
 }

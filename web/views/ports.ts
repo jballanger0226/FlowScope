@@ -2,7 +2,7 @@ import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw } from '../state.js';
 import { btn, chip, empty, field, heading, note, seg, select, spinner, textInput } from '../components.js';
-import { bytes, dayClock, debounce, num, RANGES } from '../util.js';
+import { bytes, dayClock, debounce, num, RANGES, svcLabel } from '../util.js';
 import { Follower } from './stream.js';
 
 /** Flows by port: pick a network device and one of its ports, say how many of the biggest flows to list, and open any of them in the Flow explorer. */
@@ -12,7 +12,7 @@ interface Dev { id: number; name: string; ip: string; role: string; ports: Port[
 interface Exp { ip: string; name: string; lastSeen: number }
 interface Sources { devices: Dev[]; exporters: Exp[]; counts: number[] }
 interface Row {
-  id: string; srcIp: string; dstIp: string; sport: number; dport: number; protoName: string; app: string; vlan: number | null; t0: number; t1: number;
+  id: string; srcIp: string; dstIp: string; sport: number; dport: number; protoName: string; app: string; appPort: number | null; vlan: number | null; t0: number; t1: number;
   bytes: number; pkts: number; flags: number; qosChanged: boolean; dscpInS: string; dscpOutS: string | null; ttlExpired: boolean; hopCount: number;
 }
 interface Result { device: { id: number | null; name: string; address: string }; port: { ifIndex: number; name: string; alias: string } | null; dir: string; sort: string; limit: number; total: number; shown: number; rows: Row[] }
@@ -173,7 +173,7 @@ function summary(r: Result): string {
   return `${r.shown === r.total ? 'All' : 'Top'} ${num(r.shown)} of ${num(r.total)} flow${r.total === 1 ? '' : 's'} through ${where}, ${what}, ${SORT_WORDS[r.sort]}`;
 }
 
-const COLS = '36px minmax(150px,1.3fr) minmax(150px,1.3fr) 56px 92px minmax(130px,1fr) 78px 112px 112px';
+const COLS = '36px minmax(150px,1.3fr) minmax(150px,1.3fr) 56px 160px minmax(130px,1fr) 78px 112px 112px';
 function results(): VNode {
   if (!who) return h('div', { class: 'panel' }, empty('Choose a network device to list its busiest flows. Then pick one port, or leave it on "All ports".'));
   const r = res;
@@ -184,7 +184,7 @@ function results(): VNode {
       h('span', null, 'Select a flow to follow it hop by hop below')),
     err ? note(err, 'bad', true) : null,
     r && r.total > r.shown && !loading ? note(`${num(r.total - r.shown)} more flow${r.total - r.shown === 1 ? '' : 's'} match. Raise the number above, or narrow the time range.`, 'info') : null,
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${COLS};--w:1080px` },
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${COLS};--w:1150px` },
       h('div', { class: 'tr head' }, ...['#', 'Source', 'Destination', 'Proto', 'Service', 'Share of bytes', 'Bytes', 'Packets', 'Last seen'].map(t => h('span', null, t))),
       h('div', { class: 'scroll', style: 'max-height:640px' },
         (r?.rows ?? []).map((x, i) => h('button', { key: x.id, type: 'button', class: 'tr', 'aria-pressed': follow.selId === x.id, onclick: () => pick(x.id) },
@@ -192,7 +192,7 @@ function results(): VNode {
           h('span', { class: 'mono' }, x.srcIp, x.sport ? h('span', { class: 'dim' }, ':' + x.sport) : null),
           h('span', { class: 'mono' }, x.dstIp, x.dport ? h('span', { class: 'dim' }, ':' + x.dport) : null),
           h('span', { style: 'font-weight:500' }, x.protoName),
-          h('span', null, x.app),
+          h('span', null, svcLabel(x.app, x.appPort)),
           h('span', { class: 'row', style: 'gap:6px;flex-wrap:nowrap' }, h('span', { 'aria-hidden': 'true', style: 'flex:1;height:6px;border-radius:3px;background:var(--raised);overflow:hidden' }, h('span', { style: `display:block;height:100%;width:${top ? Math.max(2, Math.round(x.bytes / top * 100)) : 0}%;background:var(--accent)` })),
             x.qosChanged ? chip('QoS', 'bad', `DSCP re-marked ${x.dscpInS} → ${x.dscpOutS ?? ''}`) : null, x.ttlExpired ? chip('TTL', 'bad', 'TTL expired') : null),
           h('span', { class: 'mono', style: 'font-size:12px' }, bytes(x.bytes)),

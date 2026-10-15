@@ -1,5 +1,5 @@
 import type { FlowRecord } from '../collector/types.js';
-import { appName, dscpName, protoName } from '../query/apps.js';
+import { appName, dscpName, protoName, service } from '../query/apps.js';
 import { ttlEvidence } from './ttl.js';
 
 export interface HopContext {
@@ -74,7 +74,7 @@ export interface StreamDetail {
   skey: string;
   initiator: { ip: string; port: number };
   responder: { ip: string; port: number };
-  proto: number; protoName: string; app: string;
+  proto: number; protoName: string; app: string; appPort: number | null;
   t0: number; t1: number;
   forward: HopView[];
   reverse: HopView[];
@@ -256,7 +256,7 @@ export function analyzeStream(skey: string, recs: (FlowRecord & { primary?: bool
   const all = [...forward, ...reverse];
   return {
     skey, initiator: { ip: first.srcIp, port: first.sport }, responder: { ip: first.dstIp, port: first.dport },
-    proto: first.proto, protoName: protoName(first.proto), app: appName(first.proto, first.sport, first.dport),
+    proto: first.proto, protoName: protoName(first.proto), app: appName(first.proto, first.sport, first.dport), appPort: service(first.proto, first.sport, first.dport).port,
     t0: Math.min(...recs.map(r => r.ts0)), t1: Math.max(...recs.map(r => r.ts1)),
     forward, reverse, qosChanged: all.some(h => h.qosChanged || h.obs.some(o => o.kind === 'remark')),
     ttlExpired: all.some(h => h.ttlExpired !== null),

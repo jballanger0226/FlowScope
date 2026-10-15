@@ -58,3 +58,6 @@ export function debounce<A extends unknown[]>(fn: (...a: A) => void, ms2: number
   let t: number | undefined;
   return (...a: A) => { window.clearTimeout(t); t = window.setTimeout(() => fn(...a), ms2); };
 }
+
+/** The service column: the name with the real port number beside it, "rtsp (554)", so nobody has to know which name goes with which port. */
+export const svcLabel = (app: string, port: number | null | undefined): string => (port ? `${app} (${port})` : app);

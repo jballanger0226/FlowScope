@@ -3,7 +3,7 @@ import { get, qs } from '../api.js';
 import { session, redraw } from '../state.js';
 import { btn, chip, empty, field, heading, note, seg, select, spinner, status as statusEl } from '../components.js';
 import { Follower, type Row } from './stream.js';
-import { bytes, dayClock, num, RANGES, debounce } from '../util.js';
+import { bytes, dayClock, num, RANGES, debounce, svcLabel } from '../util.js';
 
 
 let q = '';
@@ -103,7 +103,7 @@ function search(): VNode {
     errors.length ? note(errors.join('. '), 'warn', true) : null);
 }
 
-const COLS = '78px minmax(160px,1.4fr) minmax(160px,1.4fr) 60px 100px 150px 80px 72px 48px 116px 112px 108px';
+const COLS = '78px minmax(160px,1.4fr) minmax(160px,1.4fr) 60px 160px 150px 80px 72px 48px 116px 112px 108px';
 
 function qosTag(r: Row): VNode {
   if (!r.qosChanged) return h('span', { class: 'dim' }, '—');
@@ -132,7 +132,7 @@ function list(): VNode {
       h('span', { 'aria-live': 'polite' }, loading ? 'Searching…' : loadError ? '' : `${num(rows.length)} of ${num(total)} stream${total === 1 ? '' : 's'} shown${truncated ? ' (more exist: narrow the search)' : ''}`),
       h('span', null, 'Select a flow to follow the stream and inspect it hop by hop')),
     loadError ? note(loadError, 'bad', true) : null,
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${COLS};--w:1410px` },
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${COLS};--w:1470px` },
       h('div', { class: 'tr head' }, hdrBtn('Time', 'time'), h('span', null, 'Source'), h('span', null, 'Destination'), h('span', null, 'Proto'), h('span', null, 'Service'), h('span', null, 'VLAN'), hdrBtn('Bytes', 'bytes'), hdrBtn('Pkts', 'pkts'), h('span', null, 'Hops'), h('span', null, 'Status'), h('span', null, 'QoS'), h('span', null, 'TTL')),
       h('div', { class: 'scroll' },
         rows.map(r => h('button', { key: r.id, type: 'button', class: 'tr', 'aria-pressed': follow.selId === r.id, onclick: () => pick(r.id) },
@@ -140,7 +140,7 @@ function list(): VNode {
           h('span', { class: 'mono' }, r.srcIp, r.sport ? h('span', { class: 'dim' }, ':' + r.sport) : null),
           h('span', { class: 'mono' }, r.dstIp, r.dport ? h('span', { class: 'dim' }, ':' + r.dport) : null),
           h('span', { style: `font-weight:500;color:${PROTO_COLOR[r.protoName] ?? 'var(--text2)'}` }, r.protoName),
-          h('span', null, r.app),
+          h('span', null, svcLabel(r.app, r.appPort)),
           h('span', { class: 'mono muted', style: 'font-size:12px' }, r.vlan ? String(r.vlan) : '—', ' ', h('span', { class: 'dim' }, r.vlanName)),
           h('span', { class: 'mono', style: 'font-size:12px' }, bytes(r.bytes)),
           h('span', { class: 'mono', style: 'font-size:12px' }, num(r.pkts)),
