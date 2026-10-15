@@ -48,6 +48,8 @@ jobs:
           sudo apt-get install -y -qq qemu-utils qemu-system-x86 ovmf gdisk dosfstools e2fsprogs cloud-image-utils genisoimage
       - name: Build the images
         run: sudo env "PATH=$PATH" GIT_SHA="$GITHUB_SHA" packaging/vm/build.sh
+      - name: Hand the images back to the runner user
+        run: sudo chown -R "$(id -u):$(id -g)" vm-out
       - name: Check the OVA (layout, manifest, disk)
         run: |
           set -euo pipefail
