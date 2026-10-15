@@ -72,7 +72,7 @@ docker compose up -d                          # FlowScope and ClickHouse; data i
 
 **Without ClickHouse** (embedded SQLite, one container, nothing more to download, no password to set): `docker compose -f docker-compose.sqlite.yml up -d`, or `docker-compose.host.sqlite.yml` for host networking.
 
-or `docker build -t flowscope . && docker run -d -p 8443:8443 -p 2055:2055/udp -p 4739:4739/udp -v flowscope-data:/data flowscope`. A lone container has no ClickHouse server beside it, so it uses SQLite unless you pass `-e FLOWSCOPE_CLICKHOUSE_URL=...` for a server you run yourself.
+or `docker build -t flowscope . && docker run -d -p 443:443 -p 2055:2055/udp -p 4739:4739/udp -v flowscope-data:/data flowscope`. A lone container has no ClickHouse server beside it, so it uses SQLite unless you pass `-e FLOWSCOPE_CLICKHOUSE_URL=...` for a server you run yourself.
 The image has a health check (`flowscope healthcheck`), keeps everything in `/data`, and runs the server as the unprivileged `node` user (it starts as root only to make `/data` writable, then drops privileges; `--user 1000:1000` skips that).
 Behind a TLS-terminating proxy set `FLOWSCOPE_TLS=off` (serves HTTP on 8080), `FLOWSCOPE_TRUST_PROXY=1` and `FLOWSCOPE_PUBLIC_URL`.
 If every exporter shows up as the Docker bridge address, use `docker compose -f docker-compose.host.yml up -d`.
@@ -84,7 +84,7 @@ Everything can be done in the Proxmox web interface, without a shell:
 1. Download the template `debian-12-flowscope_<version>_amd64.tar.zst` from this repository's **Releases** page (built by GitHub Actions; or build it yourself with `packaging/lxc-template/build.sh`).
 2. Proxmox: your node → a storage → **CT Templates** → **Upload**.
 3. **Create CT**, choose that template (Debian 12, 2 cores, 4 GiB, 32 GiB disk is a good start; the template includes ClickHouse, which stores the flow records), start it, open **Console**, log in as `root`, and read the `admin` password from `/root/flowscope-admin-password.txt`.
-4. Open `https://<container address>:8443/`. Nothing needs to be started by hand. If the page does not load, run `flowscope-ctl doctor` in the console and see the troubleshooting part of the guide below (the container's **Nesting** option should be ticked).
+4. Open `https://<container address>/`. Nothing needs to be started by hand. If the page does not load, run `flowscope-ctl doctor` in the console and see the troubleshooting part of the guide below (the container's **Nesting** option should be ticked).
 
 A walkthrough of each wizard tab, updating, backups and troubleshooting: **[docs/deployment.md](docs/deployment.md)**. The same document covers the command-line alternative (`packaging/proxmox/flowscope-lxc.sh`, which creates the container for you) and running the Docker image directly as an OCI application container on Proxmox VE 9.1 and newer.
 
@@ -104,7 +104,7 @@ All settings are environment variables.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `FLOWSCOPE_DATA_DIR` | `/data` in a container; `/var/lib/flowscope` (root) or `~/.local/share/flowscope` on Linux; `~/Library/Application Support/FlowScope` on macOS; `%ProgramData%\FlowScope` on Windows | Everything FlowScope stores |
-| `FLOWSCOPE_HTTPS_PORT` | `8443` | Web console and API (TLS) |
+| `FLOWSCOPE_HTTPS_PORT` | `8443` (`443` in the container image and on Linux and Proxmox installs) | Web console and API (TLS). Ports below 1024 need a privilege: the Linux service unit and the container entrypoint grant `CAP_NET_BIND_SERVICE`; a run from source as an ordinary user should keep 8443 |
 | `FLOWSCOPE_TLS` | `auto` | `off` serves plain HTTP only (behind a proxy) |
 | `FLOWSCOPE_HTTP_PORT` | `0` (`8080` when TLS is off) | Plain HTTP listener |
 | `FLOWSCOPE_BIND` | `0.0.0.0` | Web bind address |

@@ -22,7 +22,7 @@ services:
     environment:
       FLOWSCOPE_ADMIN_PASSWORD: ${FLOWSCOPE_ADMIN_PASSWORD:-}
       # Ports are the settings below, not a "ports:" list, because the container uses the host's network directly.
-      FLOWSCOPE_HTTPS_PORT: ${FLOWSCOPE_HTTPS_PORT:-8443}
+      FLOWSCOPE_HTTPS_PORT: ${FLOWSCOPE_HTTPS_PORT:-443}
       FLOWSCOPE_FLOW_PORTS: ${FLOWSCOPE_FLOW_PORTS:-2055,4739}
       FLOWSCOPE_CLICKHOUSE_URL: ${FLOWSCOPE_CLICKHOUSE_URL:-http://flowscope:${CLICKHOUSE_PASSWORD:-}@127.0.0.1:8123/flowscope}
       FLOWSCOPE_BACKEND: ${FLOWSCOPE_BACKEND:-clickhouse}

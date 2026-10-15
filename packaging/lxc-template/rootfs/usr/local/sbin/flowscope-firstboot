@@ -59,7 +59,7 @@ cat > "$MOTD" <<MSG
 
   FlowScope is installed in this container.
 
-    Web console:  https://<this container's address>:8443/     (address: hostname -I, or the container's Summary tab)
+    Web console:  https://<this container's address>/      (address: hostname -I, or the container's Summary tab)
     Sign in as:   admin
     $note
     Exporters:    send NetFlow v5/v9 or IPFIX to this address, UDP 2055 or 4739

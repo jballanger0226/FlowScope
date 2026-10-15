@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
     # user: "1000:1000"        # run as this user from the start instead of starting as root and dropping to "node"; the /data volume must then be owned by it
     ports:
-      - "8443:8443/tcp"     # web console
+      - "443:443/tcp"       # web console
       - "2055:2055/udp"     # NetFlow v5 / v9 / IPFIX
       - "4739:4739/udp"     # IPFIX
     volumes:

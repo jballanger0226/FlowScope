@@ -6,7 +6,7 @@ This page says what FlowScope exposes, what it does and does not protect against
 
 | Port | Purpose | Who should reach it | Authentication |
 | --- | --- | --- | --- |
-| TCP 8443 (8080 with `FLOWSCOPE_TLS=off`) | Web console and API | Administrator networks only | Sign-in, roles, API tokens |
+| TCP 443 (8443 on Windows and macOS, and on Linux and Proxmox installs made before 443 became the default; 8080 with `FLOWSCOPE_TLS=off`) | Web console and API | Administrator networks only | Sign-in, roles, API tokens |
 | UDP 2055 and 4739 (`FLOWSCOPE_FLOW_PORTS`) | NetFlow v5/v9 and IPFIX from your routers and switches | Exporter addresses only | None. NetFlow and IPFIX have no authentication |
 
 FlowScope also connects out: UDP 161 to SNMP devices, UDP 1812 and 1813 to RADIUS, TCP 389 or 636 to LDAP and Active Directory, and TCP 8123 to ClickHouse (kept on the compose network or published on the loopback address only, never beyond it).
@@ -45,8 +45,8 @@ table inet flowscope_filter {
     udp dport { 2055, 4739 } ip saddr @exporters4 accept
     udp dport { 2055, 4739 } ip6 saddr @exporters6 accept
     udp dport { 2055, 4739 } drop
-    tcp dport 8443 ip saddr @admins4 accept
-    tcp dport 8443 drop
+    tcp dport 443 ip saddr @admins4 accept
+    tcp dport 443 drop
   }
 }
 ```
@@ -59,7 +59,7 @@ Save it in `/etc/nftables.conf` (or a file that one includes) and load it with `
 sudo ufw allow 22/tcp                       # first, so you do not lock yourself out of SSH
 sudo ufw default deny incoming
 sudo ufw allow from 192.0.2.0/24 to any port 2055,4739 proto udp
-sudo ufw allow from 203.0.113.0/24 to any port 8443 proto tcp
+sudo ufw allow from 203.0.113.0/24 to any port 443 proto tcp
 sudo ufw enable
 ```
 
@@ -73,7 +73,7 @@ Docker publishes container ports through its own firewall rules, which are evalu
   ```sh
   sudo iptables -I DOCKER-USER -p udp -m conntrack --ctorigdstport 2055 ! -s 192.0.2.0/24 -j DROP
   sudo iptables -I DOCKER-USER -p udp -m conntrack --ctorigdstport 4739 ! -s 192.0.2.0/24 -j DROP
-  sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport 8443 ! -s 203.0.113.0/24 -j DROP
+  sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdstport 443 ! -s 203.0.113.0/24 -j DROP
   ```
 
   The chain exists once Docker has started, and the rules are lost on reboot unless your distribution saves them (for example with `iptables-persistent`).
@@ -93,11 +93,11 @@ Set-NetFirewallRule -DisplayName 'FlowScope web (TCP 8443)'         -RemoteAddre
 
 ### Proxmox and macOS
 
-On Proxmox, enable the container firewall and allow the flow ports only from an IP set that holds your exporters, and TCP 8443 only from your administrator networks. On macOS, use the application firewall or `pf` the same way.
+On Proxmox, enable the container firewall and allow the flow ports only from an IP set that holds your exporters, and TCP 443 only from your administrator networks. On macOS, use the application firewall or `pf` the same way.
 
 ## Web console and API
 
-* Reach TCP 8443 from administrator networks only.
+* Reach TCP 443 (8443 on Windows and macOS) from administrator networks only.
 * Behind a reverse proxy, set `FLOWSCOPE_TRUST_PROXY` to the number of proxies in front of FlowScope (`1` for one). FlowScope then reads the client address from `X-Forwarded-For`, counting that many entries from the right, which is the address your own proxy recorded. Do not set it when clients can reach FlowScope directly, because then they can write the header themselves. Versions before this change used the leftmost entry, so a proxy that appends to a header the client supplied let the client choose the address that the sign-in throttle and the audit log record; there, make the proxy replace the header (nginx: `proxy_set_header X-Forwarded-For $remote_addr;`).
 * To cut someone off, disable or delete the account; either stops their API tokens. An administrator's password reset (in the console) and `flowscope reset-password` delete that user's API tokens and sessions; a user changing their own password does not, so scripts keep working. A token cannot create further tokens, so a leaked token cannot make a permanent one. Only administrators can create a token that never expires; everyone else is limited to 365 days. Versions before this change let tokens survive a reset and create tokens of any lifetime.
 * Keep the data directory private. It holds password hashes, session data and logs. FlowScope now removes group and other access from the data folder and `config.db` (with its `-wal` and `-shm` files) when it starts, if the account that runs it owns them. Set `FLOWSCOPE_KEEP_DATA_PERMS=1` to leave permissions alone, for example when a backup account reads the folder through group access. Older versions did not do this. On the Linux service you can also make the service create everything private from the start:

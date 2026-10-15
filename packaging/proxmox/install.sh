@@ -98,6 +98,7 @@ say "Using Node.js $(node -v) at $NODE_BIN"
 
 # ---------------------------------------------------------------- source
 src=""
+ref="${FLOWSCOPE_REF:-main}"
 if [ -n "${FLOWSCOPE_SRC:-}" ]; then
   if [ -d "$FLOWSCOPE_SRC" ]; then src="$FLOWSCOPE_SRC"
   elif [ -f "$FLOWSCOPE_SRC" ]; then
@@ -106,7 +107,6 @@ if [ -n "${FLOWSCOPE_SRC:-}" ]; then
     if [ ! -f "$work/src/package.json" ]; then top="$(find "$work/src" -mindepth 1 -maxdepth 1 -type d | head -n1)"; [ -n "$top" ] && src="$top"; else src="$work/src"; fi
   else die "FLOWSCOPE_SRC=$FLOWSCOPE_SRC does not exist."; fi
 elif [ -n "${FLOWSCOPE_REPO:-}" ]; then
-  ref="${FLOWSCOPE_REF:-main}"
   say "Downloading $FLOWSCOPE_REPO@$ref from GitHub"
   auth=(); [ -n "${GITHUB_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
   curl -fsSL "${auth[@]}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$FLOWSCOPE_REPO/tarball/$ref" -o "$work/src.tgz" \
@@ -167,6 +167,10 @@ if command -v systemctl >/dev/null 2>&1 && [ -z "${FLOWSCOPE_SKIP_SYSTEMD:-}" ] 
   say "Stopping the running service"; systemctl stop flowscope
 fi
 
+# what is installed now, to say afterwards whether the update changed anything
+old_ver=""
+[ -f "$OPT/dist/src/cli.js" ] && old_ver="$("$NODE_BIN" --disable-warning=ExperimentalWarning "$OPT/dist/src/cli.js" version 2>/dev/null | head -n1 || true)"
+
 new="$OPT.new"; rm -rf "$new"; mkdir -p "$new"
 cp -a "$build/dist" "$build/package.json" "$build/node_modules" "$new/"
 mkdir -p "$new/packaging"; cp -a "$build/packaging/." "$new/packaging/"
@@ -188,7 +192,8 @@ if [ ! -f "$ETC/flowscope.env" ]; then
 # One KEY=value per line. See the README for every setting. Restart after a change: systemctl restart flowscope
 # Password of the "admin" account. It is only read the first time FlowScope starts; delete this line after you have signed in.
 $pwline
-# FLOWSCOPE_HTTPS_PORT=8443
+# The web console. 443 on new installs; an install made before that keeps 8443 (this line is not added to an existing file).
+FLOWSCOPE_HTTPS_PORT=443
 # FLOWSCOPE_FLOW_PORTS=2055,4739
 # FLOWSCOPE_TLS=off              # plain HTTP on 8080 behind your own reverse proxy
 # FLOWSCOPE_PUBLIC_URL=https://flows.example.com
@@ -237,13 +242,14 @@ fi
 # ---------------------------------------------------------------- helper command
 cat > "$BIN_DIR/flowscope-ctl" <<CTL
 #!/bin/sh
-# Small helper installed by FlowScope. Usage: flowscope-ctl status | doctor | logs | update | reset-password <user> | version
+# Small helper installed by FlowScope. Usage: flowscope-ctl status | doctor | logs | update [branch-or-tag] | reset-password <user> | version
 case "\${1:-status}" in
   status) systemctl status flowscope --no-pager ;;
   doctor)
     # One screen of facts to read when the web console does not answer.
     echo "== service"; systemctl is-enabled flowscope 2>&1; systemctl is-active flowscope 2>&1
-    echo "== listening (expect TCP 8443 and UDP 2055, 4739)"; ss -H -ltun 2>/dev/null | grep -E ':(8443|2055|4739)\\b' || echo "nothing is listening on the FlowScope ports"
+    p=\$(sed -n 's/^[[:space:]]*FLOWSCOPE_HTTPS_PORT=\\([0-9]*\\).*/\\1/p' $ETC/flowscope.env 2>/dev/null | tail -n1); p=\${p:-8443}
+    echo "== listening (expect TCP \$p and UDP 2055, 4739)"; ss -H -ltun 2>/dev/null | grep -E ":(\$p|2055|4739)\\b" || echo "nothing is listening on the FlowScope ports"
     echo "== container type: \$(systemd-detect-virt 2>/dev/null || echo unknown)   (nesting must be on in the Proxmox container options if this is lxc)"
     echo "== last log lines"; journalctl -u flowscope --no-pager -n 25 2>&1
     echo "== first-boot service"; systemctl is-active flowscope-firstboot 2>&1 || true
@@ -259,12 +265,15 @@ case "\${1:-status}" in
   reset-password) shift; exec runuser -u flowscope -- env FLOWSCOPE_DATA_DIR=$VAR $NODE_BIN --disable-warning=ExperimentalWarning $OPT/dist/src/cli.js reset-password "\$@" ;;
   version) exec $NODE_BIN $OPT/dist/src/cli.js version ;;
   update)
-    # Downloads the current source from GitHub and installs it. A private repository needs GITHUB_TOKEN=... in $ETC/update.env (chmod 600).
+    # Downloads the source from GitHub and installs it: the main branch unless a branch or tag is given (flowscope-ctl update my-branch, or
+    # FLOWSCOPE_REF=my-branch in $ETC/update.env). A private repository needs GITHUB_TOKEN=... in $ETC/update.env (chmod 600).
+    ref_arg="\${2:-}"
     if [ -f $ETC/update.env ]; then set -a; . $ETC/update.env; set +a; fi
+    [ -z "\$ref_arg" ] || FLOWSCOPE_REF="\$ref_arg"
     t=\$(mktemp /tmp/flowscope-install.XXXXXX) || exit 1
     cp $OPT/packaging/proxmox/install.sh "\$t"
     exec env FLOWSCOPE_REPO="\${FLOWSCOPE_REPO:-jballanger0226/flowscope}" FLOWSCOPE_REF="\${FLOWSCOPE_REF:-main}" bash "\$t" --update ;;
-  *) echo "usage: flowscope-ctl status | doctor | logs | update | reset-password <user> | version" >&2; exit 2 ;;
+  *) echo "usage: flowscope-ctl status | doctor | logs | update [branch-or-tag] | reset-password <user> | version" >&2; exit 2 ;;
 esac
 CTL
 chmod 755 "$BIN_DIR/flowscope-ctl"
@@ -294,8 +303,19 @@ if [ -n "$first_pw" ]; then
   echo "  Sign in as:  admin"
   echo "  Password:    $first_pw   (used once; change it after signing in)"
 fi
-[ "$MODE" = "update" ] && echo "  Updated. If something is wrong, the previous version is in $OPT.prev"
-echo "  Web console: https://$(hostname -I 2>/dev/null | awk '{print $1}'):8443/   (self-signed certificate until you install your own)"
+if [ "$MODE" = "update" ]; then
+  new_ver="$("$NODE_BIN" --disable-warning=ExperimentalWarning "$OPT/dist/src/cli.js" version 2>/dev/null | head -n1 || true)"
+  if [ -n "${FLOWSCOPE_REPO:-}" ]; then from="$FLOWSCOPE_REPO@$ref"; else from="the source you gave"; fi
+  echo "  Updated from: ${old_ver:-unknown}"
+  echo "            to: ${new_ver:-unknown}   (source: $from)"
+  if [ -n "$old_ver" ] && [ "$old_ver" = "$new_ver" ]; then
+    echo "  This is the same build that was installed before. If you expected a newer one: the default source is the main branch;"
+    echo "  to install a branch or tag, run:  flowscope-ctl update <branch-or-tag>"
+  fi
+  echo "  If something is wrong, the previous version is in $OPT.prev"
+fi
+webport="$(sed -n 's/^[[:space:]]*FLOWSCOPE_HTTPS_PORT=\([0-9]*\).*/\1/p' "$ETC/flowscope.env" 2>/dev/null | tail -n1)"; webport="${webport:-8443}"   # an install from before 443 became the default keeps 8443
+echo "  Web console: https://$(hostname -I 2>/dev/null | awk '{print $1}'):$webport/   (self-signed certificate until you install your own)"
 echo "  Send NetFlow v5/v9 or IPFIX to UDP 2055 or 4739 on this machine."
 if grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' "$ETC/flowscope.env" 2>/dev/null || { [ -n "${FLOWSCOPE_TEMPLATE_BUILD:-}" ] && [ "$want_ch" = 1 ]; }; then
   echo "  Storage:     ClickHouse (data in /var/lib/clickhouse; it is on the container's root disk, so the container backup covers it)."

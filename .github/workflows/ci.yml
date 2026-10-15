@@ -86,7 +86,7 @@ jobs:
           docker logs fsuser; exit 1
       - name: Start and wait for the health check
         run: |
-          docker run -d --name fs -e FLOWSCOPE_ADMIN_PASSWORD='ci-password-12345' -p 8443:8443 flowscope:ci
+          docker run -d --name fs -e FLOWSCOPE_ADMIN_PASSWORD='ci-password-12345' -p 8443:443 flowscope:ci
           for i in $(seq 1 40); do
             s=$(docker inspect -f '{{.State.Health.Status}}' fs)
             echo "health: $s"; [ "$s" = healthy ] && exit 0; sleep 3
