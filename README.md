@@ -4,7 +4,7 @@ A NetFlow / IPFIX collector with per-hop stream tracing, SNMP link and QoS monit
 One Node.js 22 process, one data folder. Runs on Linux, macOS, Windows and as a container.
 
 * **Flow explorer**: search with tokens (`src:10.1.0.0/16 port:443 qos:changed dscp:46 vlan:140 exporter:...`), see every hop a stream took, and see where its DSCP marking was changed. Ports the exporter did not report (a switch that exports on input only shows "out —") are filled in from the other direction of the stream, the CDP/LLDP neighbour tables or host tracking, and marked "worked out". Each port lists its CDP/LLDP neighbours, and a neighbour that is one of your SNMP devices opens that device and port in Links & QoS. `ttl:expired` (or the **TTL expired only** button) lists streams whose TTL ran out before the destination.
-* **Links & QoS**: SNMP interface utilisation, errors/discards and Cisco CBQoS per-class drops, with charts and the streams crossing a link.
+* **Links & QoS**: SNMP interface utilisation, errors/discards and Cisco CBQoS per-class drops, with charts and the streams crossing a link. Each device shows what CDP and LLDP say is cabled to every port (a neighbour column in the interface table, and a Neighbours table), and a neighbour that is also an SNMP device opens in one click, on the port at the far end of the cable.
 * **Reports**: group by L2/L3/L4 fields, filter, top-N with "other", export CSV or JSON.
 * **Storage & retention**: raw, 1-minute, 1-hour and daily tiers with per-tier retention, size estimate, and a choice of ClickHouse (the default for the Docker, Linux and Proxmox installs, which set up a server) or embedded SQLite.
 * **Devices**: add SNMP devices one at a time or by discovery, with several credential sets tried in turn.

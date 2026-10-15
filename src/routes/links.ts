@@ -69,6 +69,19 @@ export function registerLinks(app: App): void {
     });
   });
 
+  // Everything a device's CDP and LLDP tables say, by port, with the neighbours that are polled devices linked so the console can open them.
+  w.get('/api/links/neighbors', 'ro', c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9);
+    const d = app.devices.row(dev);
+    if (!d) throw new HttpError(404, 'No such device');
+    const env = pathEnv(app), devs = env.devices();
+    const byPort = new Map<number, ReturnType<typeof app.hosts.neighborsOfDevice>>();
+    for (const n of app.hosts.neighborsOfDevice(dev)) { const a = byPort.get(n.ifIndex) ?? []; a.push(n); byPort.set(n.ifIndex, a); }
+    const ports = [...byPort].map(([ifIndex, rows]) => ({ ifIndex, ifName: env.ifName(dev, ifIndex), neighbors: neighborViews(rows, env, devs) }))
+      .sort((a, b) => a.ifName.localeCompare(b.ifName, undefined, { numeric: true }));
+    c.json({ ports, readAt: d.hosts_at, note: d.hosts_note ?? '', tracking: app.settings.get('hosts').enabled });
+  });
+
   // Where is this host plugged in? q is an IP address or a MAC address.
   w.get('/api/hosts/locate', 'ro', c => {
     const q = (c.query.get('q') ?? '').trim().slice(0, 64);

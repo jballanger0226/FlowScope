@@ -245,7 +245,7 @@ a.btn { text-decoration: none; }
 .uname { display: flex; flex-direction: column; line-height: 1.2; } .uname b { font-size: 13px; font-weight: 600; color: var(--text); } .uname small { font-size: 11.5px; color: var(--muted); }
 
 /* neighbours (CDP / LLDP) shown under a port, and port names that open the Links page */
-.lnk { background: none; border: 0; padding: 0; font: inherit; color: var(--accent-hi); cursor: pointer; text-decoration: underline; text-decoration-color: var(--accent-line); text-underline-offset: 2px; }
+.lnk { text-align: left; background: none; border: 0; padding: 0; font: inherit; color: var(--accent-hi); cursor: pointer; text-decoration: underline; text-decoration-color: var(--accent-line); text-underline-offset: 2px; }
 .lnk:hover, .lnk:focus-visible { text-decoration-color: currentColor; }
 .nbrs { display: flex; flex-direction: column; gap: 1px; margin: 1px 0 4px 14px; font-size: 11.5px; color: var(--text2); }
 .nbr { white-space: normal; overflow-wrap: anywhere; }
