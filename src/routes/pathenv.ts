@@ -15,6 +15,7 @@ export function pathEnv(app: App): PathEnv {
       }
       return devs;
     },
+    macOwner: mac => app.devices.macOwner(mac),
     ifName: (devId, ifIndex) => interfaces(devId).find(i => i.ifIndex === ifIndex)?.name ?? `if${ifIndex}`,
     ifIndexByName(devId, name) {
       const k = portKey(name);

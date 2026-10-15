@@ -18,6 +18,8 @@ export interface PathNeighbor { ifIndex: number; proto: string; name: string; po
 export interface PathDevice { id: number; name: string; sysName: string; ips: string[] }
 export interface PathEnv {
   devices(): PathDevice[];
+  /** The polled device and interface that own a MAC address, when SNMP has read it. */
+  macOwner?(mac: string): string | null;
   ifName(devId: number, ifIndex: number): string;
   /** ifIndex of the port called `name` (any spelling: Gi1/0/46, GigabitEthernet1/0/46) on a device, or null. */
   ifIndexByName(devId: number, name: string): number | null;
@@ -94,6 +96,9 @@ function portToward(devId: number, other: number, env: PathEnv, devs: PathDevice
 export function enrichPath(detail: StreamDetail, env: PathEnv, exporterDevice: (exporterIp: string) => number | null): void {
   const devs = env.devices();
   const all = [...detail.forward, ...detail.reverse];
+  for (const hp of all) {
+    hp.frameSrcOwner = hp.frameSrc && env.macOwner ? env.macOwner(hp.frameSrc) : null; hp.frameDstOwner = hp.frameDst && env.macOwner ? env.macOwner(hp.frameDst) : null;
+  }
   for (const hp of all) { hp.devId = exporterDevice(hp.exporter); hp.inFrom = hp.inIfIndex ? 'flow' : undefined; hp.outFrom = hp.outIfIndex ? 'flow' : undefined; }
 
   if (!isMulticast(detail.responder.ip)) {

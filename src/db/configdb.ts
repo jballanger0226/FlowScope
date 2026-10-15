@@ -185,6 +185,13 @@ const MIGRATIONS: string[] = [
   -- what each class matches and how it re-marks packets, read from the device's service policy, so a re-marked stream can be told from one nobody configured
   ALTER TABLE class_defs ADD COLUMN matched TEXT NOT NULL DEFAULT '[]';
   ALTER TABLE class_defs ADD COLUMN sets TEXT;
+  `,
+  `
+  -- each interface's own MAC address (so a MAC seen in a flow can be named), the netmask of each device address, and the latest uptime / CPU / memory / disk reading of each device
+  ALTER TABLE interfaces ADD COLUMN mac TEXT NOT NULL DEFAULT '';
+  ALTER TABLE device_ips ADD COLUMN mask TEXT NOT NULL DEFAULT '';
+  CREATE TABLE device_resources (dev_id INTEGER PRIMARY KEY, data TEXT NOT NULL, read_at INTEGER NOT NULL);
+  CREATE INDEX interfaces_mac ON interfaces(mac);
   `
 ];
 

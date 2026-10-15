@@ -1,19 +1,22 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw, go } from '../state.js';
-import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
+import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, stat, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
 import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, rangeMs, svcLabel } from '../util.js';
 import { post } from '../api.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
 interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
+interface Disk { name: string; usedPct: number; totalBytes: number; usedBytes: number }
+interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: number | null; load: [number, number, number] | null; memPct: number | null; memTotal: number | null; memUsed: number | null; swapPct: number | null; disks: Disk[]; source: string; readAt: number }
 interface Iface {
+  mac: string; addresses: string[];
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
   portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number;
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; flagged: boolean;
 }
-interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; interfaces: Iface[] }
+interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; resources: Resources | null; interfaces: Iface[] }
 interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number }; mibs: { name: string; what: string }[] }
 interface SeriesRes {
   util: { step: number; points: { ts: number; utilIn: number; utilOut: number; inBps: number; outBps: number; disc: number; err: number }[] };
@@ -531,6 +534,23 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
         : h('span', { class: 'dim' }, names.length ? 'No shown class went above the threshold in this window.' : 'There are no queue classes on this interface.')));
 }
 
+/** Uptime, CPU, memory and disk of the selected device. Shown for every kind of device, switches included. */
+const sevStyle = (p: number | null, warn = 75, bad = 90): string | undefined => (p === null ? undefined : p >= bad ? 'color:var(--bad)' : p >= warn ? 'color:var(--warn)' : undefined);
+function resourcesPanel(dev: Dev): VNode | null {
+  const r = dev.resources;
+  if (!r) return dev.lastOk === null ? null : h('span', { class: 'dim', style: 'font-size:12px' }, 'This device does not publish uptime, CPU or memory through HOST-RESOURCES-MIB, UCD-SNMP-MIB or the Cisco process and memory MIBs.');
+  const tiles: VNode[] = [];
+  if (r.uptimeSec !== null) tiles.push(stat('Uptime', dur(r.uptimeSec * 1000)));
+  if (r.cpuPct !== null) tiles.push(stat('CPU', h('span', { style: sevStyle(r.cpuPct) }, `${Math.round(r.cpuPct)}%`), [r.cores ? `${r.cores} cores` : null, r.load ? `load ${r.load.map(x => x.toFixed(2)).join(' / ')}` : null].filter(Boolean).join(' · ') || undefined));
+  else if (r.load) tiles.push(stat('Load average', r.load.map(x => x.toFixed(2)).join(' / '), '1, 5 and 15 minutes'));
+  if (r.memPct !== null) tiles.push(stat('Memory', h('span', { style: sevStyle(r.memPct) }, `${Math.round(r.memPct)}%`), r.memTotal !== null && r.memUsed !== null ? `${bytes(r.memUsed)} of ${bytes(r.memTotal)}${r.swapPct !== null ? ` · swap ${Math.round(r.swapPct)}%` : ''}` : undefined));
+  for (const d of r.disks) tiles.push(stat(`Disk ${d.name}`, h('span', { style: sevStyle(d.usedPct, 80, 95) }, `${d.usedPct < 10 ? d.usedPct.toFixed(1) : Math.round(d.usedPct)}%`), `${bytes(d.usedBytes)} of ${bytes(d.totalBytes)}`));
+  if (!tiles.length) return null;
+  return h('div', { class: 'col', style: 'gap:6px' },
+    h('div', { class: 'row', style: 'gap:10px;align-items:stretch' }, tiles),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, `Read ${ago(r.readAt)}${r.source ? ' from ' + r.source : ''}. Memory leaves out the file cache where the device reports it.`));
+}
+
 function streamsPanel(dev: Dev, itf: Iface): VNode {
   return h('div', { class: 'col', style: 'gap:8px' },
     h('div', { class: 'row', style: 'justify-content:space-between' }, h('b', null, `Streams leaving ${dev.name} · ${itf.name}`),
@@ -559,6 +579,7 @@ export function render(): VNode {
           h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, dev.name), h('span', { class: 'muted' }, `${roleLabel(dev.role)} · ${dev.ip} · ${dev.profile || 'generic'} · last answered ${ago(dev.lastOk)}`)),
           btn('Edit in SNMP devices', { kind: 'ghost', small: true, onclick: () => go('devices', { id: dev.id }) })),
         dev.status !== 'ok' && dev.lastError ? note(`The last poll failed: ${dev.lastError}`, 'warn') : null,
+        resourcesPanel(dev),
         ifTable(dev),
         dev.hasWlan ? wlanPanel(dev) : null,
         neighborsPanel(dev)) : null,
@@ -566,6 +587,7 @@ export function render(): VNode {
         h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, `${itf.name}${itf.alias ? ' · ' + itf.alias : ''}`),
           h('span', { class: 'muted' }, [itf.speedMbps ? (itf.speedMbps >= 1000 ? itf.speedMbps / 1000 + ' Gbps' : itf.speedMbps + ' Mbps') : 'speed unknown',
             itf.portMode === 'trunk' ? `trunk, native VLAN ${vlanLabel(itf.vlan, itf.vlanName) || 'unknown'}${itf.vlanList ? ', allowed ' + itf.vlanList : ''}` : itf.vlan ? `${itf.isVlanIf ? 'SVI for ' : ''}VLAN ${vlanLabel(itf.vlan, itf.vlanName)}${itf.voiceVlan ? ', voice VLAN ' + vlanLabel(itf.voiceVlan, itf.voiceVlanName) : ''}` : null,
+            itf.addresses?.length ? itf.addresses.join(', ') : null, itf.mac ? 'MAC ' + itf.mac : null,
             itf.policy ? 'output policy ' + itf.policy : null, itf.policyIn ? 'input policy ' + itf.policyIn : null].filter(Boolean).join(' · '))),
           h('div', { class: 'row' }, itf.flagged ? chip('Needs attention', 'warn') : chip('Within thresholds', 'ok'))),
         dev.qosNote ? note(dev.qosNote, 'warn') : null,

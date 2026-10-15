@@ -18,7 +18,7 @@ export interface Hop {
   n: number; exporter: string; dev: string; role: string; inIf: string; outIf: string; frameSrc: string | null; frameDst: string | null; vlan: number | null; vlanName: string;
   ttl: number | null; ttlExpired: 'ttl' | 'icmp' | null; dscpInS: string; dscpOutS: string; qosChanged: boolean; qosVerdict?: Verdict | null; pkts: number; bytes: number; linkMs: number | null; cumMs: number | null; policy: string | null;
   obs: { kind: string; text: string; severity: 'info' | 'warn' | 'bad' }[]; firstSeen: number; lastSeen: number;
-  outIfs?: string[]; sourcePort?: string | null; sourceConfirmed?: boolean;
+  outIfs?: string[]; sourcePort?: string | null; sourceConfirmed?: boolean; frameSrcOwner?: string | null; frameDstOwner?: string | null;
   notExported?: string[]; devId?: number | null; inFrom?: PortSource; outFrom?: PortSource; inNeighbors?: Neighbor[]; outNeighbors?: Neighbor[];
 }
 interface Attach { dev: string; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; confidence?: 'high' | 'medium' | 'low' }
@@ -174,7 +174,7 @@ function multicastTable(hops: Hop[]): VNode {
         hp.notExported ? h('div', { class: 'dim', style: 'font-size:11.5px', title: 'The exporter does not include these in what it sends, so they are blank here. Add them to its flow record (Flexible NetFlow / IPFIX template) to see them.' }, 'Not sent: ' + hp.notExported.join(', ')) : null),
       h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'in '), hp.inIf || '—'), neighborLines(hp.inNeighbors), h('div', null, h('span', { class: 'dim' }, 'out '), (hp.outIfs && hp.outIfs.length ? hp.outIfs : [hp.outIf]).join(', ') || '—'), neighborLines(hp.outNeighbors),
         hp.sourcePort ? h('div', { style: 'color:var(--accent)' }, `source host on ${hp.sourcePort}`) : null),
-      h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'src '), hp.frameSrc ?? '—'), h('div', null, h('span', { class: 'dim' }, 'dst '), hp.frameDst ?? '—')),
+      h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'src '), hp.frameSrc ?? '—'), ownerLine(hp.frameSrcOwner), h('div', null, h('span', { class: 'dim' }, 'dst '), hp.frameDst ?? '—'), ownerLine(hp.frameDstOwner)),
       h('span', { class: 'mono', style: 'font-size:12px' }, hp.vlan ? String(hp.vlan) : '—', ' ', h('span', { class: 'dim' }, hp.vlanName)),
       h('span', { class: 'mono', style: 'font-size:12px' }, hp.ttl === null ? '—' : String(hp.ttl)),
       h('span', { style: 'font-size:12px' }, hp.qosChanged ? h('span', { class: hp.qosVerdict?.kind === 'policy' ? 'tag info' : 'tag bad', title: hp.qosVerdict?.text }, `${hp.dscpInS} → ${hp.dscpOutS}`) : hp.dscpInS),
@@ -206,6 +206,11 @@ function hopsTable(hops: Hop[]): VNode {
         h('span', { class: 'mono', style: 'font-size:12px' }, i === 0 ? '—' : hp.cumMs === null ? '?' : ms(hp.cumMs)),
         h('div', { class: 'obs' }, hp.obs.length ? hp.obs.map((o, k) => h('span', { key: k, class: 'ob ' + o.severity }, o.text)) : h('span', { class: 'dim' }, 'Nominal')));
     })));
+}
+
+/** Names the device and port a frame MAC address belongs to, when SNMP has read it from that device's interfaces. */
+function ownerLine(owner: string | null | undefined): VNode | null {
+  return owner ? h('div', { style: 'font-size:11px;color:var(--accent-hi)', title: 'This MAC address is the address of an interface on a device FlowScope polls' }, '= ' + owner) : null;
 }
 
 function layers(d: Detail, r: { flags: number } | undefined, first: Hop | undefined): VNode {

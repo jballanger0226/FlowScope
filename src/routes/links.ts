@@ -9,8 +9,9 @@ import { isVlanInterface } from '../snmp/ports.js';
 import { DEFAULTS } from '../settings.js';
 
 export const MIBS = [
-  { name: 'IF-MIB · ifXTable, ifTable', what: 'Interface names, speed, status, 64-bit octet counters and discards.' },
-  { name: 'IP-MIB · ipAddrTable', what: 'The addresses of each device, so flow exporters are matched to the right device.' },
+  { name: 'IF-MIB · ifXTable, ifTable', what: 'Interface names, speed, status, each interface\'s own MAC address, 64-bit octet counters and discards.' },
+  { name: 'IP-MIB · ipAddrTable', what: 'The addresses and subnet masks of each device, so flow exporters are matched to the right device and each interface shows its subnet.' },
+  { name: 'HOST-RESOURCES-MIB · UCD-SNMP-MIB · CISCO-PROCESS-MIB · CISCO-MEMORY-POOL-MIB', what: 'Uptime, CPU, memory and disk use of each device, about once a minute. Cisco devices use their own process and memory pool tables, net-snmp devices (OPNsense, pfSense, Linux) the UCD-SNMP-MIB, and anything else the standard HOST-RESOURCES-MIB.' },
   { name: 'Q-BRIDGE-MIB · dot1qVlanStaticName', what: 'VLAN numbers and their names, so flows and interfaces can be searched by either.' },
   { name: 'CISCO-CLASS-BASED-QOS-MIB', what: 'Input and output service policies, per-class packets, bytes and drops, and queue depth (64-bit counters, or 32-bit where a device has no others). Used for devices that implement it.' },
   { name: 'CISCO-VLAN-MEMBERSHIP-MIB · CISCO-VTP-MIB · Q-BRIDGE-MIB', what: 'The VLAN of each port: access and voice VLAN, trunk native and allowed VLANs, or the standard port VLAN id.' },
@@ -36,13 +37,13 @@ export function registerLinks(app: App): void {
     const counts = app.hosts.portCounts();
     const devices = app.devices.list().map(d => ({
       id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
-      qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id),
+      qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
       interfaces: app.devices.interfaces(d.id).map(i => {
         const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
         // VLAN and SVI interfaces carry routed traffic for a whole subnet and are never listed under "needs attention"
         const vlanIf = isVlanInterface(i);
         return {
-          ifIndex: i.ifIndex, name: i.name, alias: i.alias, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
+          ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
           portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList,
           isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0,
           utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,

@@ -4,6 +4,7 @@ import type { HostOpts, HostTracker } from './hosts.js';
 import type { ClsPoint, IfPoint, TsStore } from '../store/types.js';
 import type { AppLog } from '../logger.js';
 import type { SnmpClient } from './client.js';
+import { readResources } from './resources.js';
 
 interface PrevIf { t: number; c: IfCounters }
 interface PrevCls { t: number; c: ClassCounters }
@@ -26,6 +27,7 @@ export class Poller {
   private refreshDue = new Map<number, number>();
   private refreshing = false;
   private lastPurge = 0;
+  private resourcesAt = new Map<number, number>();
 
   constructor(private devs: DeviceService, private store: Pick<TsStore, 'insertSnmp'>, private log: AppLog, private o: PollerOpts, private hosts?: HostTracker) {}
 
@@ -37,7 +39,7 @@ export class Poller {
 
   /** Forget cached counters and structure for a device (after removal or re-discovery). */
   forget(devId: number): void {
-    this.due.delete(devId); this.fails.delete(devId); this.structure.delete(devId); this.structureAt.delete(devId); this.hostDue.delete(devId); this.refreshDue.delete(devId);
+    this.due.delete(devId); this.fails.delete(devId); this.structure.delete(devId); this.structureAt.delete(devId); this.hostDue.delete(devId); this.refreshDue.delete(devId); this.resourcesAt.delete(devId);
     for (const k of [...this.prevIf.keys()]) if (k.startsWith(devId + '/')) this.prevIf.delete(k);
     for (const k of [...this.prevCls.keys()]) if (k.startsWith(devId + '/')) this.prevCls.delete(k);
   }
@@ -160,6 +162,11 @@ export class Poller {
             cls.push({ ts: t, dev: d.id, ifIndex: pol.ifIndex, cls: label, dt, prePkts: Number(pre), preBytes: Number(preB), postBytes: Number(postB), dropPkts: Number(drop), dropBytes: Number(dropB), qdepth: qd });
           }
         }
+      }
+      // Uptime, CPU, memory and disk change slowly, so they are read about once a minute. A device that does not publish them never fails the poll.
+      if (Date.now() - (this.resourcesAt.get(d.id) ?? 0) >= 55_000) {
+        this.resourcesAt.set(d.id, Date.now());
+        try { const r = await readResources(c, d.sys_object_id ?? ''); if (r) this.devs.saveResources(d.id, r); } catch { /* optional */ }
       }
       if (ifs.length || cls.length) await this.store.insertSnmp(ifs, cls);
       this.devs.recordPoll(d.id, true, null);

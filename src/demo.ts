@@ -2,6 +2,7 @@ import type { App } from './app.js';
 import type { FlowRecord } from './collector/types.js';
 import type { ClsPoint, IfPoint } from './store/types.js';
 import { dscpName } from './query/apps.js';
+import type { Resources } from './snmp/resources.js';
 
 /** Demo mode: a small simulated network (eight devices, the traffic between them and SNMP history) written straight into
  *  the real stores, so every screen has realistic data without any exporters. Nothing here talks to the network. */
@@ -10,6 +11,25 @@ type Role = 'switch' | 'router' | 'firewall';
 // interface: [name, description, speed Mbps, output policy, out util %, in util %]
 type Ifc = [string, string, number, string | null, number, number];
 interface Dev { name: string; ip: string; role: Role; descr: string; secs: number; ifs: Ifc[]; mac: string }
+
+/** A plausible, slowly moving uptime / CPU / memory / disk reading for a demo device, so the resource panels have something to show. */
+function demoResources(d: Dev, now: number): Resources {
+  const k = [...d.name].reduce((a, c) => a + c.charCodeAt(0), 0);
+  const wave = (period: number, phase = 0) => (Math.sin((now / 1000 + k * 37 + phase) / period) + 1) / 2;
+  const base = { switch: [6, 14, 38, 20, 4], router: [10, 24, 44, 24, 8], firewall: [14, 34, 58, 20, 16] }[d.role];
+  const cpu = Math.round(base[0] + wave(500) * base[1]);
+  const memTotal = base[4] * 1024 ** 3;
+  const memPct = Math.round((base[2] + wave(2400, 5) * base[3]) * 10) / 10;
+  const up = (3 + (k % 40)) * 86400 + 5 * 3600 + (k % 59) * 60;
+  return {
+    uptimeSec: up + Math.floor((now - DEMO_BOOT) / 1000), cpuPct: cpu, cores: d.role === 'firewall' ? 8 : d.role === 'router' ? 4 : null,
+    load: d.role === 'firewall' ? [Math.round(cpu / 12) / 10, Math.round(cpu / 14) / 10, Math.round(cpu / 16) / 10] : null,
+    memPct, memTotal, memUsed: Math.round(memTotal * memPct / 100), swapPct: d.role === 'firewall' ? 1.2 : null,
+    disks: d.role === 'firewall' ? [{ name: '/', usedPct: 18.4, totalBytes: 120 * 1024 ** 3, usedBytes: Math.round(120 * 1024 ** 3 * 0.184) }, { name: '/var/log', usedPct: 41.0, totalBytes: 20 * 1024 ** 3, usedBytes: Math.round(20 * 1024 ** 3 * 0.41) }] : [],
+    source: d.role === 'firewall' ? 'UCD-SNMP-MIB + HOST-RESOURCES-MIB' : 'CISCO-PROCESS-MIB + CISCO-MEMORY-POOL-MIB', readAt: now
+  };
+}
+const DEMO_BOOT = Date.now();
 
 const DEVS: Dev[] = [
   { name: 'dist-sw-01', ip: '10.255.0.2', role: 'switch', descr: 'Distribution switch', secs: 60, mac: '00:1c:73:00:00:02', ifs: [
@@ -337,6 +357,9 @@ function seedConfig(app: App, net: Net): void {
     });
     const ifs = db.prepare('SELECT if_index, name FROM interfaces WHERE dev_id = ?').all(row.id) as unknown as { if_index: number; name: string }[];
     for (const i of ifs) net.ifIdx.set(d.name + '|' + i.name, i.if_index);
+    // every interface answers with the device's MAC address in the demo, so a MAC seen in a stream can be named
+    db.prepare("UPDATE interfaces SET mac = ? WHERE dev_id = ? AND mac = ''").run(d.mac, row.id);
+    app.devices.saveResources(row.id, demoResources(d, Date.now()));
   }
   seedHosts(app, net);
   for (const [id, name] of VLANS) db.prepare("INSERT OR IGNORE INTO vlans(id, name, source) VALUES (?,?,'manual')").run(id, name);
@@ -421,7 +444,7 @@ export async function startDemo(app: App): Promise<void> {
     await app.store.insertSnmp(p.ifs, p.cls);
     for (const d of DEVS) if (only.has(d.name)) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
   });
-  every(60_000, async () => { seedHosts(app, net); });
+  every(60_000, async () => { seedHosts(app, net); for (const d of DEVS) app.devices.saveResources(net.ids.get(d.name)!, demoResources(d, Date.now())); });
   for (const d of DEVS) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
   void dscpName;
   console.log(' Demo sign-ins:  ' + DEMO_LOGINS.map(l => `${l.user} / ${l.password} (${l.role})`).join('   '));
