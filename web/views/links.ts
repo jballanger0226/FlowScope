@@ -4,6 +4,7 @@ import { redraw, go } from '../state.js';
 import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, spark, stat, note, PALETTE, select, spinner, status as statusEl, tabs, textInput, type Series } from '../components.js';
 import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, rangeMs, svcLabel } from '../util.js';
 import { post } from '../api.js';
+import { correlate, verdict } from './correlate.js';
 import { attentionPanel, cards, cardsRow, issues, type Target } from './links_overview.js';
 import { hardwarePanel, hasHardware, hasOptics, linkQuality, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
@@ -116,7 +117,7 @@ function select_(d: number, i: number, tab?: DevTab): void {
   if (d !== prevDev) { devTab = 'overview'; graphZoom = null; resZoom = null; quality = null; }
   if (tab) devTab = tab;
   devId = d; ifIndex = i; series = null; quality = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
-  if (d !== prevDev) { arpRes = null; arpQ = ''; void loadArp(); nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); void loadResHist(); healthRes = null; void loadHealth(); }
+  if (d !== prevDev) { arpRes = null; arpQ = ''; void loadArp(); nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); ifCpu = null; void loadResHist(); healthRes = null; void loadHealth(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
@@ -149,12 +150,14 @@ async function loadResHist(quiet = false): Promise<void> {
   if (my === rseq) { resHistLoading = false; redraw(); }
 }
 
+/** The device's CPU over the same stretch as the interface graphs, to set against its drops and discards. */
+let ifCpu: ResHist | null = null;
 let sseq = 0;
 const windowOf = (range: string, z: Zoom | null) => (z ? { from: z.from, to: z.to } : { range });
 async function loadSeries(): Promise<void> {
   if (!devId || !ifIndex) return;
   const my = ++sseq; seriesLoading = true; seriesError = ''; redraw();
-  void loadQuality(my);
+  void loadQuality(my); void loadIfCpu(my);
   try {
     const r = await get<SeriesRes>('/api/links/series' + qs({ dev: devId, if: ifIndex, ...windowOf(graphRange, graphZoom), points: 120 }));
     if (my !== sseq) return;
@@ -162,6 +165,33 @@ async function loadSeries(): Promise<void> {
   } catch (e) { if (my === sseq) { series = null; seriesError = (e as Error).message; } }
   if (my === sseq) { seriesLoading = false; redraw(); }
 }
+async function loadIfCpu(my: number): Promise<void> {
+  const d = devId;
+  try {
+    const r = await get<ResHist>('/api/links/resources' + qs({ dev: d, ...windowOf(graphRange, graphZoom), points: 120, ap: '' }));
+    if (my === sseq && d === devId) { ifCpu = r; redraw(); }
+  } catch { if (my === sseq) { ifCpu = null; redraw(); } }
+}
+const CPU_HIGH = 80;
+/** The CPU graph and a sentence on whether it lines up with the drops and discards shown, for the interface graphs. */
+function cpuMatch(moments: { kind: string; ts: number[] }[], from: number, to: number, fmtT: (t: number) => string): { chart: { key: string; build: (size: { w: number; h: number }) => VNode } | null; note: VNode | null } {
+  const pts = ifCpu?.points ?? [];
+  const cpu = pts.filter(p => p.cpu !== null).map(p => ({ t: p.ts, v: p.cpu as number }));
+  if (!cpu.length) return { chart: null, note: null };
+  const peaks = (ifCpu?.step ?? 0) >= 180_000;
+  const reach = Math.max(ifCpu?.step ?? 60_000, 90_000);
+  const peak = pts.filter(p => p.cpuMax !== null).map(p => ({ t: p.ts, v: p.cpuMax as number }));
+  const chart = { key: 'cpu', build: (size: { w: number; h: number }) => lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Device CPU (for comparison)', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks && peak.length ? [{ name: 'Peak', color: 'var(--s5)', points: peak }] : []), { name: 'CPU', color: 'var(--s1)', points: cpu }], from, to, fmtT, fmtV: v => pct(v, 1), aria: 'CPU of the device, to compare with drops and discards' }) };
+  const lines = moments.filter(m => m.ts.length).map(m => {
+    const v = verdict(correlate(m.ts, pts, CPU_HIGH, reach), CPU_HIGH);
+    return h('div', { key: m.kind, class: 'row', style: 'gap:8px;align-items:flex-start;flex-wrap:nowrap' }, chip(m.kind, v.level === 'warn' ? 'warn' : v.level === 'ok' ? 'ok' : 'info'), h('span', { style: 'font-size:12.5px' }, v.text));
+  });
+  const note_ = h('div', { class: 'col', style: 'gap:6px' }, h('b', { style: 'font-size:13px' }, 'Does the CPU explain them?'),
+    lines.length ? lines : h('span', { class: 'muted', style: 'font-size:12.5px' }, 'No drops or discards in this range, so there is nothing to compare.'),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, `Compared with the device CPU at the same moments (${CPU_HIGH}% counts as high). The CPU graph below shares the crosshair with the others.`));
+  return { chart, note: note_ };
+}
+
 /** Counter history (errors, discards, broadcast, multicast) of the selected interface, for the same window as the other graphs. */
 async function loadQuality(my: number): Promise<void> {
   const d = devId, i = ifIndex; qualityLoading = true;
@@ -635,9 +665,13 @@ function qualityGraphs(itf: Iface): VNode {
     make('mc', 'Multicast (packets per second)', inOut('inMc', 'outMc'), `Multicast packets on ${itf.name}`),
     make('types', 'Error types (per second)', kinds.flatMap(([k, n, c]) => ser(n, c, k)), `Error types on ${itf.name}`)
   ].filter((c): c is NonNullable<typeof c> => c !== null);
+  const hit = (...k: string[]): number[] => pts.filter(p => k.some(x => (p[x] ?? 0) > 0)).map(p => p.ts);
+  const match = cpuMatch([{ kind: 'Discards', ts: hit('inDisc', 'outDisc') }, { kind: 'Errors', ts: hit('inErr', 'outErr') }], from, to, fmtT);
+  if (match.chart && charts.length) charts.push(match.chart);
   return h('div', { class: 'col', style: 'gap:12px' },
     h('div', { class: 'row end' }, graphControls(), quality?.tier === 'h1' ? chip('hourly averages', 'info', 'The range is older than the per-read samples kept, so hourly summaries are shown') : null),
     qualityLoading && !quality ? spinner('Loading the counter history…') : null,
+    charts.length ? match.note : null,
     charts.length ? chartGrid(charts.length, size => charts.map(c => c.build(size))) : !qualityLoading ? h('span', { class: 'dim', style: 'font-size:12px' }, 'No counter history for this range yet. The counters are read every few minutes, and the graphs fill in as the device answers.') : null,
     charts.length ? h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Counters are read every few minutes, so a short burst shows as its average over the read.')) : null);
 }
@@ -651,6 +685,8 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
   const fmtT = axisTime(spanMs);
   const mk = (pick: (p: SeriesRes['classes'][0]['points'][0]) => number): Series[] => shown.map(c => ({ name: c.cls, color: classColor(c.cls, names), points: c.points.map(p => ({ t: p.ts, v: pick(p) })) }));
   const peak = (c: SeriesRes['classes'][0]) => Math.max(0, ...c.points.map(p => p.dropPct));
+  const dropTs = [...new Set(s.classes.flatMap(c => c.points.filter(p => p.dropPps > 0 || p.dropPct > 0).map(p => p.ts)))];
+  const match = cpuMatch([{ kind: 'Queue drops', ts: dropTs }, { kind: 'Discards', ts: s.util.points.filter(p => p.disc > 0).map(p => p.ts) }], from, to, fmtT);
   return h('div', { class: 'col', style: 'gap:14px' },
     h('div', { class: 'row end' },
       graphControls(),
@@ -659,7 +695,8 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
     names.length ? h('div', { role: 'group', 'aria-label': 'Classes shown', class: 'row', style: 'gap:8px' },
       s.classes.map(c => h('button', { key: c.cls, type: 'button', class: 'cbtn', 'aria-pressed': !hidden.has(c.cls), onclick: () => { if (hidden.has(c.cls)) hidden.delete(c.cls); else hidden.add(c.cls); redraw(); } },
         h('i', { class: 'sw', style: `background:${classColor(c.cls, names)};margin:0` }), h('span', null, c.cls), h('span', { class: 'dim' }, 'peak ' + pct(peak(c), 2))))) : null,
-    chartGrid(names.length ? 4 : 2, size => [
+    match.note,
+    chartGrid((names.length ? 4 : 2) + (match.chart ? 1 : 0), size => [
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Packets dropped (% of the class)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '%', series: mk(p => p.dropPct), from, to, threshold: dropThr, bands, fmtT, fmtV: v => pct(v, 2), aria: `Drop percentage per class on ${itf.name}` }) : null,
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Bytes dropped (per second)', unit: v => bytes(v) + '/s', series: mk(p => p.dropBps / 8), from, to, bands, fmtT, aria: `Bytes dropped per class on ${itf.name}` }) : null,
       lineChart({
@@ -669,7 +706,8 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
       lineChart({
         ...size, sync: 'iface', onZoom: zoomIf, title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)))), from, to, fmtT,
         series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }], aria: `Throughput of ${itf.name} in bits per second`
-      })
+      }),
+      match.chart ? match.chart.build(size) : null
     ]),
     h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
     h('div', { class: 'col', style: 'gap:6px' },
