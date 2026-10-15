@@ -29,21 +29,20 @@ function sensorTile(s: Sensor): VNode {
     sub && s.value !== null ? h('div', { class: 'ssub', style: colour(s.state) }, sub) : null);
 }
 
-/** Light levels and module temperature of each optic, one row per interface. */
-function opticsTable(optics: Sensor[], names: Map<number, string>, open: (ifIndex: number) => void): VNode {
-  const groups = new Map<string, Sensor[]>();
-  for (const s of optics) { const k = s.ifIndex !== undefined ? String(s.ifIndex) : s.name; (groups.get(k) ?? groups.set(k, []).get(k)!).push(s); }
-  const rows = [...groups].map(([k, list]) => {
-    const pick = (o: string) => list.find(x => x.optic === o);
-    const ifIndex = list[0].ifIndex;
-    return { k, ifIndex, name: ifIndex !== undefined ? names.get(ifIndex) ?? list[0].name : list[0].name, tx: pick('tx'), rx: pick('rx'), temp: pick('temp'), level: worst(list.map(x => x.state)) };
-  }).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const cell = (s: Sensor | undefined) => (s ? h('span', { class: 'mono', style: `font-size:12px;${colour(s.state) ?? ''}` }, s.value === null ? '—' : reading(s)) : h('span', { class: 'dim' }, '—'));
-  return h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(180px,1.4fr) 100px 100px 90px 110px;--w:640px' },
-    h('div', { class: 'tr head' }, ...['Interface', 'Transmit', 'Receive', 'Temperature', 'State'].map(t => h('span', null, t))),
-    rows.map(r => h('div', { key: r.k, class: 'tr' },
-      r.ifIndex !== undefined ? h('button', { type: 'button', class: 'lnk', title: 'Show this interface', style: 'text-align:left', onclick: () => open(r.ifIndex!) }, r.name) : h('span', null, r.name),
-      cell(r.tx), cell(r.rx), cell(r.temp), statusEl(r.level === 'off' ? 'off' : r.level, r.level === 'ok' ? 'ok' : r.level === 'warn' ? 'check' : r.level === 'bad' ? 'fault' : 'n/a')))));
+/** The optic of one interface: its transmit and receive light levels and module temperature, and the worst state among them. */
+export interface OpticInfo { tx?: Sensor; rx?: Sensor; temp?: Sensor; level: Level }
+export function opticMap(sensors: Sensor[]): Map<number, OpticInfo> {
+  const by = new Map<number, Sensor[]>();
+  for (const s of sensors) if (s.kind === 'optic' && s.ifIndex !== undefined) (by.get(s.ifIndex) ?? by.set(s.ifIndex, []).get(s.ifIndex)!).push(s);
+  const m = new Map<number, OpticInfo>();
+  for (const [ix, list] of by) m.set(ix, { tx: list.find(x => x.optic === 'tx'), rx: list.find(x => x.optic === 'rx'), temp: list.find(x => x.optic === 'temp'), level: worst(list.map(x => x.state)) });
+  return m;
+}
+/** The light levels for the interface table: "Rx -4.7 · Tx -1.9 dBm", coloured by the worst state. */
+export function opticCell(o: OpticInfo | undefined): VNode {
+  if (!o || (!o.tx && !o.rx)) return h('span', { class: 'dim' }, '—');
+  const v = (s: Sensor | undefined) => (s && s.value !== null ? String(Math.round(s.value * 10) / 10) : '—');
+  return h('span', { class: 'mono', style: `font-size:12px;${colour(o.level) ?? ''}`, title: `Receive ${v(o.rx)} dBm, transmit ${v(o.tx)} dBm${o.level === 'ok' ? '' : '. A reading is outside its limits.'}` }, `${v(o.rx)} / ${v(o.tx)}`);
 }
 
 const STP_TEXT = (s: Stp): string => (s.isRoot ? 'This device is the root bridge' : `Root bridge ${s.rootId}`);
@@ -83,14 +82,14 @@ export function healthSummary(data: HealthRes | null): VNode | null {
     att.length ? h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap' }, att.slice(0, 8).map(a => chip(a.text, a.level === 'bad' ? 'bad' : 'warn')), att.length > 8 ? chip(`+${att.length - 8} more`, 'default') : null)
       : h('div', { class: 'row', style: 'gap:6px' }, chip('Nothing outside its limits', 'ok')));
 }
-export const hasHardware = (data: HealthRes | null): boolean => !!data?.health && (data.health.sensors.length > 0 || data.health.poe.length > 0);
+export const hasHardware = (data: HealthRes | null): boolean => !!data?.health && (data.health.sensors.some(s => s.kind !== 'optic') || data.health.poe.length > 0);
+export const hasOptics = (data: HealthRes | null): boolean => !!data?.health && data.health.sensors.some(s => s.kind === 'optic' && s.ifIndex !== undefined);
 export const hasProtocols = (data: HealthRes | null): boolean => !!data?.health && (!!data.health.stp || data.health.ospf.length > 0 || data.health.bgp.length > 0);
 
-/** Sensors, optics and PoE: the physical state of the device. */
-export function hardwarePanel(o: { data: HealthRes | null; ifNames: Map<number, string>; openInterface: (ifIndex: number) => void }): VNode | null {
+/** Sensors and PoE: the physical state of the device. The light levels of optics are with their interfaces. */
+export function hardwarePanel(o: { data: HealthRes | null }): VNode | null {
   const hl = o.data?.health ?? null;
   if (!hl || !hasHardware(o.data)) return null;
-  const optics = hl.sensors.filter(s => s.kind === 'optic');
   const others = hl.sensors.filter(s => s.kind !== 'optic');
   const sections: (VNode | null)[] = [];
   for (const [kind, title] of SENSOR_GROUPS) {
@@ -99,7 +98,6 @@ export function hardwarePanel(o: { data: HealthRes | null; ifNames: Map<number, 
     sections.push(h('div', { key: kind, class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, title),
       h('div', { style: 'display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px' }, list.map(sensorTile))));
   }
-  if (optics.length) sections.push(h('div', { key: 'optics', class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Optics (light levels in dBm)'), opticsTable(optics, o.ifNames, o.openInterface)));
   if (hl.poe.length) sections.push(h('div', { key: 'poe', class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Power over Ethernet'),
     h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' }, hl.poe.map(p => stat(hl.poe.length > 1 ? `PoE source ${p.group}` : 'PoE power',
       h('span', { style: colour(p.status === 'faulty' ? 'bad' : p.usedPct !== null && p.usedPct >= 90 ? 'warn' : 'ok') }, p.usedW !== null && p.budgetW ? `${num(p.usedW)} of ${num(p.budgetW)} W` : p.status),
@@ -134,36 +132,56 @@ export function protocolsPanel(o: { data: HealthRes | null }): VNode | null {
   return h('div', { class: 'col', style: 'gap:12px' }, sections);
 }
 
-/** The link quality of one interface: duplex, errors, collisions and broadcast, multicast and unknown-protocol traffic, with plain-language warnings and the interface's optic readings. */
+/** What each counter means, in plain words, for the tile under its name. */
+const COUNTER_TEXT: Record<string, [string, string]> = {
+  inErr: ['Input errors', 'frames received with an error, all kinds'], outErr: ['Output errors', 'frames that could not be sent'],
+  inDisc: ['Input discards', 'received frames dropped with no error, usually for lack of buffer space'], outDisc: ['Output discards', 'frames dropped before sending, usually because the queue was full'],
+  fcs: ['CRC errors', 'frames with a bad checksum: a bad cable, optic or duplex mismatch'], align: ['Alignment errors', 'frames that did not end on a byte boundary'], symbol: ['Symbol errors', 'bad signal on the wire'],
+  late: ['Late collisions', 'collisions after the first 64 bytes. Half duplex only'], excessive: ['Excessive collisions', 'frames given up on after 16 collisions'], collisions: ['Collisions', 'frames that collided once or more. Half duplex only'],
+  carrier: ['Carrier sense errors', 'the carrier was lost while sending'], tooLong: ['Frames too long', 'frames longer than the interface accepts'], unknown: ['Unknown protocol', 'packets for a protocol the device does not run']
+};
+const ERROR_ORDER = ['inErr', 'outErr', 'inDisc', 'outDisc', 'fcs', 'align', 'symbol', 'late', 'excessive', 'collisions', 'carrier', 'tooLong', 'unknown'];
+
+/** The link quality of one interface: duplex, every error and discard counter by type, broadcast and multicast rates, the optic's light levels, and plain-language warnings. */
 export function linkQuality(x: IfExtra | undefined, optics: Sensor[], speedMbps: number | null): VNode | null {
   if (!x && !optics.length) return null;
-  const tiles: VNode[] = [];
-  const rate = (k: string): number | null => (x?.delta && x.dtSec && x.delta[k] !== undefined ? x.delta[k]! / x.dtSec : null);
   const perSec = (v: number) => `${v >= 10 ? num(Math.round(v)) : (Math.round(v * 10) / 10).toString()}/s`;
-  if (x) {
-    if (x.duplex && x.duplex !== 'unknown') tiles.push(stat('Duplex', h('span', { style: x.duplex === 'half' && (speedMbps ?? 0) >= 100 ? 'color:var(--bad)' : undefined }, x.duplex === 'full' ? 'Full' : 'Half')));
-    const errs = ['fcs', 'align', 'symbol'].map(k => x.totals[k]).filter((v): v is number => v !== undefined);
-    if (errs.length) {
-      const total = errs.reduce((a, b) => a + b, 0);
-      const d = x.delta ? ['fcs', 'align', 'symbol'].reduce((a, k) => a + (x.delta![k] ?? 0), 0) : null;
-      tiles.push(stat('Frame errors', h('span', { style: d ? 'color:var(--warn)' : undefined }, num(total)), `CRC, alignment and symbol errors since the counters started${d !== null ? ` · +${num(d)} in the last ${x.dtSec! < 120 ? x.dtSec + ' s' : Math.round(x.dtSec! / 60) + ' min'}` : ''}`));
-    }
-    if ((x.totals.collisions ?? 0) > 0 || (x.totals.late ?? 0) > 0) tiles.push(stat('Collisions', num((x.totals.collisions ?? 0) + (x.totals.late ?? 0) + (x.totals.excessive ?? 0)), (x.totals.late ?? 0) + (x.totals.excessive ?? 0) > 0 ? `${num((x.totals.late ?? 0) + (x.totals.excessive ?? 0))} late or excessive` : undefined));
-    const bc = [rate('inBc'), rate('outBc')].filter((v): v is number => v !== null).reduce((a, b) => a + b, 0), hasBc = rate('inBc') !== null || rate('outBc') !== null;
-    if (hasBc) tiles.push(stat('Broadcast', h('span', { style: bc >= 1000 ? 'color:var(--warn)' : undefined }, perSec(bc)), 'packets, in and out'));
-    const mc = [rate('inMc'), rate('outMc')].filter((v): v is number => v !== null).reduce((a, b) => a + b, 0), hasMc = rate('inMc') !== null || rate('outMc') !== null;
-    if (hasMc) tiles.push(stat('Multicast', perSec(mc), 'packets, in and out'));
-    if (x.totals.unknown) tiles.push(stat('Unknown protocol', num(x.totals.unknown), 'packets received for a protocol the device does not run'));
+  const since = x?.dtSec ? (x.dtSec < 120 ? x.dtSec + ' s' : Math.round(x.dtSec / 60) + ' min') : '';
+  const grid = (list: VNode[]) => h('div', { style: 'display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px' }, list);
+  const sect = (title: string, hint: string | null, body: VNode) => h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, title), hint ? h('span', { class: 'dim', style: 'font-size:11.5px' }, hint) : null), body);
+  const errs: VNode[] = [];
+  if (x) for (const k of ERROR_ORDER) {
+    const total = x.totals[k]; if (total === undefined) continue;
+    // collisions are counted once as single and multiple together, and late and excessive have their own tiles
+    const d = x.delta ? x.delta[k] : undefined;
+    const [label, what] = COUNTER_TEXT[k];
+    const bad = d !== undefined && d > 0 && k !== 'unknown';
+    errs.push(h('div', { key: k, class: 'stat', style: 'min-width:0;padding:10px 14px', title: what },
+      h('div', { class: 'slabel' }, label),
+      h('div', { class: 'svalue', style: `font-size:17px;${bad ? 'color:var(--warn)' : ''}` }, num(total)),
+      h('div', { class: 'ssub' }, d === undefined ? 'since the counters started' : d > 0 ? `+${num(d)} in the last ${since}` : `none in the last ${since}`)));
+  }
+  const cast: VNode[] = [];
+  if (x) for (const [k, label] of [['inBc', 'Broadcast in'], ['outBc', 'Broadcast out'], ['inMc', 'Multicast in'], ['outMc', 'Multicast out']] as const) {
+    const total = x.totals[k]; if (total === undefined) continue;
+    const r = x.delta && x.dtSec && x.delta[k] !== undefined ? x.delta[k]! / x.dtSec : null;
+    const hot = r !== null && k.endsWith('Bc') && r >= 1000;
+    cast.push(h('div', { key: k, class: 'stat', style: 'min-width:0;padding:10px 14px' }, h('div', { class: 'slabel' }, label),
+      h('div', { class: 'svalue', style: `font-size:17px;${hot ? 'color:var(--warn)' : ''}` }, r === null ? num(total) : perSec(r)), h('div', { class: 'ssub' }, `packets · ${num(total)} in total`)));
   }
   const pick = (o: string) => optics.find(s => s.optic === o);
-  for (const [o, label] of [['tx', 'Optic transmit'], ['rx', 'Optic receive'], ['temp', 'Optic temperature']] as const) {
-    const s = pick(o); if (s) tiles.push(stat(label, h('span', { style: colour(s.state) }, reading(s)), s.state === 'ok' ? undefined : s.stateText));
+  const light: VNode[] = [];
+  for (const [o, label] of [['rx', 'Receive light'], ['tx', 'Transmit light'], ['temp', 'Module temperature']] as const) {
+    const s = pick(o); if (s) light.push(stat(label, h('span', { style: colour(s.state) }, reading(s)), s.state === 'ok' ? undefined : s.stateText));
   }
+  const link: VNode[] = [];
+  if (x && x.duplex && x.duplex !== 'unknown') link.push(stat('Duplex', h('span', { style: x.duplex === 'half' && (speedMbps ?? 0) >= 100 ? 'color:var(--bad)' : undefined }, x.duplex === 'full' ? 'Full' : 'Half')));
   const warns = x?.warnings ?? [];
-  if (!tiles.length && !warns.length) return null;
-  return h('div', { class: 'col', style: 'gap:8px' },
-    h('b', null, 'Link quality'),
-    warns.length ? h('div', { class: 'col', style: 'gap:6px' }, warns.map((w, i) => note(w.text, w.level === 'bad' ? 'bad' : 'warn'))) : null,
-    tiles.length ? h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' }, tiles) : null,
-    x?.delta === null && x ? h('span', { class: 'dim', style: 'font-size:11.5px' }, 'Rates appear after the second read, a few minutes after the device is first polled.') : null);
+  if (!errs.length && !cast.length && !light.length && !link.length && !warns.length) return null;
+  return h('div', { class: 'col', style: 'gap:12px' },
+    warns.length ? h('div', { class: 'col', style: 'gap:6px' }, warns.map(w => note(w.text, w.level === 'bad' ? 'bad' : 'warn'))) : null,
+    link.length || light.length ? sect('Link and optic', null, h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' }, [...link, ...light])) : null,
+    errs.length ? sect('Errors and discards', 'Totals since the counters started, and what arrived since the read before', grid(errs)) : null,
+    cast.length ? sect('Broadcast and multicast', 'Packets per second over the last interval', grid(cast)) : null,
+    x?.delta === null && x ? h('span', { class: 'dim', style: 'font-size:11.5px' }, 'Changes appear after the second read, a few minutes after the device is first polled.') : null);
 }

@@ -162,6 +162,15 @@ export function registerLinks(app: App): void {
     c.json({ range, ...app.devices.resourceHistory(dev, range.from, range.to, points, /^[0-9a-f:.-]*$/.test(ap) ? ap : '') });
   });
 
+  // History of one interface's error, discard, broadcast and multicast counters, as rates per second
+  w.get('/api/links/quality', 'ro', c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9), ifx = int(c.query.get('if'), 0, 0, 1e9);
+    if (!app.devices.row(dev)) throw new HttpError(404, 'No such device');
+    const range = parseRange(c.query, '6h');
+    const points = int(c.query.get('points'), 120, 10, 600);
+    c.json({ range, ...app.devices.ifExtraHistory(dev, ifx, range.from, range.to, points) });
+  });
+
   // Events: stretches where utilisation or drops were over the alert thresholds
   w.get('/api/links/events', 'ro', async c => {
     const range = parseRange(c.query, '24h');

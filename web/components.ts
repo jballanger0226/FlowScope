@@ -162,7 +162,7 @@ export function chartGrid(count: number, make: (size: { w: number; h: number }) 
 }
 
 /** A line chart drawn with SVG. Shaded bands mark time spans (events). */
-export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; fmtT: (t: number) => string; /** Precise value text for the hover readout (defaults to unit) */ fmtV?: (v: number) => string; /** Full timestamp for the hover readout */ fmtFull?: (t: number) => string; /** Charts sharing this name on a page follow each other's hover: pointing at one marks the same moment on the rest */ sync?: string; /** Drawing size in CSS pixels, so text stays true to size at any window shape (see chartGrid) */ w?: number; h?: number; wide?: boolean }): VNode {
+export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; /** Called with the start and end of the stretch the user dragged across; the chart then has to be redrawn for that range */ onZoom?: (from: number, to: number) => void; fmtT: (t: number) => string; /** Precise value text for the hover readout (defaults to unit) */ fmtV?: (v: number) => string; /** Full timestamp for the hover readout */ fmtFull?: (t: number) => string; /** Charts sharing this name on a page follow each other's hover: pointing at one marks the same moment on the rest */ sync?: string; /** Drawing size in CSS pixels, so text stays true to size at any window shape (see chartGrid) */ w?: number; h?: number; wide?: boolean }): VNode {
   const W = Math.round(o.w ?? (o.wide ? 1100 : 520)), H = Math.round(o.h ?? 190), L = 76, R = 10, T = 8, B = 22;
   const all = o.series.flatMap(s => s.points.map(p => p.v));
   const maxV = o.yMax ?? Math.max(o.threshold ?? 0, ...all, 1e-9) * 1.1;
@@ -179,14 +179,18 @@ export function lineChart(o: { title: string; unit: (v: number) => string; serie
       o.series.map((s, i) => s.points.length ? h('polyline', { key: 's' + i, fill: 'none', style: `stroke:${s.color}`, 'stroke-width': 1.8, 'stroke-linejoin': 'round', points: s.points.map(p => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ') }) : null),
       xt.map((t, i) => h('text', { key: 'x' + i, x: x(t), y: H - 6, class: 'axis', 'text-anchor': i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle' }, o.fmtT(t))),
       // Hover tracking: a guide line and one dot per series that follow the pointer. They start hidden and are moved directly, not through a redraw.
+      h('rect', { key: 'sel', class: 'selrect', x: L, y: T, width: 0, height: H - T - B, visibility: 'hidden' }),
       h('line', { key: 'hl', class: 'hoverline', y1: T, y2: H - B, x1: L, x2: L, visibility: 'hidden' }),
       o.series.map((s, i) => h('circle', { key: 'd' + i, class: 'hoverdot', r: 4, cx: L, cy: T, visibility: 'hidden', style: `stroke:${s.color};fill:var(--panel)` })),
       h('rect', {
         key: 'hz', class: 'hoverzone', x: L, y: T, width: W - L - R, height: H - T - B, fill: 'transparent',
-        onpointermove: (e: PointerEvent) => hoverChart(e),
-        onpointerdown: (e: PointerEvent) => hoverChart(e),
-        onpointerleave: hoverOff,
-        onpointercancel: hoverOff
+        style: o.onZoom ? 'touch-action:pan-y;cursor:crosshair' : undefined,
+        onpointermove: (e: PointerEvent) => { if (!dragMove(e)) hoverChart(e); },
+        onpointerdown: (e: PointerEvent) => { dragStart(e); hoverChart(e); },
+        onpointerup: (e: PointerEvent) => dragEnd(e, false),
+        onlostpointercapture: (e: PointerEvent) => dragEnd(e, true),
+        onpointerleave: (e: PointerEvent) => { if (!drag) hoverOff(e); },
+        onpointercancel: (e: PointerEvent) => { dragEnd(e, true); hoverOff(e); }
       })));
 }
 
@@ -278,6 +282,51 @@ function hoverChart(e: PointerEvent): void {
     if (!orows || !b.width || b.bottom < 0 || b.top > window.innerHeight) { hideTip(key); continue; }
     readout(other, snapT, orows, b.top + 10, key);
   }
+}
+
+/** A drag across a chart that can zoom: where it began (in chart units), and whether it has moved far enough to count as a selection rather than a click. */
+let drag: { svg: Element; x0: number; id: number; moved: boolean; t0: number; t1: number } | null = null;
+const DRAG_MIN_PX = 6;
+const timeAt = (lc: LC, vx: number): number => lc.o.from + (Math.max(lc.g.L, Math.min(lc.g.W - lc.g.R, vx)) - lc.g.L) / Math.max(1, lc.g.W - lc.g.L - lc.g.R) * (lc.o.to - lc.o.from);
+function dragStart(e: PointerEvent): void {
+  const svg = (e.currentTarget as SVGElement).ownerSVGElement, lc = svg && lcOf(svg);
+  if (!svg || !lc || !lc.o.onZoom || (e.pointerType === 'mouse' && e.button !== 0)) return;
+  const box = svg.getBoundingClientRect(); if (!box.width) return;
+  const vx = (e.clientX - box.left) * (lc.g.W / box.width);
+  drag = { svg, x0: vx, id: e.pointerId, moved: false, t0: timeAt(lc, vx), t1: timeAt(lc, vx) };
+  try { (e.currentTarget as Element).setPointerCapture(e.pointerId); } catch { /* a synthetic event has no pointer to capture */ }
+}
+/** Shows the selected stretch on this chart and on the others in its group. */
+function showSel(svg: Element, t0: number, t1: number, on: boolean): void {
+  for (const c of [svg, ...siblings(svg)]) {
+    const lc = lcOf(c), r = c.querySelector('.selrect'); if (!lc || !r) continue;
+    if (!on) { r.setAttribute('visibility', 'hidden'); continue; }
+    const a = lc.g.x(Math.max(lc.o.from, Math.min(t0, t1))), b = lc.g.x(Math.min(lc.o.to, Math.max(t0, t1)));
+    r.setAttribute('x', a.toFixed(1)); r.setAttribute('width', Math.max(1, b - a).toFixed(1)); r.setAttribute('visibility', 'visible');
+  }
+}
+/** True while a selection is being dragged, so the hover readouts stay out of the way. */
+function dragMove(e: PointerEvent): boolean {
+  if (!drag) return false;
+  const svg = (e.currentTarget as SVGElement).ownerSVGElement, lc = svg && lcOf(svg);
+  if (!svg || svg !== drag.svg || !lc) return false;
+  const box = svg.getBoundingClientRect(); if (!box.width) return true;
+  const vx = (e.clientX - box.left) * (lc.g.W / box.width);
+  if (!drag.moved && Math.abs(vx - drag.x0) * (box.width / lc.g.W) < DRAG_MIN_PX) return false;
+  if (!drag.moved) { drag.moved = true; hideTip(); clear(svg); for (const o of siblings(svg)) clear(o); }
+  drag.t1 = timeAt(lc, vx);
+  showSel(svg, drag.t0, drag.t1, true);
+  return true;
+}
+function dragEnd(e: PointerEvent, cancel: boolean): void {
+  const d = drag; if (!d) return;
+  drag = null;
+  const svg = d.svg, lc = lcOf(svg);
+  showSel(svg, 0, 0, false);
+  try { (e.currentTarget as Element).releasePointerCapture?.(d.id); } catch { /* already released */ }
+  if (cancel || !d.moved || !lc?.o.onZoom) return;
+  const a = Math.min(d.t0, d.t1), b = Math.max(d.t0, d.t1);
+  if (b - a >= 1000) lc.o.onZoom(Math.round(a), Math.round(b));
 }
 
 let tipSeq = 0;

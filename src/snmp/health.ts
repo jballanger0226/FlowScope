@@ -286,9 +286,9 @@ export async function readHealth(c: SnmpClient, objectId = '', now = Date.now())
 /* ------------------------------------------------------------------ interface link quality (EtherLike-MIB, IF-MIB) */
 
 const DOT3 = { align: '1.3.6.1.2.1.10.7.2.1.2', fcs: '1.3.6.1.2.1.10.7.2.1.3', single: '1.3.6.1.2.1.10.7.2.1.4', multi: '1.3.6.1.2.1.10.7.2.1.5', late: '1.3.6.1.2.1.10.7.2.1.8', excessive: '1.3.6.1.2.1.10.7.2.1.9', carrier: '1.3.6.1.2.1.10.7.2.1.11', tooLong: '1.3.6.1.2.1.10.7.2.1.13', symbol: '1.3.6.1.2.1.10.7.2.1.18', duplex: '1.3.6.1.2.1.10.7.2.1.19' };
-const IFX = { admin: '1.3.6.1.2.1.2.2.1.7', unknown: '1.3.6.1.2.1.2.2.1.15', inMc: '1.3.6.1.2.1.31.1.1.1.2', inBc: '1.3.6.1.2.1.31.1.1.1.3', outMc: '1.3.6.1.2.1.31.1.1.1.4', outBc: '1.3.6.1.2.1.31.1.1.1.5', hcInMc: '1.3.6.1.2.1.31.1.1.1.8', hcInBc: '1.3.6.1.2.1.31.1.1.1.9', hcOutMc: '1.3.6.1.2.1.31.1.1.1.12', hcOutBc: '1.3.6.1.2.1.31.1.1.1.13' };
+const IFX = { admin: '1.3.6.1.2.1.2.2.1.7', unknown: '1.3.6.1.2.1.2.2.1.15', inMc: '1.3.6.1.2.1.31.1.1.1.2', inBc: '1.3.6.1.2.1.31.1.1.1.3', outMc: '1.3.6.1.2.1.31.1.1.1.4', outBc: '1.3.6.1.2.1.31.1.1.1.5', hcInMc: '1.3.6.1.2.1.31.1.1.1.8', hcInBc: '1.3.6.1.2.1.31.1.1.1.9', hcOutMc: '1.3.6.1.2.1.31.1.1.1.12', hcOutBc: '1.3.6.1.2.1.31.1.1.1.13', inDisc: '1.3.6.1.2.1.2.2.1.13', inErr: '1.3.6.1.2.1.2.2.1.14', outDisc: '1.3.6.1.2.1.2.2.1.19', outErr: '1.3.6.1.2.1.2.2.1.20' };
 
-export const EXTRA_COUNTERS = ['fcs', 'align', 'symbol', 'late', 'excessive', 'collisions', 'carrier', 'tooLong', 'unknown', 'inMc', 'inBc', 'outMc', 'outBc'] as const;
+export const EXTRA_COUNTERS = ['fcs', 'align', 'symbol', 'late', 'excessive', 'collisions', 'carrier', 'tooLong', 'unknown', 'inMc', 'inBc', 'outMc', 'outBc', 'inErr', 'outErr', 'inDisc', 'outDisc'] as const;
 export type ExtraCounter = (typeof EXTRA_COUNTERS)[number];
 export interface IfExtra {
   duplex: 'full' | 'half' | 'unknown' | null;
@@ -304,9 +304,10 @@ export interface IfExtra {
 /** Reads the extra interface counters of every interface in one pass. A counter the device does not publish is left out of that interface's totals. */
 export async function readIfExtra(c: SnmpClient, now = Date.now()): Promise<Map<number, IfExtra>> {
   const col = colsOf(c);
-  const [align, fcs, single, multi, late, exc, carrier, tooLong, symbol, duplex, admin, unknown, inMc, inBc, outMc, outBc, hInMc, hInBc, hOutMc, hOutBc] = await Promise.all([
+  const [align, fcs, single, multi, late, exc, carrier, tooLong, symbol, duplex, admin, unknown, inMc, inBc, outMc, outBc, hInMc, hInBc, hOutMc, hOutBc, inErr, outErr, inDisc, outDisc] = await Promise.all([
     col(DOT3.align), col(DOT3.fcs), col(DOT3.single), col(DOT3.multi), col(DOT3.late), col(DOT3.excessive), col(DOT3.carrier), col(DOT3.tooLong), col(DOT3.symbol), col(DOT3.duplex),
-    col(IFX.admin), col(IFX.unknown), col(IFX.inMc), col(IFX.inBc), col(IFX.outMc), col(IFX.outBc), col(IFX.hcInMc), col(IFX.hcInBc), col(IFX.hcOutMc), col(IFX.hcOutBc)
+    col(IFX.admin), col(IFX.unknown), col(IFX.inMc), col(IFX.inBc), col(IFX.outMc), col(IFX.outBc), col(IFX.hcInMc), col(IFX.hcInBc), col(IFX.hcOutMc), col(IFX.hcOutBc),
+    col(IFX.inErr), col(IFX.outErr), col(IFX.inDisc), col(IFX.outDisc)
   ]);
   const keys = new Set<string>([...admin.keys(), ...fcs.keys(), ...duplex.keys(), ...inBc.keys(), ...hInBc.keys()]);
   const n = (m: Map<string, SnmpValue>, k: string): number | undefined => { const v = m.get(k); if (v === undefined || v === null) return undefined; const b = toBigInt(v); return b === null ? undefined : Number(b); };
@@ -319,6 +320,7 @@ export async function readIfExtra(c: SnmpClient, now = Date.now()): Promise<Map<
     const s = n(single, k), m = n(multi, k); if (s !== undefined || m !== undefined) totals.collisions = (s ?? 0) + (m ?? 0);
     put('unknown', n(unknown, k));
     put('inMc', n(hInMc, k) ?? n(inMc, k)); put('inBc', n(hInBc, k) ?? n(inBc, k)); put('outMc', n(hOutMc, k) ?? n(outMc, k)); put('outBc', n(hOutBc, k) ?? n(outBc, k));
+    put('inErr', n(inErr, k)); put('outErr', n(outErr, k)); put('inDisc', n(inDisc, k)); put('outDisc', n(outDisc, k));
     const d = n(duplex, k);
     out.set(idx, { duplex: d === 3 ? 'full' : d === 2 ? 'half' : d === 1 ? 'unknown' : null, admin: n(admin, k) ?? null, totals, delta: null, dtSec: null, readAt: now });
   }

@@ -1,5 +1,6 @@
 import net from 'node:net';
 import { diffExtra, linkOptics, type Health, type IfExtra } from './health.js';
+import { forgetIfExtra, ifExtraSeries, pruneIfExtra, recordIfExtra, type IfExtraSeries } from './iface_history.js';
 import { forgetResources, pruneResources, recordResources, resourceSeries, type ResSeries } from './resource_history.js';
 import type { ConfigDb } from '../db/configdb.js';
 import type { CredentialStore } from './creds.js';
@@ -203,7 +204,7 @@ export class DeviceService {
   saveIfExtra(id: number, now: Map<number, IfExtra>): void {
     const prev = this.ifExtra(id);
     const up = this.cdb.db.prepare('INSERT INTO iface_extra(dev_id, if_index, data, read_at) VALUES (?,?,?,?) ON CONFLICT(dev_id, if_index) DO UPDATE SET data=excluded.data, read_at=excluded.read_at');
-    this.cdb.tx(() => { for (const [ix, x] of now) { const d = diffExtra(prev.get(ix), x); up.run(id, ix, JSON.stringify(d), d.readAt); } });
+    this.cdb.tx(() => { for (const [ix, x] of now) { const d = diffExtra(prev.get(ix), x); up.run(id, ix, JSON.stringify(d), d.readAt); try { recordIfExtra(this.cdb.db, id, ix, d); } catch { /* history is a bonus */ } } });
   }
 
   ifExtra(id: number): Map<number, IfExtra> {
@@ -213,7 +214,8 @@ export class DeviceService {
   }
 
   resourceHistory(id: number, from: number, to: number, points: number, ap = ''): ResSeries { return resourceSeries(this.cdb.db, id, from, to, points, Date.now(), ap); }
-  pruneResourceHistory(days: number): void { pruneResources(this.cdb.db, days); }
+  pruneResourceHistory(days: number): void { pruneResources(this.cdb.db, days); pruneIfExtra(this.cdb.db, days); }
+  ifExtraHistory(id: number, ifIndex: number, from: number, to: number, points: number): IfExtraSeries { return ifExtraSeries(this.cdb.db, id, ifIndex, from, to, points); }
 
   resources(id: number): Resources | null {
     const r = this.cdb.db.prepare('SELECT data FROM device_resources WHERE dev_id = ?').get(id) as { data: string } | undefined;
@@ -322,7 +324,7 @@ export class DeviceService {
       this.cdb.db.prepare('DELETE FROM device_resources WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_health WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM iface_extra WHERE dev_id = ?').run(id);
-      forgetResources(this.cdb.db, id);
+      forgetResources(this.cdb.db, id); forgetIfExtra(this.cdb.db, id);
       this.cdb.db.prepare('DELETE FROM devices WHERE id = ?').run(id);
     });
     await this.store.deleteDevice(id);

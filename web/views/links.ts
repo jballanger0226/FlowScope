@@ -4,7 +4,7 @@ import { redraw, go } from '../state.js';
 import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, spark, stat, note, PALETTE, select, spinner, status as statusEl, tabs, textInput, type Series } from '../components.js';
 import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, rangeMs, svcLabel } from '../util.js';
 import { post } from '../api.js';
-import { hardwarePanel, hasHardware, healthSummary, linkQuality, protocolsPanel, type HealthRes } from './links_health.js';
+import { hardwarePanel, hasHardware, hasOptics, healthSummary, linkQuality, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
 interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
@@ -49,6 +49,13 @@ let nbRes: NbRes | null = null; let nbError = ''; let nbLoading = false;
 let wlan: WlanRes | null = null; let wlanError = ''; let wlanLoading = false; let clientFilter = '';
 let devId = 0; let ifIndex = 0;
 let graphRange = '6h';
+/** The stretch of time the user dragged across on a graph, when the graphs are zoomed in; null shows the chosen range ending now. */
+type Zoom = { from: number; to: number };
+let graphZoom: Zoom | null = null; let resZoom: Zoom | null = null;
+type IfTab = 'traffic' | 'quality' | 'hosts';
+let ifTab: IfTab = 'traffic';
+interface QualityRes { step: number; tier: 'raw' | 'h1'; points: ({ ts: number } & Partial<Record<string, number>>)[] }
+let quality: QualityRes | null = null; let qualityLoading = false;
 let dropThr = 1;
 let hidden = new Set<string>();
 interface ResPoint { ts: number; cpu: number | null; cpuMax: number | null; mem: number | null; memMax: number | null; swap: number | null; disk: number | null; load: number | null; loadMax: number | null; temp: number | null; tempMax: number | null; sess: number | null; sessMax: number | null }
@@ -103,9 +110,9 @@ function resolvePending(): void {
 let prevDev = 0;
 function select_(d: number, i: number, tab?: DevTab): void {
   if (d !== devId) ifSearch = '';
-  if (d !== prevDev) devTab = 'overview';
+  if (d !== prevDev) { devTab = 'overview'; graphZoom = null; resZoom = null; quality = null; }
   if (tab) devTab = tab;
-  devId = d; ifIndex = i; series = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
+  devId = d; ifIndex = i; series = null; quality = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
   if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); void loadResHist(); healthRes = null; void loadHealth(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
@@ -132,7 +139,7 @@ async function loadResHist(quiet = false): Promise<void> {
   const keys = ['', ...(wlan?.aps ?? []).map(a => a.mac.toLowerCase())];
   await Promise.all(keys.map(async k => {
     try {
-      const r = await get<ResHist>('/api/links/resources' + qs({ dev: d, range: resRange, points: 120, ap: k }));
+      const r = await get<ResHist>('/api/links/resources' + qs({ dev: d, ...windowOf(resRange, resZoom), points: 120, ap: k }));
       if (my === rseq && d === devId) { resHists.set(k, r); if (k === '') resHistError = ''; }
     } catch (e) { if (my === rseq && !quiet && k === '') { resHists.delete(k); resHistError = (e as Error).message; } }
   }));
@@ -140,15 +147,26 @@ async function loadResHist(quiet = false): Promise<void> {
 }
 
 let sseq = 0;
+const windowOf = (range: string, z: Zoom | null) => (z ? { from: z.from, to: z.to } : { range });
 async function loadSeries(): Promise<void> {
   if (!devId || !ifIndex) return;
   const my = ++sseq; seriesLoading = true; seriesError = ''; redraw();
+  void loadQuality(my);
   try {
-    const r = await get<SeriesRes>('/api/links/series' + qs({ dev: devId, if: ifIndex, range: graphRange, points: 120 }));
+    const r = await get<SeriesRes>('/api/links/series' + qs({ dev: devId, if: ifIndex, ...windowOf(graphRange, graphZoom), points: 120 }));
     if (my !== sseq) return;
     series = r;
   } catch (e) { if (my === sseq) { series = null; seriesError = (e as Error).message; } }
   if (my === sseq) { seriesLoading = false; redraw(); }
+}
+/** Counter history (errors, discards, broadcast, multicast) of the selected interface, for the same window as the other graphs. */
+async function loadQuality(my: number): Promise<void> {
+  const d = devId, i = ifIndex; qualityLoading = true;
+  try {
+    const r = await get<QualityRes>('/api/links/quality' + qs({ dev: d, if: i, ...windowOf(graphRange, graphZoom), points: 120 }));
+    if (my === sseq && d === devId && i === ifIndex) quality = r;
+  } catch { if (my === sseq) quality = null; }
+  if (my === sseq) { qualityLoading = false; redraw(); }
 }
 async function loadStreams(): Promise<void> {
   if (!devId || !ifIndex) return;
@@ -304,7 +322,9 @@ function policyCell(i: Iface): VNode {
 }
 
 function ifTable(dev: Dev): VNode {
-  const cols = 'minmax(88px,0.8fr) minmax(120px,1fr) minmax(130px,1fr) minmax(140px,1.1fr) 52px 58px 118px 118px 64px minmax(84px,0.8fr) 70px';
+  const optics = opticMap(healthRes?.health?.sensors ?? []);
+  const light = hasOptics(healthRes);
+  const cols = 'minmax(88px,0.8fr) minmax(120px,1fr) minmax(130px,1fr) minmax(140px,1.1fr) 52px 58px ' + (light ? '112px ' : '') + '118px 118px 64px minmax(84px,0.8fr) 70px';
   const nbOf = (ix: number): Neighbor[] => nbRes?.ports.find(p => p.ifIndex === ix)?.neighbors ?? [];
   const rows = filterIfaces(dev.interfaces);
   return h('div', { class: 'col', style: 'gap:8px' },
@@ -313,8 +333,8 @@ function ifTable(dev: Dev): VNode {
       ifSearch.trim() ? btn('Clear', { kind: 'ghost', small: true, onclick: () => { ifSearch = ''; redraw(); } }) : null,
       h('span', { class: 'muted', role: 'status', 'aria-live': 'polite' }, ifSearch.trim() ? `${rows.length} of ${dev.interfaces.length} interfaces` : `${dev.interfaces.length} interfaces`),
       h('span', { class: 'dim', style: 'font-size:12px' }, 'Words must all match. A number is a VLAN id; vlan:20 matches only VLANs.')),
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1230px` },
-      h('div', { class: 'tr head' }, ...['Interface', 'Description', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', 'In', 'Out', 'Discards', 'Service policy', 'Flows'].map(t => h('span', null, t))),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:${light ? 1345 : 1230}px` },
+      h('div', { class: 'tr head' }, ...['Interface', 'Description', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', ...(light ? [h('span', { title: 'Optic light levels in dBm: receive / transmit' }, 'Light Rx / Tx')] : []), 'In', 'Out', 'Discards', 'Service policy', 'Flows'].map(t => (typeof t === 'string' ? h('span', null, t) : t))),
       h('div', { class: 'scroll' }, rows.map(i => h('div', { key: i.ifIndex, class: 'tr pick', 'aria-current': i.ifIndex === ifIndex ? 'true' : undefined, onclick: () => select_(dev.id, i.ifIndex, 'interfaces') },
         h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex, 'interfaces'); } }, i.name), i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
         h('span', { class: 'muted' }, i.alias || '—'),
@@ -322,6 +342,7 @@ function ifTable(dev: Dev): VNode {
         vlanCell(i),
         h('span', { class: 'mono', style: 'font-size:12px' }, i.speedMbps ? (i.speedMbps >= 1000 ? i.speedMbps / 1000 + ' G' : i.speedMbps + ' M') : '—'),
         h('span', null, i.oper === 'up' ? statusEl('ok', 'up') : statusEl(i.oper === 'down' ? 'bad' : 'off', i.oper)),
+        light ? opticCell(optics.get(i.ifIndex)) : null,
         utilCell(i.utilIn, i.inBps), utilCell(i.utilOut, i.outBps),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(i.disc + i.err)),
         policyCell(i),
@@ -535,33 +556,85 @@ function events(s: SeriesRes, names: string[]): Ev[] {
   return out.sort((a, b) => b.a - a.a);
 }
 
+/** The time the interface graphs show: the stretch the user zoomed to, or the chosen range ending now. */
+function graphWindow(): { from: number; to: number; spanMs: number } {
+  const to = graphZoom ? graphZoom.to : Date.now();
+  const from = graphZoom ? graphZoom.from : to - (rangeMs(graphRange) ?? 6 * 3600e3);
+  return { from, to, spanMs: to - from };
+}
+/** Axis labels: with seconds on a short stretch, with the day on a long one. */
+const axisTime = (spanMs: number) => (t: number): string => (spanMs > 86400e3 ? dayClock(t) : clock(t, spanMs < 20 * 60e3));
+const zoomIf = (from: number, to: number): void => { graphZoom = { from, to }; void loadSeries(); };
+const zoomRes = (from: number, to: number): void => { resZoom = { from, to }; void loadResHist(); };
+/** Tells how to zoom, or shows what the graphs are zoomed to and a button to go back. */
+function zoomBar(z: Zoom | null, reset: () => void): VNode {
+  return z ? h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, chip(`Zoomed to ${dayClock(z.from)} – ${dayClock(z.to)} (${dur(z.to - z.from)})`, 'accent', 'Showing only the stretch you dragged across'), btn('Show the full range', { small: true, kind: 'ghost', onclick: reset }))
+    : h('span', { class: 'dim', style: 'font-size:12px' }, 'Drag across a graph to zoom in on that time.');
+}
+/** The time range picker and zoom state shared by the interface graphs. */
+function graphControls(): VNode {
+  return h('span', { class: 'row', style: 'gap:10px' }, rangePicker('links-graphs', graphRange, GRAPH_RANGES, v => { graphRange = v; graphZoom = null; void loadSeries(); }, { aria: 'Graph time range' }),
+    zoomBar(graphZoom, () => { graphZoom = null; void loadSeries(); }));
+}
+
+/** Errors, discards, broadcast and multicast of the selected interface over time. Each counter's growth per second, read every few minutes. */
+function qualityGraphs(itf: Iface): VNode {
+  const { from, to, spanMs } = graphWindow();
+  const fmtT = axisTime(spanMs);
+  const pts = quality?.points ?? [];
+  const ser = (name: string, color: string, key: string): Series[] => {
+    const v = pts.filter(p => p[key] !== undefined).map(p => ({ t: p.ts, v: p[key] as number }));
+    return v.length ? [{ name, color, points: v }] : [];
+  };
+  const axis = (v: number) => (v === 0 ? '0' : v >= 100 ? num(v) + '/s' : v >= 10 ? v.toFixed(0) + '/s' : v >= 1 ? v.toFixed(1) + '/s' : v.toFixed(2) + '/s');
+  const exact = (v: number) => (v < 0.1 ? v.toFixed(3) : v < 10 ? v.toFixed(2) : num(v)) + '/s';
+  const make = (key: string, title: string, series: Series[], aria: string): { key: string; build: (size: { w: number; h: number }) => VNode } | null => {
+    if (!series.length) return null;
+    const top = Math.max(0.1, ...series.flatMap(x => x.points.map(p => p.v)));
+    return { key, build: size => lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title, unit: axis, fmtV: exact, yMax: niceCeil(top), series, from, to, fmtT, aria }) };
+  };
+  const inOut = (a: string, b: string): Series[] => [...ser('In', 'var(--s3)', a), ...ser('Out', 'var(--s1)', b)];
+  const kinds: [string, string, string][] = [['fcs', 'CRC errors', 'var(--s1)'], ['align', 'Alignment errors', 'var(--s2)'], ['symbol', 'Symbol errors', 'var(--s3)'], ['late', 'Late collisions', 'var(--s4)'], ['excessive', 'Excessive collisions', 'var(--s5)'], ['collisions', 'Collisions', 'var(--s6)'], ['carrier', 'Carrier sense errors', 'var(--s7)'], ['tooLong', 'Frames too long', 'var(--s8)']];
+  const charts = [
+    make('err', 'Errors (per second)', inOut('inErr', 'outErr'), `Errors on ${itf.name}`),
+    make('disc', 'Discards (per second)', inOut('inDisc', 'outDisc'), `Discards on ${itf.name}`),
+    make('bc', 'Broadcast (packets per second)', inOut('inBc', 'outBc'), `Broadcast packets on ${itf.name}`),
+    make('mc', 'Multicast (packets per second)', inOut('inMc', 'outMc'), `Multicast packets on ${itf.name}`),
+    make('types', 'Error types (per second)', kinds.flatMap(([k, n, c]) => ser(n, c, k)), `Error types on ${itf.name}`)
+  ].filter((c): c is NonNullable<typeof c> => c !== null);
+  return h('div', { class: 'col', style: 'gap:12px' },
+    h('div', { class: 'row end' }, graphControls(), quality?.tier === 'h1' ? chip('hourly averages', 'info', 'The range is older than the per-read samples kept, so hourly summaries are shown') : null),
+    qualityLoading && !quality ? spinner('Loading the counter history…') : null,
+    charts.length ? chartGrid(charts.length, size => charts.map(c => c.build(size))) : !qualityLoading ? h('span', { class: 'dim', style: 'font-size:12px' }, 'No counter history for this range yet. The counters are read every few minutes, and the graphs fill in as the device answers.') : null,
+    charts.length ? h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Counters are read every few minutes, so a short burst shows as its average over the read.')) : null);
+}
+
 function graphs(s: SeriesRes, itf: Iface): VNode {
   const names = s.classes.map(c => c.cls);
-  const spanMs = rangeMs(graphRange) ?? 6 * 3600e3;
-  const to = Date.now(); const from = to - spanMs;
+  const { from, to, spanMs } = graphWindow();
   const shown = s.classes.filter(c => !hidden.has(c.cls));
   const evs = events(s, names);
   const bands = evs.map(e => ({ a: e.a - s.step / 2, b: e.b + s.step / 2 }));
-  const fmtT = (t: number) => (spanMs > 86400e3 ? dayClock(t) : clock(t, false));
+  const fmtT = axisTime(spanMs);
   const mk = (pick: (p: SeriesRes['classes'][0]['points'][0]) => number): Series[] => shown.map(c => ({ name: c.cls, color: classColor(c.cls, names), points: c.points.map(p => ({ t: p.ts, v: pick(p) })) }));
   const peak = (c: SeriesRes['classes'][0]) => Math.max(0, ...c.points.map(p => p.dropPct));
   return h('div', { class: 'col', style: 'gap:14px' },
     h('div', { class: 'row end' },
-      rangePicker('links-graphs', graphRange, GRAPH_RANGES, v => { graphRange = v; void loadSeries(); }, { aria: 'Graph time range' }),
+      graphControls(),
       h('label', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted' }, 'Mark drops above'), select(String(dropThr), THRESHOLDS, v => { dropThr = Number(v); redraw(); }, { aria: 'Drop threshold', width: '96px' })),
       s.tier === 'h1' ? chip('hourly averages', 'info', 'The range is older than the per-poll samples kept, so hourly summaries are shown') : null),
     names.length ? h('div', { role: 'group', 'aria-label': 'Classes shown', class: 'row', style: 'gap:8px' },
       s.classes.map(c => h('button', { key: c.cls, type: 'button', class: 'cbtn', 'aria-pressed': !hidden.has(c.cls), onclick: () => { if (hidden.has(c.cls)) hidden.delete(c.cls); else hidden.add(c.cls); redraw(); } },
         h('i', { class: 'sw', style: `background:${classColor(c.cls, names)};margin:0` }), h('span', null, c.cls), h('span', { class: 'dim' }, 'peak ' + pct(peak(c), 2))))) : null,
     chartGrid(names.length ? 4 : 2, size => [
-      names.length ? lineChart({ ...size, sync: 'iface', title: 'Packets dropped (% of the class)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '%', series: mk(p => p.dropPct), from, to, threshold: dropThr, bands, fmtT, fmtV: v => pct(v, 2), aria: `Drop percentage per class on ${itf.name}` }) : null,
-      names.length ? lineChart({ ...size, sync: 'iface', title: 'Bytes dropped (per second)', unit: v => bytes(v) + '/s', series: mk(p => p.dropBps / 8), from, to, bands, fmtT, aria: `Bytes dropped per class on ${itf.name}` }) : null,
+      names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Packets dropped (% of the class)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '%', series: mk(p => p.dropPct), from, to, threshold: dropThr, bands, fmtT, fmtV: v => pct(v, 2), aria: `Drop percentage per class on ${itf.name}` }) : null,
+      names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Bytes dropped (per second)', unit: v => bytes(v) + '/s', series: mk(p => p.dropBps / 8), from, to, bands, fmtT, aria: `Bytes dropped per class on ${itf.name}` }) : null,
       lineChart({
-        ...size, sync: 'iface', title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
+        ...size, sync: 'iface', onZoom: zoomIf, title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
         series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }], aria: `Utilisation of ${itf.name}`
       }),
       lineChart({
-        ...size, sync: 'iface', title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)))), from, to, fmtT,
+        ...size, sync: 'iface', onZoom: zoomIf, title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)))), from, to, fmtT,
         series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }], aria: `Throughput of ${itf.name} in bits per second`
       })
     ]),
@@ -629,14 +702,13 @@ function resourcesPanel(dev: Dev): VNode | null {
 function resHistoryPanel(sub: ResSubject, first: boolean): VNode {
   const hist = resHists.get(sub.key);
   const grp = 'res:' + (sub.key || 'device');
-  const spanMs = rangeMs(resRange) ?? 6 * 3600e3;
-  const to = Date.now(), from = to - spanMs;
-  const fmtT = (t: number) => (spanMs > 86400e3 ? dayClock(t) : clock(t, false));
+  const to = resZoom ? resZoom.to : Date.now(), from = resZoom ? resZoom.from : to - (rangeMs(resRange) ?? 6 * 3600e3), spanMs = to - from;
+  const fmtT = axisTime(spanMs);
   const head = h('div', { class: 'row', style: 'justify-content:space-between' },
     h('div', { class: 'col', style: 'gap:2px' }, h('b', null, sub.title && !first ? `${sub.title} history` : 'Resource history'),
       h('span', { class: 'muted', style: 'font-size:12px' }, 'CPU, memory, disk and load as the device reported them. Point at a graph to read every graph at that moment.')),
     first ? h('div', { class: 'row' },
-      resOpen ? rangePicker('res-hist', resRange, RES_RANGES, v => { resRange = v; void loadResHist(); }, { aria: 'Resource history time range' }) : null,
+      resOpen ? h('span', { class: 'row', style: 'gap:10px' }, rangePicker('res-hist', resRange, RES_RANGES, v => { resRange = v; resZoom = null; void loadResHist(); }, { aria: 'Resource history time range' }), zoomBar(resZoom, () => { resZoom = null; void loadResHist(); })) : null,
       btn(resOpen ? 'Hide' : 'Show history', { small: true, kind: 'ghost', pressed: resOpen, aria: resOpen ? 'Hide resource history' : 'Show resource history', onclick: () => { resOpen = !resOpen; redraw(); } })) : null);
   if (!resOpen) return h('div', { class: 'col', style: 'gap:8px' }, head);
   if (resHistLoading && !hist) return h('div', { class: 'col', style: 'gap:8px' }, head, spinner('Loading the history…'));
@@ -649,12 +721,12 @@ function resHistoryPanel(sub: ResSubject, first: boolean): VNode {
   const bands = hist.restarts.map(t => ({ a: t - 30_000, b: t + 30_000 }));
   const pctV = (v: number) => pct(v, 1);
   const charts: { key: string; build: (size: { w: number; h: number }) => VNode }[] = [];
-  if (col('cpu').length) charts.push({ key: 'cpu', build: size => lineChart({ ...size, sync: grp, title: 'CPU', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'cpuMax') : []), ...mk(peaks ? 'Average' : 'CPU', 'var(--s1)', 'cpu')], from, to, bands, fmtT, fmtV: pctV, aria: `CPU of ${sub.name}` }) });
-  if (col('mem').length) charts.push({ key: 'mem', build: size => lineChart({ ...size, sync: grp, title: 'Memory in use', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'memMax') : []), ...mk(peaks ? 'Average' : 'Memory', 'var(--s2)', 'mem'), ...mk('Swap', 'var(--s4)', 'swap')], from, to, bands, fmtT, fmtV: pctV, aria: `Memory of ${sub.name}` }) });
-  if (col('disk').length) charts.push({ key: 'disk', build: size => lineChart({ ...size, sync: grp, title: 'Fullest disk', unit: v => Math.round(v) + '%', yMax: 100, series: mk('Disk', 'var(--s3)', 'disk'), from, to, bands, fmtT, fmtV: pctV, aria: `Disk use of ${sub.name}` }) });
-  if (col('load').length) charts.push({ key: 'load', build: size => lineChart({ ...size, sync: grp, title: 'Load average (1 minute)', unit: v => v.toFixed(v < 10 ? 1 : 0), series: [...(peaks ? mk('Peak', 'var(--s5)', 'loadMax') : []), ...mk(peaks ? 'Average' : 'Load', 'var(--s6)', 'load')], from, to, bands, fmtT, fmtV: v => v.toFixed(2), aria: `Load of ${sub.name}` }) });
-  if (col('temp').length) charts.push({ key: 'temp', build: size => lineChart({ ...size, sync: grp, title: 'Temperature (hottest sensor)', unit: v => Math.round(v) + ' °C', series: [...(peaks ? mk('Peak', 'var(--s5)', 'tempMax') : []), ...mk(peaks ? 'Average' : 'Temperature', 'var(--s7)', 'temp')], from, to, bands, fmtT, fmtV: v => `${Math.round(v * 10) / 10} °C`, aria: `Temperature of ${sub.name}` }) });
-  if (col('sess').length) charts.push({ key: 'sess', build: size => lineChart({ ...size, sync: grp, title: 'Sessions', unit: v => (v >= 1000 ? Math.round(v / 100) / 10 + 'k' : String(Math.round(v))), series: [...(peaks ? mk('Peak', 'var(--s5)', 'sessMax') : []), ...mk(peaks ? 'Average' : 'Sessions', 'var(--s8)', 'sess')], from, to, bands, fmtT, fmtV: v => num(Math.round(v)), aria: `Sessions on ${sub.name}` }) });
+  if (col('cpu').length) charts.push({ key: 'cpu', build: size => lineChart({ ...size, sync: grp, onZoom: zoomRes, title: 'CPU', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'cpuMax') : []), ...mk(peaks ? 'Average' : 'CPU', 'var(--s1)', 'cpu')], from, to, bands, fmtT, fmtV: pctV, aria: `CPU of ${sub.name}` }) });
+  if (col('mem').length) charts.push({ key: 'mem', build: size => lineChart({ ...size, sync: grp, onZoom: zoomRes, title: 'Memory in use', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'memMax') : []), ...mk(peaks ? 'Average' : 'Memory', 'var(--s2)', 'mem'), ...mk('Swap', 'var(--s4)', 'swap')], from, to, bands, fmtT, fmtV: pctV, aria: `Memory of ${sub.name}` }) });
+  if (col('disk').length) charts.push({ key: 'disk', build: size => lineChart({ ...size, sync: grp, onZoom: zoomRes, title: 'Fullest disk', unit: v => Math.round(v) + '%', yMax: 100, series: mk('Disk', 'var(--s3)', 'disk'), from, to, bands, fmtT, fmtV: pctV, aria: `Disk use of ${sub.name}` }) });
+  if (col('load').length) charts.push({ key: 'load', build: size => lineChart({ ...size, sync: grp, onZoom: zoomRes, title: 'Load average (1 minute)', unit: v => v.toFixed(v < 10 ? 1 : 0), series: [...(peaks ? mk('Peak', 'var(--s5)', 'loadMax') : []), ...mk(peaks ? 'Average' : 'Load', 'var(--s6)', 'load')], from, to, bands, fmtT, fmtV: v => v.toFixed(2), aria: `Load of ${sub.name}` }) });
+  if (col('temp').length) charts.push({ key: 'temp', build: size => lineChart({ ...size, sync: grp, onZoom: zoomRes, title: 'Temperature (hottest sensor)', unit: v => Math.round(v) + ' °C', series: [...(peaks ? mk('Peak', 'var(--s5)', 'tempMax') : []), ...mk(peaks ? 'Average' : 'Temperature', 'var(--s7)', 'temp')], from, to, bands, fmtT, fmtV: v => `${Math.round(v * 10) / 10} °C`, aria: `Temperature of ${sub.name}` }) });
+  if (col('sess').length) charts.push({ key: 'sess', build: size => lineChart({ ...size, sync: grp, onZoom: zoomRes, title: 'Sessions', unit: v => (v >= 1000 ? Math.round(v / 100) / 10 + 'k' : String(Math.round(v))), series: [...(peaks ? mk('Peak', 'var(--s5)', 'sessMax') : []), ...mk(peaks ? 'Average' : 'Sessions', 'var(--s8)', 'sess')], from, to, bands, fmtT, fmtV: v => num(Math.round(v)), aria: `Sessions on ${sub.name}` }) });
   const restartsIn = hist.restarts.filter(t => t >= from);
   return h('div', { class: 'col', style: 'gap:10px' }, head,
     h('div', { class: 'row', style: 'gap:8px' },
@@ -677,6 +749,31 @@ function streamsPanel(dev: Dev, itf: Iface): VNode {
 
 /* ------------------------------------------------------------------ view */
 
+/** The sections of the selected interface. Link quality is listed once something is known about it. */
+function ifTabList(dev: Dev, itf: Iface): { id: IfTab; label: string }[] {
+  const t: { id: IfTab; label: string }[] = [{ id: 'traffic', label: 'Traffic and queues' }];
+  if (healthRes?.ifExtra.some(x => x.ifIndex === itf.ifIndex) || opticMap(healthRes?.health?.sensors ?? []).has(itf.ifIndex)) t.push({ id: 'quality', label: 'Link quality' });
+  if (!itf.isVlanIf) t.push({ id: 'hosts', label: 'Hosts and neighbours' });
+  void dev;
+  return t;
+}
+const ifTabNow = (dev: Dev, itf: Iface): IfTab => ifTabList(dev, itf).find(t => t.id === ifTab)?.id ?? 'traffic';
+function ifTabs(dev: Dev, itf: Iface): VNode {
+  const now = ifTabNow(dev, itf);
+  return tabs('Interface sections', ifTabList(dev, itf).map(t => ({ id: t.id, label: t.label, on: t.id === now })), id => { ifTab = id as IfTab; redraw(); });
+}
+function ifBody(dev: Dev, itf: Iface): VNode {
+  const tab = ifTabNow(dev, itf);
+  const body = tab === 'quality' ? [
+      linkQuality(healthRes?.ifExtra.find(x => x.ifIndex === itf.ifIndex), (healthRes?.health?.sensors ?? []).filter(x => x.kind === 'optic' && x.ifIndex === itf.ifIndex), itf.speedMbps),
+      qualityGraphs(itf)]
+    : tab === 'hosts' ? [hostsPanel(dev, itf)]
+    : [classTable(itf),
+      seriesLoading && !series ? spinner('Loading the graphs…') : seriesError ? note(seriesError, 'bad', true) : series ? graphs(series, itf) : null,
+      streamsPanel(dev, itf)];
+  return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:16px' }, body);
+}
+
 /** The sub-tabs of the selected device. Only those with something to show are listed. */
 function availableTabs(dev: Dev): { id: DevTab; label: string }[] {
   const t: { id: DevTab; label: string }[] = [{ id: 'overview', label: 'Overview' }, { id: 'interfaces', label: `Interfaces (${dev.interfaces.length})` }];
@@ -694,7 +791,7 @@ function tabBody(dev: Dev, tab: DevTab): VNode {
       flagged ? h('div', { class: 'row', style: 'gap:8px' }, chip(`${flagged} interface${flagged === 1 ? ' needs' : 's need'} attention`, 'warn'), btn('Show interfaces', { small: true, kind: 'ghost', onclick: () => { devTab = 'interfaces'; redraw(); } })) : null,
       resourcesPanel(dev), healthSummary(healthRes))
     : tab === 'interfaces' ? ifTable(dev)
-    : tab === 'hardware' ? hardwarePanel({ data: healthRes, ifNames: new Map(dev.interfaces.map(i => [i.ifIndex, i.name])), openInterface: ix => select_(dev.id, ix, 'interfaces') })
+    : tab === 'hardware' ? hardwarePanel({ data: healthRes })
     : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes }), neighborsPanel(dev))
     : wlanPanel(dev);
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:14px' }, body);
@@ -725,9 +822,7 @@ export function render(): VNode {
             itf.policy ? 'output policy ' + itf.policy : null, itf.policyIn ? 'input policy ' + itf.policyIn : null].filter(Boolean).join(' · '))),
           h('div', { class: 'row' }, itf.flagged ? chip('Needs attention', 'warn') : chip('Within thresholds', 'ok'))),
         dev.qosNote ? note(dev.qosNote, 'warn') : null,
-        classTable(itf),
-        linkQuality(healthRes?.ifExtra.find(x => x.ifIndex === itf.ifIndex), (healthRes?.health?.sensors ?? []).filter(x => x.kind === 'optic' && x.ifIndex === itf.ifIndex), itf.speedMbps),
-        itf.isVlanIf ? null : hostsPanel(dev, itf),
-        seriesLoading && !series ? spinner('Loading the graphs…') : seriesError ? note(seriesError, 'bad', true) : series ? graphs(series, itf) : null,
-        streamsPanel(dev, itf)) : dev && tab === 'interfaces' ? h('div', { class: 'panel' }, empty('Select an interface to see its queues and graphs.')) : null)));
+        ifTabs(dev, itf),
+        ifBody(dev, itf)
+        ) : dev && tab === 'interfaces' ? h('div', { class: 'panel' }, empty('Select an interface to see its queues and graphs.')) : null)));
 }

@@ -1,6 +1,7 @@
 import type { App } from './app.js';
 import { apAsResources, recordResources } from './snmp/resource_history.js';
-import { EMPTY_HEALTH, hottest, type Health, type IfExtra, type Sensor } from './snmp/health.js';
+import { recordIfExtra } from './snmp/iface_history.js';
+import { diffExtra, EMPTY_HEALTH, EXTRA_COUNTERS, hottest, type ExtraCounter, type Health, type IfExtra, type Sensor } from './snmp/health.js';
 import type { FlowRecord } from './collector/types.js';
 import type { ClsPoint, IfPoint } from './store/types.js';
 import { dscpName } from './query/apps.js';
@@ -101,22 +102,46 @@ function demoHealth(d: Dev, now: number): Health {
   return h;
 }
 
-/** Link quality counters that grow with time, so the change between two reads is a rate. One port has a duplex mismatch and one carries a broadcast storm. */
+/** How fast each link quality counter grows (per second) at time t. One port has a duplex mismatch and one carries bursts of broadcast; busy ports drop packets now and then. */
+function exRates(d: Dev, i: Ifc, t: number): Record<ExtraCounter, number> {
+  const mismatch = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/16', storm = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/24';
+  const k = [...(d.name + i[0])].reduce((a, c) => a + c.charCodeAt(0), 0);
+  const sec = t / 1000;
+  const wave = (period: number, ph = 0) => (Math.sin((sec + ph + k * 31) / period) + 1) / 2;
+  const mc = (i[2] >= 10000 ? 40 : 3) * (0.7 + 0.6 * wave(3000));
+  const bc = storm ? (wave(2400, 5) > 0.88 ? 2400 + 600 * wave(120) : 60 + 30 * wave(300)) : 2 * (0.6 + 0.8 * wave(1800));
+  const fcs = mismatch ? 0.9 * (0.3 + wave(900, 3)) : wave(7000) > 0.985 ? 0.08 : 0;
+  const align = mismatch ? 0.25 * (0.3 + wave(900, 9)) : 0, late = mismatch ? 0.06 * (0.3 + wave(900, 5)) : 0;
+  const busy = Math.max(0, i[4] - 38);
+  const outDisc = busy ? busy * 0.12 * (0.2 + wave(700)) : wave(9000) > 0.99 ? 0.02 : 0;
+  return {
+    fcs, align, symbol: 0, late, excessive: 0, collisions: mismatch ? 0.4 * (0.3 + wave(900, 7)) : 0, carrier: 0, tooLong: 0, unknown: 0.002 * (1 + wave(4000)),
+    inMc: mc, inBc: bc, outMc: 2 * (0.7 + 0.6 * wave(2500)), outBc: storm ? bc * 0.3 : 1 * (0.6 + 0.8 * wave(2100)),
+    inErr: fcs + align, outErr: mismatch ? late : 0, inDisc: wave(11000) > 0.99 ? 0.01 : 0, outDisc
+  };
+}
+const EXACC = new Map<string, { t: number; v: Record<string, number> }>();
+
+/** Link quality counters that grow with time, so the change between two reads is a rate. Each counter is the sum of its rate so far, so the history has ups and downs. */
 function demoIfExtra(d: Dev, ifIndex: (name: string) => number | undefined, now: number): Map<number, IfExtra> {
   const out = new Map<number, IfExtra>();
-  // counters have been running for a few days, not since 1970
-  const sec = (now - DEMO_BOOT) / 1000 + 4 * 86400;
   for (const i of d.ifs) {
     const ix = ifIndex(i[0]); if (ix === undefined || /^V/i.test(i[0])) continue;
-    const mismatch = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/16', storm = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/24';
-    const k = ix * 7;
-    out.set(ix, {
-      duplex: mismatch ? 'half' : 'full', admin: 1, delta: null, dtSec: null, readAt: now,
-      totals: {
-        fcs: Math.round(k + (mismatch ? sec * 0.7 : sec * 0.00001)), align: Math.round(mismatch ? sec * 0.2 : 0), symbol: 0, late: mismatch ? Math.round(sec * 0.05) : 0, excessive: 0, collisions: mismatch ? Math.round(sec * 0.4) : 0, carrier: 0, tooLong: 0,
-        unknown: Math.round(k), inMc: Math.round(sec * (i[2] >= 10000 ? 40 : 3)), inBc: Math.round(sec * (storm ? 1800 : 2)), outMc: Math.round(sec * 2), outBc: Math.round(sec * (storm ? 600 : 1))
-      }
-    });
+    const key = d.name + '|' + i[0];
+    let st = EXACC.get(key);
+    if (!st) {
+      // counters have been running for a few days, not since 1970
+      const r = exRates(d, i, now), v: Record<string, number> = {};
+      for (const c of EXTRA_COUNTERS) v[c] = r[c] * 4 * 86400 + ix * 7;
+      st = { t: now, v }; EXACC.set(key, st);
+    }
+    // step through the time since the last call, in steps of at most a minute, so a burst is not averaged away
+    for (let t = st.t; t < now; t += 60_000) { const e = Math.min(now, t + 60_000), r = exRates(d, i, (t + e) / 2); for (const c of EXTRA_COUNTERS) st.v[c] += r[c] * (e - t) / 1000; }
+    st.t = Math.max(st.t, now);
+    const totals: Partial<Record<ExtraCounter, number>> = {};
+    for (const c of EXTRA_COUNTERS) totals[c] = Math.round(st.v[c]);
+    const mismatch = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/16';
+    out.set(ix, { duplex: mismatch ? 'half' : 'full', admin: 1, delta: null, dtSec: null, readAt: now, totals });
   }
   return out;
 }
@@ -451,9 +476,18 @@ function seedConfig(app: App, net: Net): void {
     // every interface answers with the device's MAC address in the demo, so a MAC seen in a stream can be named
     db.prepare("UPDATE interfaces SET mac = ? WHERE dev_id = ? AND mac = ''").run(d.mac, row.id);
     app.devices.saveResources(row.id, demoResources(d, Date.now()));
+    const nowMs = Date.now();
+    // two weeks of link quality history too: a read every three minutes for three days, one every quarter of an hour before that
+    {
+      const prev = new Map<number, IfExtra>();
+      app.cdb.tx(() => {
+        for (let t = nowMs - 14 * 86400_000; t < nowMs - 5 * 60_000; t += t < nowMs - 3 * 86400_000 ? 900_000 : 180_000) {
+          for (const [ix, x] of demoIfExtra(d, n => net.ifIdx.get(d.name + '|' + n), t)) { const df = diffExtra(prev.get(ix), x); prev.set(ix, x); recordIfExtra(db, row!.id, ix, df); }
+        }
+      });
+    }
     seedHealth(app, row.id, d, net, true);
     // two weeks of history: a reading a minute for the last three days, one every five minutes before that
-    const nowMs = Date.now();
     if (d.role === 'ap') seedWlan(app, row.id, nowMs, true);
     app.cdb.tx(() => { for (let t = nowMs - 14 * 86400_000; t < nowMs - 60_000; t += t < nowMs - 3 * 86400_000 ? 300_000 : 60_000) recordResources(db, row.id, demoResources(d, t)); });
   }

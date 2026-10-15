@@ -227,6 +227,11 @@ const MIGRATIONS: string[] = [
   INSERT INTO resource_1h_n(dev_id, ap, ts, n, cpu_sum, cpu_n, cpu_max, mem_sum, mem_n, mem_max, swap_sum, swap_n, swap_max, disk_sum, disk_n, disk_max, load_sum, load_n, load_max, up_min, up_max, temp_sum, temp_n, temp_max, sess_sum, sess_n, sess_max)
     SELECT dev_id, '', ts, n, cpu_sum, cpu_n, cpu_max, mem_sum, mem_n, mem_max, swap_sum, swap_n, swap_max, disk_sum, disk_n, disk_max, load_sum, load_n, load_max, up_min, up_max, temp_sum, temp_n, temp_max, sess_sum, sess_n, sess_max FROM resource_1h;
   DROP TABLE resource_1h; ALTER TABLE resource_1h_n RENAME TO resource_1h;
+  `,
+  `
+  -- history of per-interface counters read every few minutes: the change between two reads (raw, a few days) and hourly sums (long term)
+  CREATE TABLE iface_extra_samples (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, ts INTEGER NOT NULL, dt INTEGER NOT NULL, fcs INTEGER, align INTEGER, symbol INTEGER, late INTEGER, excessive INTEGER, collisions INTEGER, carrier INTEGER, too_long INTEGER, unknown_proto INTEGER, in_mc INTEGER, in_bc INTEGER, out_mc INTEGER, out_bc INTEGER, in_err INTEGER, out_err INTEGER, in_disc INTEGER, out_disc INTEGER, PRIMARY KEY (dev_id, if_index, ts)) WITHOUT ROWID;
+  CREATE TABLE iface_extra_1h (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, ts INTEGER NOT NULL, dt INTEGER NOT NULL, fcs INTEGER, align INTEGER, symbol INTEGER, late INTEGER, excessive INTEGER, collisions INTEGER, carrier INTEGER, too_long INTEGER, unknown_proto INTEGER, in_mc INTEGER, in_bc INTEGER, out_mc INTEGER, out_bc INTEGER, in_err INTEGER, out_err INTEGER, in_disc INTEGER, out_disc INTEGER, PRIMARY KEY (dev_id, if_index, ts)) WITHOUT ROWID;
   `
 ];
 
