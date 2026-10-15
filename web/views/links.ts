@@ -252,8 +252,8 @@ function ifTable(dev: Dev): VNode {
       h('span', { class: 'dim', style: 'font-size:12px' }, 'Words must all match. A number is a VLAN id; vlan:20 matches only VLANs.')),
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1150px` },
       h('div', { class: 'tr head' }, ...['Interface', 'Description', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', 'In', 'Out', 'Discards', 'Service policy'].map(t => h('span', null, t))),
-      h('div', { class: 'scroll' }, rows.map(i => h('button', { key: i.ifIndex, type: 'button', class: 'tr', 'aria-pressed': i.ifIndex === ifIndex, onclick: () => select_(dev.id, i.ifIndex) },
-        h('span', { style: 'font-weight:600' }, i.name, i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
+      h('div', { class: 'scroll' }, rows.map(i => h('div', { key: i.ifIndex, class: 'tr pick', 'aria-current': i.ifIndex === ifIndex ? 'true' : undefined, onclick: () => select_(dev.id, i.ifIndex) },
+        h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex); } }, i.name), i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
         h('span', { class: 'muted' }, i.alias || '—'),
         nbCell(nbOf(i.ifIndex)),
         vlanCell(i),
@@ -266,13 +266,18 @@ function ifTable(dev: Dev): VNode {
 }
 const shortName = (n: Neighbor): string => (n.name ? n.name.split('.')[0] || n.name : n.ip) || 'unnamed';
 
-/** Who is cabled to a port, as plain text (the row is a button, so the links are in the neighbours table below). */
+/** Who is cabled to a port. A neighbour that is a polled device is a link to that device and port, as in the Flow explorer. */
 function nbCell(ns: Neighbor[]): VNode {
   if (!ns.length) return h('span', { class: 'dim' }, '—');
-  const first = ns[0];
-  return h('span', { title: ns.map(n => `${n.protos.map(p => p.toUpperCase()).join('·')}: ${n.name || n.ip}${n.port ? ' ' + n.port : ''}`).join('\n') },
-    h('div', { style: 'font-weight:500' }, shortName(first), ns.length > 1 ? h('span', { class: 'dim' }, ` +${ns.length - 1}`) : null),
-    first.port ? h('div', { class: 'dim mono', style: 'font-size:11.5px' }, first.port) : null);
+  return h('span', { class: 'col', style: 'gap:2px' }, ns.map((n, k) => {
+    const label = n.name ? n.name.split('.')[0] || n.name : n.ip || 'unnamed';
+    const tip = `${n.protos.map(p => p.toUpperCase()).join('·')}: ${n.name || n.ip}${n.port ? ' ' + n.port : ''}`;
+    return h('span', { key: k, title: tip },
+      n.device
+        ? h('button', { type: 'button', class: 'lnk', style: 'font-weight:500', title: `Open ${n.device.name}${n.devicePort ? ' at ' + n.devicePort.name : ''} in Links and QoS`, onclick: (e: Event) => { e.stopPropagation(); openPort(n.device!.name, n.devicePort?.name); } }, label)
+        : h('span', { style: 'font-weight:500' }, label),
+      n.port ? h('span', { class: 'dim mono', style: 'font-size:11.5px' }, ' ' + n.port) : null);
+  }));
 }
 
 /** Every CDP / LLDP neighbour of the device by port; a neighbour that is a polled device opens in this page. */
@@ -288,14 +293,16 @@ function neighborsPanel(dev: Dev): VNode {
     nbLoading && !nbRes ? spinner('Loading neighbours…') : null,
     nbRes && !ports.length && !nbLoading ? h('span', { class: 'dim', style: 'font-size:12.5px' }, nbRes.note || 'This device reports no CDP or LLDP neighbours. Check that CDP or LLDP is turned on, on the device and on the port.') : null,
     ports.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:880px` },
-      h('div', { class: 'tr head' }, ...['Port', 'Neighbour', 'Its port', 'Type', 'Protocol', ''].map(t => h('span', null, t))),
+      h('div', { class: 'tr head' }, ...['Port', 'Neighbour', 'Its port', 'Type', 'Protocol', 'SNMP'].map(t => h('span', null, t))),
       h('div', { class: 'scroll', style: 'max-height:320px' }, ports.flatMap(p => p.neighbors.map((n, k) => h('div', { key: p.ifIndex + '/' + k, class: 'tr' },
         k === 0 ? h('button', { type: 'button', class: 'lnk', title: `Show ${p.ifName}`, onclick: () => select_(dev.id, p.ifIndex) }, p.ifName) : h('span', null),
-        h('span', null, n.name || n.ip || 'unnamed', n.ip && n.name ? h('span', { class: 'dim mono', style: 'font-size:11.5px' }, ' ' + n.ip) : null),
+        h('span', null, n.device
+          ? h('button', { type: 'button', class: 'lnk', title: `Open ${n.device.name}${n.devicePort ? ' at ' + n.devicePort.name : ''} in Links and QoS`, onclick: () => openPort(n.device!.name, n.devicePort?.name) }, n.name || n.device.name)
+          : (n.name || n.ip || 'unnamed'), n.ip && n.name ? h('span', { class: 'dim mono', style: 'font-size:11.5px' }, ' ' + n.ip) : null),
         h('span', { class: 'mono', style: 'font-size:12px' }, n.port || '—'),
         h('span', { style: 'font-size:12px' }, KIND_TEXT[n.kind] ?? n.kind),
         h('span', { class: 'mono', style: 'font-size:12px' }, n.protos.map(x => x.toUpperCase()).join(' · ')),
-        n.device ? btn(`Open ${n.device.name.split('.')[0]}`, { small: true, kind: 'ghost', title: `Open ${n.device.name}${n.devicePort ? ' at ' + n.devicePort.name : ''}`, onclick: () => openPort(n.device!.name, n.devicePort?.name) }) : h('span', { class: 'dim', style: 'font-size:12px' }, 'not an SNMP device'))))))) : null);
+        n.device ? h('span', { class: 'dim', style: 'font-size:12px' }, 'polled device') : h('span', { class: 'dim', style: 'font-size:12px' }, 'not an SNMP device'))))))) : null);
 }
 function utilCell(u: number | null, b: number | null): VNode {
   return h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, u === null ? h('span', { class: 'dim' }, 'no data') : [bar(u), h('span', { class: 'mono', style: 'font-size:12px' }, pct(u, 0) + ' ', h('span', { class: 'dim' }, bps(b)))]);
