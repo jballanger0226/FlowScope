@@ -274,6 +274,9 @@ class ClickHouseStore implements TsStore {
     if (!q.range || !Number.isFinite(q.range.from) || !Number.isFinite(q.range.to)) throw new Error('invalid time range');
     const inRange = `ts1 BETWEEN ${N(q.range.from)} AND ${N(q.range.to)}`;
     const cand = q.conds.filter(c => c.kind !== 'qos' && !(c.kind === 'ttl' && c.mode === 'ok')).map(c => `AND skey IN (SELECT skey FROM flow_raw WHERE ${inRange} AND ${recordPred(c, RAW, q.localIps)})`).join('\n');
+    const recent = q.recent && q.recent > 0 ? Math.trunc(q.recent) : 0;
+    // a preview reads only the newest records; it is partial when more matching records exist than it reads
+    const partial = recent > 0 && Number((await this.c.rows<Record<string, any>>(`SELECT count() AS n FROM (SELECT 1 FROM flow_raw WHERE ${inRange} ${cand} LIMIT ${recent + 1})`))[0]?.n ?? 0) > recent;
     const tx = rawTtlSql(q.localIps);
     let ttlCond = '';
     const exact: string[] = [];
@@ -297,7 +300,7 @@ class ClickHouseStore implements TsStore {
                max(${RM}) AS rm, maxIf(bitShiftRight(assumeNotNull(post_tos), 2), ${RM}) AS d_post,
                groupUniqArray(exporter) AS exps, max(vlan) AS vl, max(flags) AS fl,
                max(${tx.expired}) AS tx, max(${tx.icmp}) AS txi, minIf(ttl_min, ${tx.expired}) AS ttl_lo
-        FROM flow_raw WHERE ${inRange} ${cand}
+        FROM ${recent ? `(SELECT * FROM flow_raw WHERE ${inRange} ${cand} ORDER BY ts1 DESC LIMIT ${recent})` : `flow_raw WHERE ${inRange} ${cand}`}
         GROUP BY skey, src_ip, sport),
       i AS (
         SELECT k, argMin(s_ip, t0) AS i_ip, argMin(d_ip, t0) AS i_dip, argMin(s_port, t0) AS i_sp, argMin(d_port, t0) AS i_dp, argMin(pr, t0) AS i_pr
@@ -317,7 +320,7 @@ class ClickHouseStore implements TsStore {
       FROM i INNER JOIN t ON t.k = i.k
       WHERE 1 = 1 ${exact.length ? 'AND ' + exact.join(' AND ') : ''} ${qos} ${ttlCond}
       ORDER BY ${order} ${q.dir === 'asc' ? 'ASC' : 'DESC'}, t.tt1 DESC
-      LIMIT ${N(Math.max(1, Math.trunc(q.limit)))}`;
+      LIMIT ${N(Math.max(1, Math.trunc(q.limit)))} OFFSET ${N(Math.max(0, Math.trunc(q.offset ?? 0)))}`;
     const rows = await this.c.rows<Record<string, any>>(sql);
     const total = rows.length ? Number(rows[0].total) : 0;
     const out: StreamRow[] = rows.map(r => {
@@ -334,7 +337,7 @@ class ClickHouseStore implements TsStore {
         dscpOut: qchg ? (Number(r.rm) === 1 ? Number(r.d_post) : (Number(r.d_max) !== dIn ? Number(r.d_max) : Number(r.d_min))) : null
       };
     });
-    return { rows: out, total, truncated: total > out.length, tier: 'raw' };
+    return { rows: out, total, truncated: total > (q.offset ?? 0) + out.length, tier: 'raw', partial };
   }
 
   async streamRecords(skey: string, range: TimeRange): Promise<(FlowRecord & { primary: boolean })[]> {

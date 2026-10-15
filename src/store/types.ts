@@ -32,6 +32,10 @@ export interface StreamQuery {
   sort: 'time' | 'bytes' | 'pkts';
   dir: 'asc' | 'desc';
   limit: number;
+  /** Rows to skip, for paging through the sorted result. */
+  offset?: number;
+  /** Preview: only look at the most recent N flow records that match, so a first answer comes back fast. Streams are then built from those records alone. */
+  recent?: number;
   /** Addresses owned by our own routers. Traffic addressed to them is not reported as TTL-expired. */
   localIps?: string[];
 }
@@ -55,7 +59,7 @@ export interface StreamRow {
   dscpOut: number | null;
 }
 
-export interface StreamPage { rows: StreamRow[]; total: number; truncated: boolean; tier: 'raw' }
+export interface StreamPage { rows: StreamRow[]; total: number; truncated: boolean; tier: 'raw'; /** A preview (`recent`) left older matching records out. */ partial?: boolean }
 
 export type ReportDim = 'srcMac' | 'dstMac' | 'vlan' | 'inIf' | 'srcIp' | 'dstIp' | 'proto' | 'dscp' | 'qos' | 'sport' | 'dport' | 'svc' | 'flags';
 

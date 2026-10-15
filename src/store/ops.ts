@@ -284,6 +284,9 @@ export class SqliteOps {
       args.push(...a);
     }
     const cand = sets.length ? `WHERE skey IN (${sets.join(' INTERSECT ')})` : '';
+    const recent = q.recent && q.recent > 0 ? Math.trunc(q.recent) : 0;
+    // a preview reads only the newest records; it is partial when more matching records exist than it reads
+    const partial = recent > 0 && Number((this.db.prepare(`WITH f AS (${union}) SELECT COUNT(*) AS n FROM (SELECT 1 FROM f ${cand} LIMIT ${recent + 1})`).get(...args) as { n: number }).n) > recent;
     // exact conditions on the stream's initiator direction
     const exact: string[] = []; const exArgs: SqlArg[] = [];
     let qosCond = '', ttlCond = '';
@@ -299,7 +302,7 @@ export class SqliteOps {
     const order = q.sort === 'bytes' ? 't.b' : q.sort === 'pkts' ? 't.p' : 't.t1';
     const sql = `
       WITH f AS (${union}),
-      fr AS (SELECT *, FIRST_VALUE(tos >> 2) OVER (PARTITION BY skey, src_ip, sport ORDER BY ts0) AS fd FROM f ${cand}),
+      fr AS (SELECT *, FIRST_VALUE(tos >> 2) OVER (PARTITION BY skey, src_ip, sport ORDER BY ts0) AS fd FROM ${recent ? `(SELECT * FROM f ${cand} ORDER BY ts1 DESC LIMIT ${recent})` : `f ${cand}`}),
       d AS (
         SELECT skey, src_ip, dst_ip, src_n, dst_n, proto, sport, dport, MIN(ts0) AS t0, MAX(ts1) AS t1,
                SUM(CASE WHEN primary_hop = 1 THEN bytes ELSE 0 END) AS b, SUM(CASE WHEN primary_hop = 1 THEN pkts ELSE 0 END) AS p,
@@ -324,8 +327,8 @@ export class SqliteOps {
       FROM i JOIN t ON t.skey = i.skey
       WHERE 1 = 1 ${exact.length ? 'AND ' + exact.join(' AND ') : ''} ${qosCond} ${ttlCond}
       ORDER BY ${order} ${q.dir === 'asc' ? 'ASC' : 'DESC'}, t.t1 DESC
-      LIMIT ?`;
-    const rows = this.db.prepare(sql).all(...args, ...exArgs, q.limit) as unknown as Record<string, number | string | null>[];
+      LIMIT ? OFFSET ?`;
+    const rows = this.db.prepare(sql).all(...args, ...exArgs, q.limit, Math.max(0, Math.trunc(q.offset ?? 0))) as unknown as Record<string, number | string | null>[];
     const total = rows.length ? Number(rows[0].total) : 0;
     const out: StreamRow[] = rows.map(r => ({
       skey: String(r.skey), srcIp: String(r.src_ip), dstIp: String(r.dst_ip), proto: Number(r.proto), sport: Number(r.sport), dport: Number(r.dport),
@@ -337,7 +340,7 @@ export class SqliteOps {
       dscpIn: r.d_in === null ? Number(r.d_min) : Number(r.d_in),
       dscpOut: Number(r.qchg) === 1 ? (r.d_post !== null ? Number(r.d_post) : (Number(r.d_max) !== Number(r.d_in ?? r.d_min) ? Number(r.d_max) : Number(r.d_min))) : null
     }));
-    return { rows: out, total, truncated: total > out.length, tier: 'raw' };
+    return { rows: out, total, truncated: total > (q.offset ?? 0) + out.length, tier: 'raw', partial };
   }
 
   streamRecords(skey: string, range: TimeRange): (FlowRecord & { primary: boolean })[] {
