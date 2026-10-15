@@ -203,19 +203,20 @@ interface LC { o: ChartOpts; g: { W: number; L: number; R: number; x: (t: number
 const lcOf = (svg: Element): LC | undefined => (svg as any).__lc;
 
 /** Puts the guide line at time t and a dot on each series' sample nearest to it. Returns the readout rows, or null when no series has data there. */
-function mark(svg: Element, t: number, always: boolean): TipRow[] | null {
+type MRow = TipRow & { n: number };
+function mark(svg: Element, t: number, always: boolean): MRow[] | null {
   const lc = lcOf(svg);
   if (!lc) return null;
   const { o, g } = lc;
   const dots = svg.querySelectorAll<SVGCircleElement>('.hoverdot');
-  const rows: TipRow[] = [];
+  const rows: MRow[] = [];
   o.series.forEach((s, i) => {
     const dot = dots[i];
     const show = (on: boolean) => { if (dot) dot.setAttribute('visibility', on ? 'visible' : 'hidden'); };
     if (!s.points.length) { show(false); return; }
     const p = s.points[nearest(s.points, t)];
     if (Math.abs(p.t - t) > typicalStep(s.points) * 1.5) { show(false); return; }
-    rows.push({ color: s.color, label: s.name, value: (o.fmtV ?? o.unit)(p.v) });
+    rows.push({ color: s.color, label: s.name, value: (o.fmtV ?? o.unit)(p.v), n: p.v });
     if (dot) { dot.setAttribute('cx', g.x(p.t).toFixed(1)); dot.setAttribute('cy', g.y(p.v).toFixed(1)); }
     show(true);
   });
@@ -258,27 +259,40 @@ function hoverChart(e: PointerEvent): void {
   }
   const rows = snapT === null ? null : mark(svg, snapT, false);
   if (snapT === null || !rows) { hoverOff(e); return; }
-  readout(svg, snapT, rows, e.clientX, e.clientY, 'main');
-  // Every linked graph answers for the same moment, each with its own readout next to its own guide line.
+  // Every graph in the group answers for the same moment. Each readout lives inside its own graph, beside its own guide line,
+  // so the readouts never land on one another. The graph under the pointer follows the pointer's height.
+  readout(svg, snapT, rows, e.clientY, 'main');
   for (const other of siblings(svg)) {
     const key = tipKey(other);
     const orows = mark(other, snapT, true);
-    const lcO = lcOf(other);
     const b = other.getBoundingClientRect();
-    if (!orows || !lcO || !b.width || b.bottom < 0 || b.top > window.innerHeight) { hideTip(key); continue; }
-    readout(other, snapT, orows, b.left + lcO.g.x(snapT) * (b.width / lcO.g.W), Math.min(Math.max(b.top + 10, 8), window.innerHeight - 60), key);
+    if (!orows || !b.width || b.bottom < 0 || b.top > window.innerHeight) { hideTip(key); continue; }
+    readout(other, snapT, orows, b.top + 10, key);
   }
 }
 
 let tipSeq = 0;
 const tipKey = (svg: Element): string => ((svg as any).__tipKey ??= 'c' + tipSeq++);
 
-function readout(svg: Element, t: number, rows: TipRow[], cx: number, cy: number, key: string): void {
+/** Fits the rows to the room a graph has: identical values collapse to one line, and the rest are cut to the biggest few plus a count. */
+function compact(rows: MRow[], room: number, fmt: (v: number) => string): TipRow[] {
+  if (rows.length > 3 && rows.every(r => r.value === rows[0].value)) return [{ label: `All ${rows.length} series`, value: rows[0].value }];
+  if (rows.length <= room) return rows;
+  const sorted = [...rows].sort((a, b) => b.n - a.n);
+  const rest = sorted.slice(room - 1);
+  return [...sorted.slice(0, room - 1), { label: `+${rest.length} more`, value: '≤ ' + fmt(rest[0].n) }];
+}
+
+function readout(svg: Element, t: number, rows: MRow[], cy: number, key: string): void {
   const lc = lcOf(svg);
   if (!lc) return;
-  const { o } = lc;
+  const { o, g } = lc;
+  const box = svg.getBoundingClientRect();
+  const cx = box.left + g.x(t) * (box.width / g.W);
   const inBand = (o.bands ?? []).some(b => t >= b.a && t <= b.b);
-  showTip({ sub: o.title, title: (o.fmtFull ?? stamp)(t), rows, note: inBand ? 'Inside a shaded drop period' : undefined }, cx, cy, key);
+  // About 70px of the box goes on the heading, time and note; each row is about 18px.
+  const room = Math.max(2, Math.floor((box.height - 28 - 70) / 18));
+  showTip({ sub: o.title, title: (o.fmtFull ?? stamp)(t), rows: compact(rows, room, o.fmtV ?? o.unit), note: inBand ? 'Inside a shaded drop period' : undefined }, cx, cy, key, box);
 }
 
 function hoverOff(e: Event): void {

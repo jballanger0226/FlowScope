@@ -40,15 +40,24 @@ function fill(t: TipContent, into: HTMLElement): void {
   if (t.note) { const d = document.createElement('div'); d.className = 'tn'; d.textContent = t.note; into.appendChild(d); }
 }
 
-/** Shows the tooltip next to the pointer, flipping to stay inside the window. */
-export function showTip(t: TipContent, clientX: number, clientY: number, key = 'main'): void {
+/**
+ * Shows the tooltip next to the pointer, flipping to stay inside the window.
+ * With `bounds` (a graph's rectangle) it also stays inside that rectangle, so linked graphs never cover each other.
+ */
+export function showTip(t: TipContent, clientX: number, clientY: number, key = 'main', bounds?: DOMRect): void {
   const n = node(key);
+  n.style.maxWidth = bounds ? Math.max(160, Math.floor(bounds.width) - 16) + 'px' : '';
   fill(t, n);
   n.hidden = false;
   const gap = 14, w = n.offsetWidth, hgt = n.offsetHeight;
   let x = clientX + gap, y = clientY + gap;
+  if (bounds) {
+    if (x + w > bounds.right - 6) x = clientX - gap - w;
+    x = Math.max(bounds.left + 6, x);
+    y = hgt > bounds.height - 12 ? bounds.top + 6 : Math.min(Math.max(y, bounds.top + 6), bounds.bottom - hgt - 6);
+  }
   if (x + w > window.innerWidth - 8) x = Math.max(8, clientX - gap - w);
-  if (y + hgt > window.innerHeight - 8) y = Math.max(8, clientY - gap - hgt);
+  if (y + hgt > window.innerHeight - 8) y = Math.max(8, window.innerHeight - 8 - hgt);
   n.style.left = x + 'px';
   n.style.top = y + 'px';
 }

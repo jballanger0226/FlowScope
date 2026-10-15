@@ -207,7 +207,9 @@ button.tr { cursor: pointer; } button.tr:hover { background: var(--field); } but
 .tip .ts { color: var(--accent-hi); font-weight: 600; font-size: 11.5px; margin-bottom: 2px; }
 .tip .tt { font-family: var(--mono); font-weight: 600; margin-bottom: 4px; color: var(--text2); }
 .tip .tr2 { display: flex; align-items: center; gap: 4px; justify-content: space-between; }
-.tip .tr2 .tk { flex: 1; color: var(--muted); }
+.tip .tr2 .tk { flex: 1; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tip .tr2 .sw { flex: none; }
+.tip .tr2 .tv { flex: none; white-space: nowrap; }
 .tip .tr2 .tv { font-family: var(--mono); font-weight: 600; margin-left: 12px; }
 .tip .tn { margin-top: 4px; color: var(--dim); font-size: 11.5px; }
 .gridline { stroke: var(--line); stroke-width: 1; } .axis { fill: var(--dim); font-size: 12px; font-family: var(--mono); }
