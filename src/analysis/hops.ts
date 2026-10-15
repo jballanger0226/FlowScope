@@ -70,6 +70,10 @@ export interface HopView {
   obs: Observation[];
 }
 
+/** One DSCP value seen on the packets of one direction of a stream. */
+export interface MarkingValue { dscp: number; name: string; pkts: number; bytes: number; where: string[] }
+export interface Marking { direction: 'forward' | 'reverse'; values: MarkingValue[] }
+
 export interface StreamDetail {
   skey: string;
   initiator: { ip: string; port: number };
@@ -79,6 +83,8 @@ export interface StreamDetail {
   forward: HopView[];
   reverse: HopView[];
   qosChanged: boolean;
+  /** Directions whose packets carry more than one DSCP value (marking differs between records, even where no hop re-marks it). */
+  marking: Marking[];
   /** The stream ran out of TTL before reaching its destination (or an ICMP Time Exceeded message was seen for it). */
   ttlExpired: boolean;
   totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number };
@@ -238,6 +244,21 @@ function buildHops(recs: FlowRecord[], ctx: HopContext, multicast = false): HopV
   return hops;
 }
 
+/** The DSCP values seen in one direction. Packets are counted once per DSCP at the exporter that saw the most of them, since two exporters see the same packets. */
+function markingOf(recs: FlowRecord[], direction: 'forward' | 'reverse', ctx: HopContext): Marking | null {
+  const by = new Map<number, { per: Map<string, { pkts: number; bytes: number }>; where: Set<string> }>();
+  for (const r of recs) {
+    const d = r.tos >> 2;
+    const e = by.get(d) ?? { per: new Map(), where: new Set<string>() }; by.set(d, e);
+    const x = e.per.get(r.exporter) ?? { pkts: 0, bytes: 0 }; x.pkts += r.pkts; x.bytes += r.bytes; e.per.set(r.exporter, x);
+    e.where.add(`${ctx.deviceName(r.exporter)} ${ctx.ifName(r.exporter, r.inIf)} → ${ctx.ifName(r.exporter, r.outIf)}`);
+  }
+  if (by.size < 2) return null;
+  const values = [...by].map(([dscp, e]) => ({ dscp, name: dscpName(dscp), pkts: Math.max(...[...e.per.values()].map(v => v.pkts)), bytes: Math.max(...[...e.per.values()].map(v => v.bytes)), where: [...e.where].slice(0, 6) }))
+    .sort((a, b) => b.pkts - a.pkts);
+  return { direction, values };
+}
+
 /** Works out the path a stream took from the flow records reported by each exporter. */
 export function analyzeStream(skey: string, recs: (FlowRecord & { primary?: boolean })[], ctx: HopContext): StreamDetail | null {
   if (!recs.length) return null;
@@ -254,11 +275,12 @@ export function analyzeStream(skey: string, recs: (FlowRecord & { primary?: bool
   else if (!reverse.length) note = 'Only one direction was exported. Check that the exporters report both ingress and egress traffic.';
   else if (reverse.length !== forward.length) note = 'The forward and reverse paths do not cross the same devices. The route may be asymmetric.';
   const all = [...forward, ...reverse];
+  const marking = [markingOf(fwdRecs, 'forward', ctx), markingOf(revRecs, 'reverse', ctx)].filter((m): m is Marking => m !== null);
   return {
     skey, initiator: { ip: first.srcIp, port: first.sport }, responder: { ip: first.dstIp, port: first.dport },
     proto: first.proto, protoName: protoName(first.proto), app: appName(first.proto, first.sport, first.dport), appPort: service(first.proto, first.sport, first.dport).port,
     t0: Math.min(...recs.map(r => r.ts0)), t1: Math.max(...recs.map(r => r.ts1)),
-    forward, reverse, qosChanged: all.some(h => h.qosChanged || h.obs.some(o => o.kind === 'remark')),
+    forward, reverse, qosChanged: all.some(h => h.qosChanged || h.obs.some(o => o.kind === 'remark')) || marking.length > 0, marking,
     ttlExpired: all.some(h => h.ttlExpired !== null),
     totals: { fwdBytes: sum(fwdRecs, 'bytes'), revBytes: sum(revRecs, 'bytes'), fwdPkts: sum(fwdRecs, 'pkts'), revPkts: sum(revRecs, 'pkts') },
     note, multicast: mcast ? { group: first.dstIp, source: first.srcIp } : null
