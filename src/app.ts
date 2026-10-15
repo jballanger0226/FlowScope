@@ -172,7 +172,13 @@ export class App {
 
   /** Name lookups for the search box. */
   /** Addresses that belong to our own routers and switches, used so traffic addressed to a router is not reported as TTL-expired. */
-  localIps(): string[] { return [...new Set([...this.devices.allAddresses(), ...this.knownExporters()])]; }
+  localIps(): string[] {
+    // A page of search results asks several times; the list changes only when a device or exporter is added, so a few seconds of reuse is safe.
+    const now = Date.now();
+    if (!this.localIpsCache || now - this.localIpsCache.at > 5000) this.localIpsCache = { at: now, ips: [...new Set([...this.devices.allAddresses(), ...this.knownExporters()])] };
+    return this.localIpsCache.ips;
+  }
+  private localIpsCache: { at: number; ips: string[] } | null = null;
 
   resolver(): Resolver {
     return {

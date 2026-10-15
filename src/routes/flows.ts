@@ -66,10 +66,11 @@ export function registerFlows(app: App): void {
     const offset = int(c.query.get('offset'), 0, 0, 10_000_000);
     // preview=N: answer quickly from the newest N flow records. The page says when that left older records out ("partial"), and the client then asks again for everything.
     const preview = int(c.query.get('preview'), 0, 0, 20_000);
-    const page = await app.store.searchStreams({ range, conds: parsed.conds, sort, dir, limit, offset, recent: preview || undefined, localIps: app.localIps() });
+    const localIpList = app.localIps();
+    const page = await app.store.searchStreams({ range, conds: parsed.conds, sort, dir, limit, offset, recent: preview || undefined, localIps: localIpList });
     const user = c.user().username;
     // health of the first rows: a quick hop analysis of each stream (loss between hops, slow links) without the SNMP lookups
-    const localIps = new Set(app.localIps());
+    const localIps = new Set(localIpList);
     const quick: HopContext = { localIps, deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i), policyAt: policyLookup(app) };
     const health = new Map<string, { kind: 'ok' | 'warn' | 'bad'; text: string }>();
     const verdicts = new Map<string, { kind: string; text: string }>();
@@ -101,7 +102,9 @@ export function registerFlows(app: App): void {
     if (!recs.length) throw new HttpError(404, 'No records for that stream in this time range. It may have aged out.');
     // egress queue drops from SNMP for each exporter and outgoing interface the stream used
     const drops = new Map<string, { cls: string; dropPct: number; dropPkts: number; dscps: number[] }[]>();
-    const t0 = Math.min(...recs.map(r => r.ts0)) - 180_000, t1 = Math.max(...recs.map(r => r.ts1)) + 180_000;
+    let lo = Infinity, hi = -Infinity;
+    for (const r of recs) { if (r.ts0 < lo) lo = r.ts0; if (r.ts1 > hi) hi = r.ts1; }
+    const t0 = lo - 180_000, t1 = hi + 180_000;
     const seen = new Set<string>();
     for (const r of recs) {
       const key = `${r.exporter}|${r.outIf}`;

@@ -53,7 +53,18 @@ type Defaults = typeof DEFAULTS;
 export class Settings {
   constructor(private cdb: ConfigDb) {}
 
+  /** Parsed values by key, so hot paths (one call per UDP packet) do not hit SQLite. Cleared on every write. */
+  private cache = new Map<string, unknown>();
+
   get<K extends keyof Defaults>(key: K): Defaults[K] {
+    // Callers may mutate what they get, so each call returns its own copy of the cached value.
+    if (this.cache.has(key)) return structuredClone(this.cache.get(key)) as Defaults[K];
+    const v = this.load(key);
+    this.cache.set(key, v);
+    return structuredClone(v);
+  }
+
+  private load<K extends keyof Defaults>(key: K): Defaults[K] {
     const row = this.cdb.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
     const def = DEFAULTS[key];
     if (!row) return structuredClone(def);
@@ -65,6 +76,7 @@ export class Settings {
   }
 
   set<K extends keyof Defaults>(key: K, value: Defaults[K]): void {
+    this.cache.delete(key);
     this.cdb.db.prepare('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
   }
 
@@ -73,6 +85,7 @@ export class Settings {
     return row?.value;
   }
   setRaw(key: string, value: string): void {
+    this.cache.delete(key);
     this.cdb.db.prepare('INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
   }
 }

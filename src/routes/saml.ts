@@ -16,6 +16,8 @@ export function registerSaml(app: App): void {
   const base = (c: Ctx): string => {
     if (app.cfg.publicUrl) return app.cfg.publicUrl.replace(/\/+$/, '');
     const host = String(c.req.headers.host || 'localhost');
+    // Without a configured public URL the Host header is all there is; at least refuse anything that is not a plain host[:port].
+    if (!/^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/.test(host)) throw new HttpError(400, 'Invalid Host header; set FLOWSCOPE_PUBLIC_URL');
     return `${c.secure ? 'https' : 'http'}://${host}`;
   };
   const urls = (c: Ctx) => { const b = base(c); const s = cfg().saml; return { acs: `${b}/api/auth/saml/acs`, sp: s.sp || `${b}/api/auth/saml/metadata` }; };

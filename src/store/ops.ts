@@ -127,9 +127,9 @@ export class SqliteOps {
     this.tableCache = null;
   }
 
-  private stmt(key: string, sql: string) {
+  private stmt(key: string, sql: string | (() => string)) {
     let s = this.insStmts.get(key);
-    if (!s) { s = this.db.prepare(sql); this.insStmts.set(key, s); }
+    if (!s) { s = this.db.prepare(typeof sql === 'function' ? sql() : sql); this.insStmts.set(key, s); }
     return s;
   }
 
@@ -160,7 +160,7 @@ export class SqliteOps {
         } else {
           this.primary.set(dirKey, { exp: r.exporter, at: now });
         }
-        this.stmt('f' + t, `INSERT INTO ${t} (${FLOW_COLS}) VALUES (${new Array(29).fill('?').join(',')})`).run(
+        this.stmt('f' + t, () => `INSERT INTO ${t} (${FLOW_COLS}) VALUES (${new Array(29).fill('?').join(',')})`).run(
           r.ts0, r.ts1, r.exporter, r.inIf, r.outIf, r.srcIp, r.dstIp, r.proto, r.sport, r.dport, r.flags, r.tos, r.postTos, r.ttlMin, r.ttlMax,
           r.bytes, r.pkts, r.srcMac, r.dstMac, r.vlan, r.natSrcIp, r.natDstIp, r.natSport, r.natDport, r.nextHop, skey, prim, ipToN(r.srcIp), ipToN(r.dstIp));
       }
