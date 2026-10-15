@@ -1,5 +1,5 @@
 import type { Cond, IpMatch } from '../store/types.js';
-import { appByName, dscpByName, PROTOS } from './apps.js';
+import { servicePorts, dscpByName, PROTOS } from './apps.js';
 import { ipToN } from '../store/ops.js';
 
 export interface Resolver {
@@ -60,8 +60,8 @@ function ports(v: string, errors: string[], key: string): number[] {
     const range = p.match(/^(\d+)-(\d+)$/);
     if (range) { const a = Number(range[1]), b = Number(range[2]); if (a <= b && b - a <= 2000 && b < 65536) { for (let i = a; i <= b; i++) out.push(i); continue; } }
     if (/^\d+$/.test(p) && Number(p) < 65536) { out.push(Number(p)); continue; }
-    const app = appByName(p);
-    if (app) { out.push(...app.ports); continue; }
+    const svc = servicePorts(p);
+    if (svc) { out.push(...svc); continue; }
     errors.push(`${key}: "${p}" is not a port or service name`);
   }
   return out;
@@ -92,7 +92,7 @@ export function parseQuery(q: string, res: Resolver): ParsedQuery {
         case 'app': {
           const names = val.split(',');
           const ps: number[] = [];
-          for (const n of names) { const a = appByName(n); if (a) ps.push(...a.ports); else errors.push(`app: unknown service "${n}"`); }
+          for (const n of names) { const a = servicePorts(n); if (a) ps.push(...a); else errors.push(`app: unknown service "${n}"`); }
           if (ps.length) conds.push({ kind: 'port', ports: ps });
           break;
         }
@@ -153,8 +153,7 @@ export function parseQuery(q: string, res: Resolver): ParsedQuery {
     const ipm = parseIpMatch(text);
     if (ipm && /[./]/.test(text)) { conds.push({ kind: 'ip', m: [ipm] }); continue; }
     if (/^\d+$/.test(text) && Number(text) < 65536) { conds.push({ kind: 'text', text, ips: [], vlans: Number(text) <= 4094 ? [Number(text)] : [], ports: [Number(text)] }); continue; }
-    const app = appByName(text);
-    const ps = app ? app.ports : [];
+    const ps = servicePorts(text) ?? [];
     conds.push({ kind: 'text', text, ips: res.exporterIpsByName(text), vlans: res.vlanIdsByName(text), ports: ps });
   }
   return { conds, errors };
