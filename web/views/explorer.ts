@@ -16,7 +16,7 @@ interface Hop {
   ttl: number | null; ttlExpired: 'ttl' | 'icmp' | null; dscpInS: string; dscpOutS: string; qosChanged: boolean; pkts: number; bytes: number; linkMs: number | null; cumMs: number | null; policy: string | null;
   obs: { kind: string; text: string; severity: 'info' | 'warn' | 'bad' }[]; firstSeen: number; lastSeen: number;
   outIfs?: string[]; sourcePort?: string | null; sourceConfirmed?: boolean;
-  devId?: number | null; inFrom?: PortSource; outFrom?: PortSource; inNeighbors?: Neighbor[]; outNeighbors?: Neighbor[];
+  notExported?: string[]; devId?: number | null; inFrom?: PortSource; outFrom?: PortSource; inNeighbors?: Neighbor[]; outNeighbors?: Neighbor[];
 }
 interface Attach { dev: string; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; confidence?: 'high' | 'medium' | 'low' }
 interface Located { ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
@@ -278,7 +278,8 @@ function multicastTable(hops: Hop[]): VNode {
   return h('div', { class: 'tbl hops' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1100px` },
     h('div', { class: 'tr head' }, ...['Device', 'Interfaces', 'Frame in (L2)', 'VLAN', 'TTL', 'DSCP', 'Packets', 'Bytes', 'Observations'].map(t => h('span', null, t))),
     hops.map((hp, i) => h('div', { key: i, class: 'tr' },
-      h('div', null, h('div', { style: 'font-weight:600' }, hp.dev), h('div', { class: 'dim', style: 'font-size:12px' }, hp.role), h('div', { class: 'dim mono', style: 'font-size:11.5px' }, hp.exporter)),
+      h('div', null, h('div', { style: 'font-weight:600' }, hp.dev), h('div', { class: 'dim', style: 'font-size:12px' }, hp.role), h('div', { class: 'dim mono', style: 'font-size:11.5px' }, hp.exporter),
+        hp.notExported ? h('div', { class: 'dim', style: 'font-size:11.5px', title: 'The exporter does not include these in what it sends, so they are blank here. Add them to its flow record (Flexible NetFlow / IPFIX template) to see them.' }, 'Not sent: ' + hp.notExported.join(', ')) : null),
       h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'in '), hp.inIf || '—'), neighborLines(hp.inNeighbors), h('div', null, h('span', { class: 'dim' }, 'out '), (hp.outIfs && hp.outIfs.length ? hp.outIfs : [hp.outIf]).join(', ') || '—'), neighborLines(hp.outNeighbors),
         hp.sourcePort ? h('div', { style: 'color:var(--accent)' }, `source host on ${hp.sourcePort}`) : null),
       h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'src '), hp.frameSrc ?? '—'), h('div', null, h('span', { class: 'dim' }, 'dst '), hp.frameDst ?? '—')),
@@ -298,7 +299,8 @@ function hopsTable(hops: Hop[]): VNode {
       const lossPct = prev && prev.pkts > 0 && hp.pkts < prev.pkts ? ((prev.pkts - hp.pkts) / prev.pkts) * 100 : 0;
       return h('div', { key: i, class: 'tr' },
         h('span', { class: 'mono muted' }, String(hp.n)),
-        h('div', null, h('div', { style: 'font-weight:600' }, hp.dev), h('div', { class: 'dim', style: 'font-size:12px' }, hp.role), h('div', { class: 'dim mono', style: 'font-size:11.5px' }, hp.exporter)),
+        h('div', null, h('div', { style: 'font-weight:600' }, hp.dev), h('div', { class: 'dim', style: 'font-size:12px' }, hp.role), h('div', { class: 'dim mono', style: 'font-size:11.5px' }, hp.exporter),
+        hp.notExported ? h('div', { class: 'dim', style: 'font-size:11.5px', title: 'The exporter does not include these in what it sends, so they are blank here. Add them to its flow record (Flexible NetFlow / IPFIX template) to see them.' }, 'Not sent: ' + hp.notExported.join(', ')) : null),
         h('div', { class: 'mono', style: 'font-size:12px' },
           h('div', null, h('span', { class: 'dim' }, 'in '), portLink(hp.dev, hp.inIf, hp.inFrom, hp.devId != null)), neighborLines(hp.inNeighbors),
           h('div', null, h('span', { class: 'dim' }, 'out '), portLink(hp.dev, hp.outIf, hp.outFrom, hp.devId != null)), neighborLines(hp.outNeighbors)),

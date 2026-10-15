@@ -49,6 +49,8 @@ export interface HopView {
   /** Set by the path enrichment (path.ts): the polled device for this exporter, how a missing port was worked out, and what is cabled to each port. */
   devId?: number | null; inFrom?: PortSource; outFrom?: PortSource;
   inNeighbors?: NeighborView[]; outNeighbors?: NeighborView[];
+  /** Details this exporter does not send at all (MAC addresses, VLAN, TTL), so a blank means "not exported" and not "lost". Set by the route from the exporter's templates. */
+  notExported?: string[];
   /** Every interface the traffic left through, busiest first. More than one on a multicast stream means the device replicated it. */
   outIfs: string[];
   /** Set on a multicast stream when SNMP data says the source host is plugged into this device: the port it is on, and whether the flow's ingress interface agrees. */
@@ -140,6 +142,11 @@ function aggregate(recs: FlowRecord[], local: ReadonlySet<string>, multicast = f
       // a multicast switch replicates, so its output side is larger than its input and the input side is the stream
       if (multicast || sum(hv.inOnly, 'bytes') >= sum(hv.outOnly, 'bytes')) { pkts = sum(hv.inOnly, 'pkts'); bytes = sum(hv.inOnly, 'bytes'); } else { pkts = sum(hv.outOnly, 'pkts'); bytes = sum(hv.outOnly, 'bytes'); }
       main = hv.inOnly.find(r => r.inIf === ii) ?? rs[0];
+      // the MAC addresses and VLAN come from whichever half carries them
+      if (main.srcMac === null || main.dstMac === null || main.vlan === null) {
+        const pick = <T,>(f: (r: FlowRecord) => T | null): T | null => { for (const r of [main, ...hv.inOnly, ...hv.outOnly]) { const v = f(r); if (v !== null) return v; } return null; };
+        main = { ...main, srcMac: pick(r => r.srcMac), dstMac: pick(r => r.dstMac), vlan: pick(r => r.vlan) };
+      }
       const outBytes = new Map<number, number>();
       for (const r of hv.outOnly) outBytes.set(r.outIf, (outBytes.get(r.outIf) ?? 0) + r.bytes);
       outIfs = [...outBytes].sort((a, b) => b[1] - a[1]).map(([k]) => k);

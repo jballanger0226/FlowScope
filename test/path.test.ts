@@ -164,3 +164,35 @@ test('a multicast switch counts its input side, not the replicas', () => {
   ], hctx)!.forward[0];
   assert.equal(d.pkts, 10); assert.equal(d.inIfIndex, 1);
 });
+
+/* ---- why a MAC, VLAN or TTL is blank: the exporter never sent it */
+import { notExported } from '../src/analysis/exported.js';
+import { TemplateDecoder } from '../src/collector/decode.js';
+import { buildV9 } from '../src/sim/packets.js';
+
+test('what an exporter does not send is read from its templates', () => {
+  assert.deepEqual(notExported('IPFIX', new Set([8, 12, 56, 80, 58, 52])), []);
+  assert.deepEqual(notExported('IPFIX', new Set([8, 12])), ['MAC addresses', 'VLAN', 'TTL']);
+  assert.deepEqual(notExported('IPFIX', new Set([8, 12, 57, 81, 59, 53])), ['MAC addresses (only the output-side fields are sent)', 'VLAN (only the output-side field is sent)']);
+  assert.equal(notExported('v5', null).length, 3);
+  assert.deepEqual(notExported('v9', null), [], 'nothing is claimed when no template has been seen');
+});
+
+test('the decoder reports the fields in an exporter\'s data templates', () => {
+  const dec = new TemplateDecoder();
+  assert.equal(dec.fieldsOf('10.0.0.1'), null);
+  const f: [number, number][] = [[8, 4], [12, 4], [1, 4], [2, 4], [10, 4], [14, 4], [4, 1], [7, 2], [11, 2]];
+  dec.decode(buildV9([rec({})], { nowMs: Date.now(), domain: 1, fields: f }), '10.0.0.1');
+  const ids = dec.fieldsOf('10.0.0.1')!;
+  assert.ok(ids.has(8) && ids.has(10) && ids.has(14));
+  assert.ok(!ids.has(56) && !ids.has(58) && !ids.has(52));
+  assert.equal(dec.fieldsOf('10.0.0.11'), null, 'another exporter whose address starts the same is not confused with it');
+});
+
+test('the MAC addresses and VLAN of a merged hop come from whichever half has them', () => {
+  const h = analyzeStream('k', [
+    rec({ inIf: 1, outIf: 0, bytes: 5000, pkts: 50 }),
+    rec({ inIf: 0, outIf: 46, bytes: 5000, pkts: 50, srcMac: 'aa:aa:aa:aa:aa:01', dstMac: 'aa:aa:aa:aa:aa:02', vlan: 150 })
+  ], hctx)!.forward[0];
+  assert.equal(h.frameSrc, 'aa:aa:aa:aa:aa:01'); assert.equal(h.frameDst, 'aa:aa:aa:aa:aa:02'); assert.equal(h.vlan, 150);
+});
