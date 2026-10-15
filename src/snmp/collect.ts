@@ -3,10 +3,11 @@ import { OID, CBQOS_OBJ, IF_TYPE_IGNORED } from './oids.js';
 import { readPortVlans, type PortVlan } from './ports.js';
 import { readResources, type Resources } from './resources.js';
 import { guessRole } from './roles.js';
+import { diffservSource, juniperSource, type QosSource } from './qos_vendors.js';
 
 export interface DeviceInfo { sysName: string; sysDescr: string; sysObjectId: string; uptimeSec: number }
 export interface IfaceInfo { index: number; name: string; descr: string; alias: string; speedMbps: number; oper: number; type: number; /** The interface's own MAC address, lower case with colons, or '' */ mac: string }
-export interface QosClass { name: string; objIdx: number; queueObjIdx: number | null; parentName: string | null; bandwidth: string | null }
+export interface QosClass { name: string; objIdx: number; queueObjIdx: number | null; parentName: string | null; bandwidth: string | null; /** Where the class's counters are, for sources whose tables are not indexed like Cisco's */ ref?: string }
 /** cbQosIfType: 1 main interface, 2 sub-interface, 5 control plane, 6 one VLAN of a trunk (cbQosVlanIndex), 7 EVC, 8 tunnel, 9 wireless. */
 /**
  * What a class does to the marking of the packets it matches ("set" actions). `dscp` is the value of a "set dscp" action. A value of 0 cannot be told from a
@@ -209,16 +210,38 @@ export function qosSummary(policies: QosPolicy[], ifaces: Pick<IfaceInfo, 'index
   return parts.join('; ') + '.';
 }
 
+/** Where queue and class statistics can come from, by the name stored in the device's profile. */
+export const ciscoSource: QosSource = {
+  id: 'cisco-cbqos', note: '', read: readQosStructure, poll: pollQosCounters
+};
+export const QOS_SOURCES: Record<string, QosSource> = { 'cisco-cbqos': ciscoSource, 'juniper-cos': juniperSource, diffserv: diffservSource };
+
+/** Tries the QoS MIBs the device is likely to have, in order, and keeps the first that has policies. */
+export async function discoverQos(c: SnmpClient, objectId: string, ifaces: Pick<IfaceInfo, 'index'>[]): Promise<{ profile: string; qos: QosPolicy[]; note: string }> {
+  const tried: QosSource[] = [ciscoSource];
+  if (objectId.startsWith('1.3.6.1.4.1.2636.')) tried.push(juniperSource);
+  tried.push(diffservSource);
+  let firstError = '';
+  for (const src of tried) {
+    try {
+      const qos = await src.read(c);
+      if (qos.length) return { profile: src.id, qos, note: src.id === 'cisco-cbqos' ? qosSummary(qos, ifaces) : `${src.note} ${qosSummary(qos, ifaces)}` };
+    } catch (e) { if (!firstError) firstError = (e as Error).message; }
+  }
+  if (firstError) return { profile: 'generic', qos: [], note: `The QoS tables could not be read: ${firstError}` };
+  return { profile: 'generic', qos: [], note: `${qosSummary([], ifaces)} ${tried.includes(juniperSource) ? 'Juniper CoS and DIFFSERV-MIB were looked for too.' : 'DIFFSERV-MIB was looked for too.'}` };
+}
+
 export async function probe(c: SnmpClient): Promise<Probe> {
   const info = await readInfo(c);
   const role = guessRole(info.sysDescr, info.sysName, info.sysObjectId);
   const keepVlans = role === 'firewall' || role === 'router';
   const [ifaces, ips, vlans, resources] = await Promise.all([readInterfaces(c, keepVlans), readIps(c).catch(() => []), readVlans(c).catch(() => []), readResources(c, info.sysObjectId).catch(() => null)]);
   // A failure here is kept as a note instead of being hidden, so "no policy" can be told apart from "the device did not answer in time"
-  let qos: QosPolicy[] = []; let qosNote: string;
-  try { qos = await readQosStructure(c); qosNote = qosSummary(qos, ifaces); } catch (e) { qosNote = `The QoS tables could not be read: ${(e as Error).message}`; }
+  const found = await discoverQos(c, info.sysObjectId, ifaces);
+  const qos = found.qos, qosNote = found.note;
   const ports = await readPortVlans(c, ifaces, ips).catch(() => new Map<number, PortVlan>());
-  const profile = qos.length ? 'cisco-cbqos' : 'generic';
+  const profile = found.profile;
   return { info, ifaces, ips, vlans, qos, profile, qosNote, ports, resources };
 }
 

@@ -200,6 +200,19 @@ const MIGRATIONS: string[] = [
     cpu_sum REAL, cpu_n INTEGER NOT NULL DEFAULT 0, cpu_max REAL, mem_sum REAL, mem_n INTEGER NOT NULL DEFAULT 0, mem_max REAL,
     swap_sum REAL, swap_n INTEGER NOT NULL DEFAULT 0, swap_max REAL, disk_sum REAL, disk_n INTEGER NOT NULL DEFAULT 0, disk_max REAL,
     load_sum REAL, load_n INTEGER NOT NULL DEFAULT 0, load_max REAL, up_min INTEGER, up_max INTEGER, PRIMARY KEY (dev_id, ts)) WITHOUT ROWID;
+  `,
+  `
+  -- hardware and protocol health of each device (sensors, PoE, spanning tree, OSPF, BGP) and per-interface link quality, both as the latest read; temperature and sessions join the resource history
+  CREATE TABLE device_health (dev_id INTEGER PRIMARY KEY, data TEXT NOT NULL, read_at INTEGER NOT NULL);
+  CREATE TABLE iface_extra (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, data TEXT NOT NULL, read_at INTEGER NOT NULL, PRIMARY KEY (dev_id, if_index)) WITHOUT ROWID;
+  ALTER TABLE resource_samples ADD COLUMN temp REAL;
+  ALTER TABLE resource_samples ADD COLUMN sess REAL;
+  ALTER TABLE resource_1h ADD COLUMN temp_sum REAL;
+  ALTER TABLE resource_1h ADD COLUMN temp_n INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE resource_1h ADD COLUMN temp_max REAL;
+  ALTER TABLE resource_1h ADD COLUMN sess_sum REAL;
+  ALTER TABLE resource_1h ADD COLUMN sess_n INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE resource_1h ADD COLUMN sess_max REAL;
   `
 ];
 

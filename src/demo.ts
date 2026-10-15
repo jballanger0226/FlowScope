@@ -1,5 +1,6 @@
 import type { App } from './app.js';
 import { recordResources } from './snmp/resource_history.js';
+import { EMPTY_HEALTH, hottest, type Health, type IfExtra, type Sensor } from './snmp/health.js';
 import type { FlowRecord } from './collector/types.js';
 import type { ClsPoint, IfPoint } from './store/types.js';
 import { dscpName } from './query/apps.js';
@@ -27,8 +28,9 @@ function demoResources(d: Dev, now: number): Resources {
   // the first switch restarted 20 hours ago, which the history marks
   const restartAt = d.name === 'dist-sw-01' ? DEMO_BOOT - 20 * 3600_000 : 0;
   const uptimeSec = restartAt && now >= restartAt ? Math.floor((now - restartAt) / 1000) : up + Math.floor((now - DEMO_BOOT) / 1000);
+  const sessions = d.role === 'firewall' ? Math.round(5200 + wave(900, 3) * 4800 + burst * 60) : null;
   return {
-    uptimeSec, cpuPct: cpu, cores: d.role === 'firewall' ? 8 : d.role === 'router' ? 4 : null,
+    uptimeSec, tempC: hottest(demoHealth(d, now).sensors), sessions, sessionsMax: d.role === 'firewall' ? 64000 : null, cpuPct: cpu, cores: d.role === 'firewall' ? 8 : d.role === 'router' ? 4 : null,
     load: d.role === 'firewall' ? [Math.round(cpu / 12) / 10, Math.round(cpu / 14) / 10, Math.round(cpu / 16) / 10] : null,
     memPct, memTotal, memUsed: Math.round(memTotal * memPct / 100), swapPct: d.role === 'firewall' ? 1.2 : null,
     disks: d.role === 'firewall' ? [{ name: '/', usedPct: 18.4, totalBytes: 120 * 1024 ** 3, usedBytes: Math.round(120 * 1024 ** 3 * 0.184) }, { name: '/var/log', usedPct: 41.0, totalBytes: 20 * 1024 ** 3, usedBytes: Math.round(20 * 1024 ** 3 * 0.41) }] : [],
@@ -36,6 +38,65 @@ function demoResources(d: Dev, now: number): Resources {
   };
 }
 const DEMO_BOOT = Date.now();
+
+/** Sensors, PoE, spanning tree and routing neighbours for a demo device, drifting slowly with the time. */
+function demoHealth(d: Dev, now: number): Health {
+  const k = [...d.name].reduce((a, c) => a + c.charCodeAt(0), 0);
+  const wave = (period: number, phase = 0) => (Math.sin((now / 1000 + k * 53 + phase) / period) + 1) / 2;
+  const h = EMPTY_HEALTH(now);
+  const S = (kind: Sensor['kind'], name: string, value: number | null, unit: string, state: Sensor['state'] = 'ok', stateText = 'ok', extra: Partial<Sensor> = {}): void => { h.sensors.push({ id: `demo:${h.sensors.length}`, kind, name, value, unit, state, stateText, ...extra }); };
+  const base = d.role === 'firewall' ? 44 : d.role === 'router' ? 41 : 36;
+  const t = Math.round((base + wave(3000) * 9 + (d.name === 'dc-leaf-07' ? 22 : 0)) * 10) / 10;
+  S('temperature', d.role === 'switch' ? 'Switch 1 - Mainboard Temperature' : 'Chassis inlet temperature', t, '°C', t >= 65 ? 'warn' : 'ok', t >= 65 ? 'over a minor limit' : 'ok');
+  S('temperature', d.role === 'switch' ? 'Switch 1 - ASIC Temperature' : 'CPU package temperature', Math.round((t + 11) * 10) / 10, '°C');
+  S('fan', 'Fan tray 1', 4200 + Math.round(wave(700) * 900), 'RPM'); S('fan', 'Fan tray 2', 4100 + Math.round(wave(800, 4) * 900), 'RPM');
+  S('power', 'Power supply A', null, '', 'ok', 'ok');
+  if (d.name === 'dc-leaf-11') S('power', 'Power supply B', null, '', 'bad', 'not functioning'); else S('power', 'Power supply B', null, '', 'ok', 'ok');
+  S('voltage', '12 V rail', 12.02, 'V');
+  // 10 G ports carry optics: the second uplink of the distribution switch has a weak receive level
+  for (const i of d.ifs.filter(x => x[2] >= 10000 && !/^V/i.test(x[0]))) {
+    const weak = d.name === 'dist-sw-01' && i[0] === 'Te1/0/2';
+    S('optic', `${i[0]} Transmit Power`, -2.1 + Math.round(wave(900, k) * 4) / 10, 'dBm', 'ok', 'ok', { optic: 'tx' });
+    S('optic', `${i[0]} Receive Power`, weak ? -14.6 : -5.3 + Math.round(wave(1100, k) * 6) / 10, 'dBm', weak ? 'warn' : 'ok', weak ? 'over a minor limit' : 'ok', { optic: 'rx' });
+    S('optic', `${i[0]} Module Temperature`, 34 + Math.round(wave(1500) * 50) / 10, '°C', 'ok', 'ok', { optic: 'temp' });
+  }
+  if (d.name === 'dist-sw-01') {
+    h.poe = [{ group: 1, budgetW: 740, usedW: 205 + Math.round(wave(600) * 40), usedPct: 0, status: 'on', portsDelivering: 3, portsFault: 0, portsTotal: 24 }];
+    h.poe[0].usedPct = Math.round((h.poe[0].usedW! / 740) * 1000) / 10;
+    h.stp = { rootId: '32768/00:1c:73:00:00:11', isRoot: false, rootPort: 3, rootCost: 4, topChanges: 17, sinceChangeSec: 3 * 86400 + 7200, blockingPorts: 1, ports: 12 };
+  } else if (d.name === 'dc-spine-01') h.stp = { rootId: '4096/' + d.mac, isRoot: true, rootPort: 0, rootCost: 0, topChanges: 4, sinceChangeSec: 9 * 86400, blockingPorts: 0, ports: 8 };
+  else if (d.role === 'switch') h.stp = { rootId: '4096/00:1c:73:00:01:01', isRoot: false, rootPort: 1, rootCost: 4, topChanges: 6, sinceChangeSec: 5 * 86400, blockingPorts: 0, ports: 6 };
+  if (d.name === 'core-rtr-01') h.ospf = [{ id: '10.255.0.2', address: '10.0.0.2', state: 'full', level: 'ok' }, { id: '10.255.0.5', address: '10.0.0.6', state: 'full', level: 'ok' }, { id: '10.255.0.9', address: '10.0.0.10', state: 'full', level: 'ok' }];
+  if (d.name === 'wan-rtr-01') {
+    h.ospf = [{ id: '10.255.0.1', address: '10.0.0.9', state: 'full', level: 'ok' }];
+    h.bgpLocalAs = 65010;
+    h.bgp = [
+      { address: '203.0.113.1', as: 64500, state: 'established', level: 'ok', admin: 'start', upSec: 12 * 86400, updatesIn: 912_440, updatesOut: 4_120 },
+      { address: '198.51.100.1', as: 64501, state: 'active', level: 'warn', admin: 'start', upSec: null, updatesIn: 88_120, updatesOut: 3_904 }
+    ];
+  }
+  return h;
+}
+
+/** Link quality counters that grow with time, so the change between two reads is a rate. One port has a duplex mismatch and one carries a broadcast storm. */
+function demoIfExtra(d: Dev, ifIndex: (name: string) => number | undefined, now: number): Map<number, IfExtra> {
+  const out = new Map<number, IfExtra>();
+  // counters have been running for a few days, not since 1970
+  const sec = (now - DEMO_BOOT) / 1000 + 4 * 86400;
+  for (const i of d.ifs) {
+    const ix = ifIndex(i[0]); if (ix === undefined || /^V/i.test(i[0])) continue;
+    const mismatch = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/16', storm = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/24';
+    const k = ix * 7;
+    out.set(ix, {
+      duplex: mismatch ? 'half' : 'full', admin: 1, delta: null, dtSec: null, readAt: now,
+      totals: {
+        fcs: Math.round(k + (mismatch ? sec * 0.7 : sec * 0.00001)), align: Math.round(mismatch ? sec * 0.2 : 0), symbol: 0, late: mismatch ? Math.round(sec * 0.05) : 0, excessive: 0, collisions: mismatch ? Math.round(sec * 0.4) : 0, carrier: 0, tooLong: 0,
+        unknown: Math.round(k), inMc: Math.round(sec * (i[2] >= 10000 ? 40 : 3)), inBc: Math.round(sec * (storm ? 1800 : 2)), outMc: Math.round(sec * 2), outBc: Math.round(sec * (storm ? 600 : 1))
+      }
+    });
+  }
+  return out;
+}
 
 const DEVS: Dev[] = [
   { name: 'dist-sw-01', ip: '10.255.0.2', role: 'switch', descr: 'Distribution switch', secs: 60, mac: '00:1c:73:00:00:02', ifs: [
@@ -366,6 +427,7 @@ function seedConfig(app: App, net: Net): void {
     // every interface answers with the device's MAC address in the demo, so a MAC seen in a stream can be named
     db.prepare("UPDATE interfaces SET mac = ? WHERE dev_id = ? AND mac = ''").run(d.mac, row.id);
     app.devices.saveResources(row.id, demoResources(d, Date.now()));
+    seedHealth(app, row.id, d, net, true);
     // two weeks of history: a reading a minute for the last three days, one every five minutes before that
     const nowMs = Date.now();
     app.cdb.tx(() => { for (let t = nowMs - 14 * 86400_000; t < nowMs - 60_000; t += t < nowMs - 3 * 86400_000 ? 300_000 : 60_000) recordResources(db, row.id, demoResources(d, t)); });
@@ -378,6 +440,16 @@ function seedConfig(app: App, net: Net): void {
 }
 
 /** Writes (and keeps fresh) what host tracking would have read from the switches: MAC address tables, ARP and LLDP neighbours. */
+/** Writes the demo device's current health and link quality. At seeding it writes two reads a minute apart, so rates show at once. */
+function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void {
+  const ifIdx = (name: string) => net.ifIdx.get(d.name + '|' + name);
+  const now = Date.now();
+  if (twice) app.devices.saveIfExtra(id, demoIfExtra(d, ifIdx, now - 60_000));
+  app.devices.saveIfExtra(id, demoIfExtra(d, ifIdx, now));
+  const h = demoHealth(d, now);
+  app.devices.saveHealth(id, h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length ? h : null);
+}
+
 function seedHosts(app: App, net: Net): void {
   const db = app.cdb.db; const now = Date.now(), first = now - 6 * 3600_000;
   const fdb = db.prepare(`INSERT INTO fdb(dev_id, mac, vlan, if_index, first_seen, last_seen, since) VALUES (?,?,?,?,?,?,?)
@@ -453,7 +525,7 @@ export async function startDemo(app: App): Promise<void> {
     await app.store.insertSnmp(p.ifs, p.cls);
     for (const d of DEVS) if (only.has(d.name)) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
   });
-  every(60_000, async () => { seedHosts(app, net); for (const d of DEVS) app.devices.saveResources(net.ids.get(d.name)!, demoResources(d, Date.now())); });
+  every(60_000, async () => { seedHosts(app, net); for (const d of DEVS) { const id = net.ids.get(d.name)!; app.devices.saveResources(id, demoResources(d, Date.now())); seedHealth(app, id, d, net); } });
   for (const d of DEVS) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
   void dscpName;
   console.log(' Demo sign-ins:  ' + DEMO_LOGINS.map(l => `${l.user} / ${l.password} (${l.role})`).join('   '));

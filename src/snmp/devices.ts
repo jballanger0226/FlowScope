@@ -1,4 +1,5 @@
 import net from 'node:net';
+import { diffExtra, linkOptics, type Health, type IfExtra } from './health.js';
 import { forgetResources, pruneResources, recordResources, resourceSeries, type ResSeries } from './resource_history.js';
 import type { ConfigDb } from '../db/configdb.js';
 import type { CredentialStore } from './creds.js';
@@ -183,6 +184,34 @@ export class DeviceService {
     try { recordResources(this.cdb.db, id, r); } catch { /* history is a bonus: never let it fail a poll */ }
   }
 
+  /** Keeps the latest hardware and protocol health of a device. Each read replaces the last one. */
+  saveHealth(id: number, h: Health | null): void {
+    if (!h) { this.cdb.db.prepare('DELETE FROM device_health WHERE dev_id = ?').run(id); return; }
+    this.cdb.db.prepare('INSERT INTO device_health(dev_id, data, read_at) VALUES (?,?,?) ON CONFLICT(dev_id) DO UPDATE SET data=excluded.data, read_at=excluded.read_at').run(id, JSON.stringify(h), h.readAt);
+  }
+
+  /** The latest health of a device, with optic sensors tied to the interface they belong to. */
+  health(id: number): Health | null {
+    const r = this.cdb.db.prepare('SELECT data FROM device_health WHERE dev_id = ?').get(id) as { data: string } | undefined;
+    if (!r) return null;
+    const h = JSON.parse(r.data) as Health;
+    h.sensors = linkOptics(h.sensors, this.interfaces(id).map(i => ({ index: i.ifIndex, name: i.name, descr: i.descr })));
+    return h;
+  }
+
+  /** Stores the extra interface counters of a device, working out what each went up by since the read before. */
+  saveIfExtra(id: number, now: Map<number, IfExtra>): void {
+    const prev = this.ifExtra(id);
+    const up = this.cdb.db.prepare('INSERT INTO iface_extra(dev_id, if_index, data, read_at) VALUES (?,?,?,?) ON CONFLICT(dev_id, if_index) DO UPDATE SET data=excluded.data, read_at=excluded.read_at');
+    this.cdb.tx(() => { for (const [ix, x] of now) { const d = diffExtra(prev.get(ix), x); up.run(id, ix, JSON.stringify(d), d.readAt); } });
+  }
+
+  ifExtra(id: number): Map<number, IfExtra> {
+    const m = new Map<number, IfExtra>();
+    for (const r of this.cdb.db.prepare('SELECT if_index, data FROM iface_extra WHERE dev_id = ?').all(id) as unknown as { if_index: number; data: string }[]) m.set(r.if_index, JSON.parse(r.data) as IfExtra);
+    return m;
+  }
+
   resourceHistory(id: number, from: number, to: number, points: number): ResSeries { return resourceSeries(this.cdb.db, id, from, to, points); }
   pruneResourceHistory(days: number): void { pruneResources(this.cdb.db, days); }
 
@@ -291,6 +320,8 @@ export class DeviceService {
       for (const t of ['interfaces', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
       this.cdb.db.prepare('UPDATE exporters SET device_id = NULL WHERE device_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_resources WHERE dev_id = ?').run(id);
+      this.cdb.db.prepare('DELETE FROM device_health WHERE dev_id = ?').run(id);
+      this.cdb.db.prepare('DELETE FROM iface_extra WHERE dev_id = ?').run(id);
       forgetResources(this.cdb.db, id);
       this.cdb.db.prepare('DELETE FROM devices WHERE id = ?').run(id);
     });

@@ -56,3 +56,19 @@ test('old ranges come from the hourly summary, which keeps peaks, and pruning dr
   assert.equal(resourceSeries(cdb.db, 1, now - 7 * d, now, 100, now).points.length, 0);
   forgetResources(cdb.db, 1);
 });
+
+test('temperature and sessions are kept, and a device without them has none rather than zero', () => {
+  const cdb = db(); const now = Date.now(); const m = 60_000;
+  for (let i = 5; i >= 1; i--) recordResources(cdb.db, 1, { ...res(now - i * m, 10, 40, 1000 + i), tempC: 40 + i, sessions: 1000 * i });
+  for (let i = 5; i >= 1; i--) recordResources(cdb.db, 2, res(now - i * m, 10, 40, 1000 + i));
+  const a = resourceSeries(cdb.db, 1, now - 10 * m, now, 10, now);
+  assert.equal(Math.max(...a.points.map(p => p.tempMax ?? 0)), 45); assert.equal(Math.max(...a.points.map(p => p.sessMax ?? 0)), 5000);
+  const b = resourceSeries(cdb.db, 2, now - 10 * m, now, 10, now);
+  assert.ok(b.points.every(p => p.temp === null && p.sess === null));
+  // the hourly tier too
+  const old = Math.floor((now - 5 * 86_400_000) / 3_600_000) * 3_600_000;
+  for (let i = 0; i < 4; i++) { recordResources(cdb.db, 1, { ...res(old + i * m, 10, 40, 100 + i), tempC: 50 + i, sessions: 10 + i }); recordResources(cdb.db, 2, res(old + i * m, 10, 40, 100 + i)); }
+  const h1 = resourceSeries(cdb.db, 1, now - 7 * 86_400_000, now - 4 * 86_400_000, 50, now), h2 = resourceSeries(cdb.db, 2, now - 7 * 86_400_000, now - 4 * 86_400_000, 50, now);
+  assert.equal(h1.points[0].tempMax, 53); assert.equal(h1.points[0].sessMax, 13);
+  assert.equal(h2.points[0].tempMax, null); assert.equal(h2.points[0].sessMax, null); assert.equal(h2.points[0].temp, null);
+});

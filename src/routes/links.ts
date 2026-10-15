@@ -7,13 +7,20 @@ import type { ClassLatest, IfLatest } from '../store/types.js';
 import { streamView } from './flows.js';
 import { isVlanInterface } from '../snmp/ports.js';
 import { DEFAULTS } from '../settings.js';
+import { linkWarnings } from '../snmp/health.js';
 
 export const MIBS = [
   { name: 'IF-MIB · ifXTable, ifTable', what: 'Interface names, speed, status, each interface\'s own MAC address, 64-bit octet counters and discards.' },
   { name: 'IP-MIB · ipAddrTable', what: 'The addresses and subnet masks of each device, so flow exporters are matched to the right device and each interface shows its subnet.' },
-  { name: 'HOST-RESOURCES-MIB · UCD-SNMP-MIB · CISCO-PROCESS-MIB · CISCO-MEMORY-POOL-MIB', what: 'Uptime, CPU, memory and disk use of each device, about once a minute. Cisco devices use their own process and memory pool tables, net-snmp devices (OPNsense, pfSense, Linux) the UCD-SNMP-MIB, and anything else the standard HOST-RESOURCES-MIB.' },
+  { name: 'HOST-RESOURCES-MIB · UCD-SNMP-MIB · CISCO-PROCESS-MIB · CISCO-MEMORY-POOL-MIB', what: 'Uptime, CPU, memory and disk use of each device, about once a minute, with history. Cisco uses its own process and memory pool tables, net-snmp devices (OPNsense, pfSense, Linux) the UCD-SNMP-MIB, and others HOST-RESOURCES-MIB.' },
+  { name: 'JUNIPER-MIB · HUAWEI-ENTITY-EXTENT-MIB · HH3C-ENTITY-EXT-MIB · STATISTICS-MIB (HP ProCurve) · FORTINET-FORTIGATE-MIB · PAN-COMMON-MIB', what: 'CPU, memory and, on firewalls, the session count, for vendors whose devices do not publish them in the standard MIBs.' },
+  { name: 'ENTITY-SENSOR-MIB · CISCO-ENTITY-SENSOR-MIB · CISCO-ENVMON-MIB · JUNIPER-MIB', what: 'Temperature, fan, power supply and voltage sensors, and the light levels and temperature of optics, read every few minutes. Cisco sensor thresholds decide when a reading is flagged.' },
+  { name: 'POWER-ETHERNET-MIB', what: 'Power over Ethernet budget and use per power source, and how many ports are delivering power or in fault.' },
+  { name: 'BRIDGE-MIB (spanning tree) · OSPF-MIB · BGP4-MIB', what: 'The spanning tree root, topology changes and blocking ports, OSPF neighbour states and BGP peer states.' },
+  { name: 'EtherLike-MIB · IF-MIB (cast counters)', what: 'Duplex, CRC, alignment and symbol errors, collisions, and broadcast, multicast and unknown-protocol packets for each interface, to find bad cables, duplex mismatches and storms.' },
   { name: 'Q-BRIDGE-MIB · dot1qVlanStaticName', what: 'VLAN numbers and their names, so flows and interfaces can be searched by either.' },
   { name: 'CISCO-CLASS-BASED-QOS-MIB', what: 'Input and output service policies, per-class packets, bytes and drops, and queue depth (64-bit counters, or 32-bit where a device has no others). Used for devices that implement it.' },
+  { name: 'JUNIPER-COS-MIB · DIFFSERV-MIB', what: 'Queue statistics per forwarding class on Juniper devices, and the standard DiffServ data path (classifier, meter, counter and drop elements) on devices that publish it. Cisco\'s MIB is tried first.' },
   { name: 'CISCO-VLAN-MEMBERSHIP-MIB · CISCO-VTP-MIB · Q-BRIDGE-MIB', what: 'The VLAN of each port: access and voice VLAN, trunk native and allowed VLANs, or the standard port VLAN id.' },
   { name: 'Aruba AI-AP-MIB (Instant access points)', what: 'Radios (channel, power, noise, how busy the channel is), SSIDs, and the wireless clients with their name, IP address, signal and traffic, read with the host tables.' },
   { name: 'BRIDGE-MIB · Q-BRIDGE-MIB · IP-MIB · LLDP-MIB · CISCO-CDP-MIB', what: 'MAC address tables, ARP, and LLDP/CDP neighbours every few minutes, to show which port a host is plugged into. Cisco switches are read one VLAN at a time.' }
@@ -57,6 +64,18 @@ export function registerLinks(app: App): void {
       })
     }));
     c.json({ devices, windowMinutes: minutes, thresholds: al, mibs: MIBS });
+  });
+
+  // Sensors, PoE, spanning tree, routing neighbours and the link quality of each interface, as last read
+  w.get('/api/links/health', 'ro', c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9);
+    if (!app.devices.row(dev)) throw new HttpError(404, 'No such device');
+    const ifs = new Map(app.devices.interfaces(dev).map(i => [i.ifIndex, i]));
+    const extra = [...app.devices.ifExtra(dev)].map(([ifIndex, x]) => {
+      const i = ifs.get(ifIndex);
+      return { ifIndex, ...x, warnings: i ? linkWarnings(x, i.oper, i.speedMbps) : [] };
+    });
+    c.json({ health: app.devices.health(dev), ifExtra: extra });
   });
 
   // Hosts learned on one port (from the switch's MAC address table, with IP addresses from ARP) and what LLDP/CDP says is at the other end

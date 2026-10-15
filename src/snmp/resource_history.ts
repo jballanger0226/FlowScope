@@ -7,31 +7,33 @@ const HOUR = 3_600_000;
 /** Readings closer together than this are the same reading (the poller reads about every 55 s). */
 const MIN_GAP_MS = 20_000;
 
-export interface ResPoint { ts: number; cpu: number | null; cpuMax: number | null; mem: number | null; memMax: number | null; swap: number | null; disk: number | null; load: number | null; loadMax: number | null }
+export interface ResPoint { ts: number; cpu: number | null; cpuMax: number | null; mem: number | null; memMax: number | null; swap: number | null; disk: number | null; load: number | null; loadMax: number | null; temp: number | null; tempMax: number | null; sess: number | null; sessMax: number | null }
 export interface ResSeries { step: number; tier: 'raw' | 'h1'; points: ResPoint[]; /** Moments the uptime went backwards: the device restarted */ restarts: number[] }
 
 const sample = (r: Resources) => ({
-  cpu: r.cpuPct, mem: r.memPct, swap: r.swapPct, disk: r.disks.length ? Math.max(...r.disks.map(d => d.usedPct)) : null, load: r.load ? r.load[0] : null, up: r.uptimeSec,
+  cpu: r.cpuPct, mem: r.memPct, swap: r.swapPct, disk: r.disks.length ? Math.max(...r.disks.map(d => d.usedPct)) : null, load: r.load ? r.load[0] : null, up: r.uptimeSec, temp: r.tempC ?? null, sess: r.sessions ?? null,
 });
 
 export function recordResources(db: DatabaseSync, devId: number, r: Resources): void {
   const s = sample(r);
-  if (s.cpu === null && s.mem === null && s.disk === null && s.load === null) return;
+  if (s.cpu === null && s.mem === null && s.disk === null && s.load === null && s.temp === null && s.sess === null) return;
   const last = db.prepare('SELECT MAX(ts) AS t FROM resource_samples WHERE dev_id = ?').get(devId) as { t: number | null };
   if (last.t !== null && Math.abs(r.readAt - last.t) < MIN_GAP_MS) return;
-  db.prepare('INSERT OR REPLACE INTO resource_samples(dev_id, ts, cpu, mem, swap, disk, load1, up) VALUES (?,?,?,?,?,?,?,?)').run(devId, r.readAt, s.cpu, s.mem, s.swap, s.disk, s.load, s.up);
+  db.prepare('INSERT OR REPLACE INTO resource_samples(dev_id, ts, cpu, mem, swap, disk, load1, up, temp, sess) VALUES (?,?,?,?,?,?,?,?,?,?)').run(devId, r.readAt, s.cpu, s.mem, s.swap, s.disk, s.load, s.up, s.temp, s.sess);
   const hr = Math.floor(r.readAt / HOUR) * HOUR;
   const n = (v: number | null) => (v === null ? 0 : 1);
-  db.prepare(`INSERT INTO resource_1h(dev_id, ts, n, cpu_sum, cpu_n, cpu_max, mem_sum, mem_n, mem_max, swap_sum, swap_n, swap_max, disk_sum, disk_n, disk_max, load_sum, load_n, load_max, up_min, up_max)
-    VALUES (?,?,1, ?,?,?, ?,?,?, ?,?,?, ?,?,?, ?,?,?, ?,?)
+  db.prepare(`INSERT INTO resource_1h(dev_id, ts, n, cpu_sum, cpu_n, cpu_max, mem_sum, mem_n, mem_max, swap_sum, swap_n, swap_max, disk_sum, disk_n, disk_max, load_sum, load_n, load_max, up_min, up_max, temp_sum, temp_n, temp_max, sess_sum, sess_n, sess_max)
+    VALUES (?,?,1, ?,?,?, ?,?,?, ?,?,?, ?,?,?, ?,?,?, ?,?, ?,?,?, ?,?,?)
     ON CONFLICT(dev_id, ts) DO UPDATE SET n = n + 1,
-      cpu_sum = COALESCE(cpu_sum,0) + COALESCE(excluded.cpu_sum,0), cpu_n = cpu_n + excluded.cpu_n, cpu_max = MAX(COALESCE(cpu_max,0), COALESCE(excluded.cpu_max,0)),
-      mem_sum = COALESCE(mem_sum,0) + COALESCE(excluded.mem_sum,0), mem_n = mem_n + excluded.mem_n, mem_max = MAX(COALESCE(mem_max,0), COALESCE(excluded.mem_max,0)),
-      swap_sum = COALESCE(swap_sum,0) + COALESCE(excluded.swap_sum,0), swap_n = swap_n + excluded.swap_n, swap_max = MAX(COALESCE(swap_max,0), COALESCE(excluded.swap_max,0)),
-      disk_sum = COALESCE(disk_sum,0) + COALESCE(excluded.disk_sum,0), disk_n = disk_n + excluded.disk_n, disk_max = MAX(COALESCE(disk_max,0), COALESCE(excluded.disk_max,0)),
-      load_sum = COALESCE(load_sum,0) + COALESCE(excluded.load_sum,0), load_n = load_n + excluded.load_n, load_max = MAX(COALESCE(load_max,0), COALESCE(excluded.load_max,0)),
-      up_min = MIN(COALESCE(up_min, excluded.up_min), COALESCE(excluded.up_min, up_min)), up_max = MAX(COALESCE(up_max,0), COALESCE(excluded.up_max,0))`)
-    .run(devId, hr, s.cpu, n(s.cpu), s.cpu, s.mem, n(s.mem), s.mem, s.swap, n(s.swap), s.swap, s.disk, n(s.disk), s.disk, s.load, n(s.load), s.load, s.up, s.up);
+      cpu_sum = COALESCE(cpu_sum,0) + COALESCE(excluded.cpu_sum,0), cpu_n = cpu_n + excluded.cpu_n, cpu_max = MAX(COALESCE(cpu_max, excluded.cpu_max), COALESCE(excluded.cpu_max, cpu_max)),
+      mem_sum = COALESCE(mem_sum,0) + COALESCE(excluded.mem_sum,0), mem_n = mem_n + excluded.mem_n, mem_max = MAX(COALESCE(mem_max, excluded.mem_max), COALESCE(excluded.mem_max, mem_max)),
+      swap_sum = COALESCE(swap_sum,0) + COALESCE(excluded.swap_sum,0), swap_n = swap_n + excluded.swap_n, swap_max = MAX(COALESCE(swap_max, excluded.swap_max), COALESCE(excluded.swap_max, swap_max)),
+      disk_sum = COALESCE(disk_sum,0) + COALESCE(excluded.disk_sum,0), disk_n = disk_n + excluded.disk_n, disk_max = MAX(COALESCE(disk_max, excluded.disk_max), COALESCE(excluded.disk_max, disk_max)),
+      load_sum = COALESCE(load_sum,0) + COALESCE(excluded.load_sum,0), load_n = load_n + excluded.load_n, load_max = MAX(COALESCE(load_max, excluded.load_max), COALESCE(excluded.load_max, load_max)),
+      up_min = MIN(COALESCE(up_min, excluded.up_min), COALESCE(excluded.up_min, up_min)), up_max = MAX(COALESCE(up_max, excluded.up_max), COALESCE(excluded.up_max, up_max)),
+      temp_sum = COALESCE(temp_sum,0) + COALESCE(excluded.temp_sum,0), temp_n = temp_n + excluded.temp_n, temp_max = MAX(COALESCE(temp_max, excluded.temp_max), COALESCE(excluded.temp_max, temp_max)),
+      sess_sum = COALESCE(sess_sum,0) + COALESCE(excluded.sess_sum,0), sess_n = sess_n + excluded.sess_n, sess_max = MAX(COALESCE(sess_max, excluded.sess_max), COALESCE(excluded.sess_max, sess_max))`)
+    .run(devId, hr, s.cpu, n(s.cpu), s.cpu, s.mem, n(s.mem), s.mem, s.swap, n(s.swap), s.swap, s.disk, n(s.disk), s.disk, s.load, n(s.load), s.load, s.up, s.up, s.temp, n(s.temp), s.temp, s.sess, n(s.sess), s.sess);
 }
 
 /** Removes readings older than the raw keep time, and hourly summaries older than `hourlyDays`. */
@@ -54,14 +56,14 @@ export function resourceSeries(db: DatabaseSync, devId: number, from: number, to
   let pts: ResPoint[];
   let ups: { ts: number; up: number }[];
   if (raw) {
-    const rows = db.prepare(`SELECT (ts / ${step}) * ${step} AS b, AVG(cpu) AS cpu, MAX(cpu) AS cpuMax, AVG(mem) AS mem, MAX(mem) AS memMax, AVG(swap) AS swap, MAX(disk) AS disk, AVG(load1) AS load, MAX(load1) AS loadMax
+    const rows = db.prepare(`SELECT (ts / ${step}) * ${step} AS b, AVG(cpu) AS cpu, MAX(cpu) AS cpuMax, AVG(mem) AS mem, MAX(mem) AS memMax, AVG(swap) AS swap, MAX(disk) AS disk, AVG(load1) AS load, MAX(load1) AS loadMax, AVG(temp) AS temp, MAX(temp) AS tempMax, AVG(sess) AS sess, MAX(sess) AS sessMax
       FROM resource_samples WHERE dev_id = ? AND ts BETWEEN ? AND ? GROUP BY b ORDER BY b`).all(devId, from, to) as any[];
-    pts = rows.map(x => ({ ts: x.b, cpu: r1(x.cpu), cpuMax: r1(x.cpuMax), mem: r1(x.mem), memMax: r1(x.memMax), swap: r1(x.swap), disk: r1(x.disk), load: x.load === null ? null : Math.round(x.load * 100) / 100, loadMax: x.loadMax === null ? null : Math.round(x.loadMax * 100) / 100 }));
+    pts = rows.map(x => ({ ts: x.b, cpu: r1(x.cpu), cpuMax: r1(x.cpuMax), mem: r1(x.mem), memMax: r1(x.memMax), swap: r1(x.swap), disk: r1(x.disk), load: x.load === null ? null : Math.round(x.load * 100) / 100, loadMax: x.loadMax === null ? null : Math.round(x.loadMax * 100) / 100, temp: r1(x.temp), tempMax: r1(x.tempMax), sess: x.sess === null ? null : Math.round(x.sess), sessMax: x.sessMax === null ? null : Math.round(x.sessMax) }));
     ups = (db.prepare('SELECT ts, up FROM resource_samples WHERE dev_id = ? AND ts BETWEEN ? AND ? AND up IS NOT NULL ORDER BY ts').all(devId, from, to) as any[]);
   } else {
     const rows = db.prepare(`SELECT (ts / ${step}) * ${step} AS b, SUM(cpu_sum) AS cs, SUM(cpu_n) AS cn, MAX(cpu_max) AS cm, SUM(mem_sum) AS ms, SUM(mem_n) AS mn, MAX(mem_max) AS mm, SUM(swap_sum) AS ss, SUM(swap_n) AS sn,
-      MAX(disk_max) AS dm, SUM(load_sum) AS ls, SUM(load_n) AS ln, MAX(load_max) AS lm FROM resource_1h WHERE dev_id = ? AND ts BETWEEN ? AND ? GROUP BY b ORDER BY b`).all(devId, from, to) as any[];
-    pts = rows.map(x => ({ ts: x.b, cpu: r1(avg(x.cs, x.cn)), cpuMax: r1(x.cm), mem: r1(avg(x.ms, x.mn)), memMax: r1(x.mm), swap: r1(avg(x.ss, x.sn)), disk: r1(x.dm), load: x.ln ? Math.round((x.ls / x.ln) * 100) / 100 : null, loadMax: x.lm === null ? null : Math.round(x.lm * 100) / 100 }));
+      MAX(disk_max) AS dm, SUM(load_sum) AS ls, SUM(load_n) AS ln, MAX(load_max) AS lm, SUM(temp_sum) AS ts_, SUM(temp_n) AS tn, MAX(temp_max) AS tm, SUM(sess_sum) AS ss2, SUM(sess_n) AS sn2, MAX(sess_max) AS sm FROM resource_1h WHERE dev_id = ? AND ts BETWEEN ? AND ? GROUP BY b ORDER BY b`).all(devId, from, to) as any[];
+    pts = rows.map(x => ({ ts: x.b, cpu: r1(avg(x.cs, x.cn)), cpuMax: r1(x.cm), mem: r1(avg(x.ms, x.mn)), memMax: r1(x.mm), swap: r1(avg(x.ss, x.sn)), disk: r1(x.dm), load: x.ln ? Math.round((x.ls / x.ln) * 100) / 100 : null, loadMax: x.lm === null ? null : Math.round(x.lm * 100) / 100, temp: r1(avg(x.ts_, x.tn)), tempMax: r1(x.tm), sess: x.sn2 ? Math.round(x.ss2 / x.sn2) : null, sessMax: x.sm === null ? null : Math.round(x.sm) }));
     // A restart shows up inside an hour as a lower uptime than the hour before reached
     const h = db.prepare('SELECT ts, up_min, up_max FROM resource_1h WHERE dev_id = ? AND ts BETWEEN ? AND ? AND up_max IS NOT NULL ORDER BY ts').all(devId, from, to) as any[];
     ups = [];

@@ -4,11 +4,12 @@ import { redraw, go } from '../state.js';
 import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, spark, stat, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
 import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, rangeMs, svcLabel } from '../util.js';
 import { post } from '../api.js';
+import { healthPanel, linkQuality, type HealthRes } from './links_health.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
 interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
 interface Disk { name: string; usedPct: number; totalBytes: number; usedBytes: number }
-interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: number | null; load: [number, number, number] | null; memPct: number | null; memTotal: number | null; memUsed: number | null; swapPct: number | null; disks: Disk[]; source: string; readAt: number }
+interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: number | null; load: [number, number, number] | null; memPct: number | null; memTotal: number | null; memUsed: number | null; swapPct: number | null; sessions?: number | null; sessionsMax?: number | null; tempC?: number | null; disks: Disk[]; source: string; readAt: number }
 interface Iface {
   mac: string; addresses: string[];
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
@@ -50,7 +51,7 @@ let devId = 0; let ifIndex = 0;
 let graphRange = '6h';
 let dropThr = 1;
 let hidden = new Set<string>();
-interface ResPoint { ts: number; cpu: number | null; cpuMax: number | null; mem: number | null; memMax: number | null; swap: number | null; disk: number | null; load: number | null; loadMax: number | null }
+interface ResPoint { ts: number; cpu: number | null; cpuMax: number | null; mem: number | null; memMax: number | null; swap: number | null; disk: number | null; load: number | null; loadMax: number | null; temp: number | null; tempMax: number | null; sess: number | null; sessMax: number | null }
 interface ResHist { step: number; tier: 'raw' | 'h1'; points: ResPoint[]; restarts: number[] }
 let resHist: ResHist | null = null; let resHistError = ''; let resHistLoading = false; let resRange = '6h'; let resOpen = true;
 const RES_RANGES: [string, string][] = [['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['3d', 'Last 3 days'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
@@ -70,7 +71,7 @@ export function enter(p: URLSearchParams): void {
   }
   void load();
   window.clearInterval(timer);
-  timer = window.setInterval(() => { if (!document.hidden && location.hash.startsWith('#/links')) { void load(true); void loadResHist(true); } }, 30_000);
+  timer = window.setInterval(() => { if (!document.hidden && location.hash.startsWith('#/links')) { void load(true); void loadResHist(true); void loadHealth(true); } }, 30_000);
 }
 
 async function load(quiet = false): Promise<void> {
@@ -99,10 +100,22 @@ let prevDev = 0;
 function select_(d: number, i: number): void {
   if (d !== devId) ifSearch = '';
   devId = d; ifIndex = i; series = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
-  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHist = null; void loadResHist(); }
+  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHist = null; void loadResHist(); healthRes = null; void loadHealth(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
+}
+
+let healthRes: HealthRes | null = null; let healthLoading = false; let healthOpen = true;
+let hlseq = 0;
+async function loadHealth(quiet = false): Promise<void> {
+  if (!devId) return;
+  const my = ++hlseq, d = devId; if (!quiet) healthLoading = true;
+  try {
+    const r = await get<HealthRes>('/api/links/health' + qs({ dev: d }));
+    if (my === hlseq && d === devId) healthRes = r;
+  } catch { if (my === hlseq && !quiet) healthRes = null; }
+  if (my === hlseq) { healthLoading = false; redraw(); }
 }
 
 let rseq = 0;
@@ -557,6 +570,8 @@ function resourceTileList(r: Resources, hist?: ResHist | null): VNode[] {
   if (r.cpuPct !== null) tiles.push(stat('CPU', h('span', { style: sevStyle(r.cpuPct) }, `${Math.round(r.cpuPct)}%`), [h('span', null, [r.cores ? `${r.cores} cores` : null, r.load ? `load ${r.load.map(x => x.toFixed(2)).join(' / ')}` : null].filter(Boolean).join(' · ')), trend(p => p.cpu, 'CPU over the chosen range', 100)]));
   else if (r.load) tiles.push(stat('Load average', r.load.map(x => x.toFixed(2)).join(' / '), '1, 5 and 15 minutes'));
   if (r.memPct !== null) tiles.push(stat('Memory', h('span', { style: sevStyle(r.memPct) }, `${Math.round(r.memPct)}%`), [h('span', null, r.memTotal !== null && r.memUsed !== null ? `${bytes(r.memUsed)} of ${bytes(r.memTotal)}${r.swapPct !== null ? ` · swap ${Math.round(r.swapPct)}%` : ''}` : ''), trend(p => p.mem, 'Memory over the chosen range', 100)]));
+  if (r.tempC !== null && r.tempC !== undefined) tiles.push(stat('Temperature', h('span', { style: sevStyle(r.tempC, 65, 80) }, `${Math.round(r.tempC)} °C`), [h('span', null, 'hottest sensor'), trend(p => p.temp, 'Temperature over the chosen range', undefined)]));
+  if (r.sessions !== null && r.sessions !== undefined) tiles.push(stat('Sessions', h('span', { style: r.sessionsMax ? sevStyle((r.sessions / r.sessionsMax) * 100) : undefined }, num(r.sessions)), [h('span', null, r.sessionsMax ? `${Math.round((r.sessions / r.sessionsMax) * 100)}% of ${num(r.sessionsMax)}` : 'in use now'), trend(p => p.sess, 'Sessions over the chosen range', undefined)]));
   for (const d of r.disks) tiles.push(stat(`Disk ${d.name}`, h('span', { style: sevStyle(d.usedPct, 80, 95) }, `${d.usedPct < 10 ? d.usedPct.toFixed(1) : Math.round(d.usedPct)}%`), `${bytes(d.usedBytes)} of ${bytes(d.totalBytes)}`));
   return tiles;
 }
@@ -611,6 +626,8 @@ function resHistoryPanel(dev: Dev): VNode {
   if (col('mem').length) charts.push({ key: 'mem', build: size => lineChart({ ...size, sync: 'res', title: 'Memory in use', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'memMax') : []), ...mk(peaks ? 'Average' : 'Memory', 'var(--s2)', 'mem'), ...mk('Swap', 'var(--s4)', 'swap')], from, to, bands, fmtT, fmtV: pctV, aria: `Memory of ${dev.name}` }) });
   if (col('disk').length) charts.push({ key: 'disk', build: size => lineChart({ ...size, sync: 'res', title: 'Fullest disk', unit: v => Math.round(v) + '%', yMax: 100, series: mk('Disk', 'var(--s3)', 'disk'), from, to, bands, fmtT, fmtV: pctV, aria: `Disk use of ${dev.name}` }) });
   if (col('load').length) charts.push({ key: 'load', build: size => lineChart({ ...size, sync: 'res', title: 'Load average (1 minute)', unit: v => v.toFixed(v < 10 ? 1 : 0), series: [...(peaks ? mk('Peak', 'var(--s5)', 'loadMax') : []), ...mk(peaks ? 'Average' : 'Load', 'var(--s6)', 'load')], from, to, bands, fmtT, fmtV: v => v.toFixed(2), aria: `Load of ${dev.name}` }) });
+  if (col('temp').length) charts.push({ key: 'temp', build: size => lineChart({ ...size, sync: 'res', title: 'Temperature (hottest sensor)', unit: v => Math.round(v) + ' °C', series: [...(peaks ? mk('Peak', 'var(--s5)', 'tempMax') : []), ...mk(peaks ? 'Average' : 'Temperature', 'var(--s7)', 'temp')], from, to, bands, fmtT, fmtV: v => `${Math.round(v * 10) / 10} °C`, aria: `Temperature of ${dev.name}` }) });
+  if (col('sess').length) charts.push({ key: 'sess', build: size => lineChart({ ...size, sync: 'res', title: 'Sessions', unit: v => (v >= 1000 ? Math.round(v / 100) / 10 + 'k' : String(Math.round(v))), series: [...(peaks ? mk('Peak', 'var(--s5)', 'sessMax') : []), ...mk(peaks ? 'Average' : 'Sessions', 'var(--s8)', 'sess')], from, to, bands, fmtT, fmtV: v => num(Math.round(v)), aria: `Sessions on ${dev.name}` }) });
   const restartsIn = hist.restarts.filter(t => t >= from);
   return h('div', { class: 'col', style: 'gap:10px' }, head,
     h('div', { class: 'row', style: 'gap:8px' },
@@ -648,6 +665,7 @@ export function render(): VNode {
           btn('Edit in SNMP devices', { kind: 'ghost', small: true, onclick: () => go('devices', { id: dev.id }) })),
         dev.status !== 'ok' && dev.lastError ? note(`The last poll failed: ${dev.lastError}`, 'warn') : null,
         resourcesPanel(dev),
+        healthPanel({ data: healthRes, loading: healthLoading, open: healthOpen, toggle: () => { healthOpen = !healthOpen; redraw(); }, ifNames: new Map(dev.interfaces.map(i => [i.ifIndex, i.name])), openInterface: ix => select_(dev.id, ix) }),
         ifTable(dev),
         dev.hasWlan ? wlanPanel(dev) : null,
         neighborsPanel(dev)) : null,
@@ -660,6 +678,7 @@ export function render(): VNode {
           h('div', { class: 'row' }, itf.flagged ? chip('Needs attention', 'warn') : chip('Within thresholds', 'ok'))),
         dev.qosNote ? note(dev.qosNote, 'warn') : null,
         classTable(itf),
+        linkQuality(healthRes?.ifExtra.find(x => x.ifIndex === itf.ifIndex), (healthRes?.health?.sensors ?? []).filter(x => x.kind === 'optic' && x.ifIndex === itf.ifIndex), itf.speedMbps),
         itf.isVlanIf ? null : hostsPanel(dev, itf),
         seriesLoading && !series ? spinner('Loading the graphs…') : seriesError ? note(seriesError, 'bad', true) : series ? graphs(series, itf) : null,
         streamsPanel(dev, itf)) : dev ? h('div', { class: 'panel' }, empty('Select an interface to see its queues and graphs.')) : null)));
