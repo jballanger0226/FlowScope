@@ -26,6 +26,12 @@ on:
 permissions:
   contents: write
 
+# One run per branch or tag at a time. Every push to main rebuilds and re-uploads the same rolling release assets; two runs doing that together
+# delete each other's files with --clobber (the upload then fails with HTTP 404). A newer push replaces a run that is still going.
+concurrency:
+  group: vm-image-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   image:
     # Two images: the default with ClickHouse, and one without it (embedded SQLite) for small sites.
@@ -114,10 +120,10 @@ jobs:
           set -euo pipefail
           if [ "${GITHUB_REF_TYPE}" = tag ]; then
             gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "FlowScope $GITHUB_REF_NAME" --generate-notes || gh release view "$GITHUB_REF_NAME" >/dev/null
-            gh release upload "$GITHUB_REF_NAME" vm-out/* --clobber
+            for try in 1 2 3; do gh release upload "$GITHUB_REF_NAME" vm-out/* --clobber && break; [ "$try" = 3 ] && exit 1; echo "upload failed, retrying"; sleep 20; done
           else
             gh release view vm-latest >/dev/null 2>&1 || gh release create vm-latest --target "$GITHUB_SHA" --prerelease \
               --title "VM appliance (latest main)" --notes "Rolling build of the VM appliance from the main branch." || gh release view vm-latest >/dev/null
-            gh release upload vm-latest vm-out/* --clobber
+            for try in 1 2 3; do gh release upload vm-latest vm-out/* --clobber && break; [ "$try" = 3 ] && exit 1; echo "upload failed, retrying"; sleep 20; done
             gh release edit vm-latest --notes "Rolling build of the VM appliance from the main branch (commit ${GITHUB_SHA::7}). flowscope-vm_*.ova is for VMware ESXi / vCenter and flowscope-vm_*.qcow2 for Nutanix AHV; both include ClickHouse (the default). flowscope-vm-sqlite_* has none and stores flow records in the embedded SQLite file. See docs/deployment.md."
           fi

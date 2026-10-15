@@ -21,6 +21,12 @@ on:
 permissions:
   contents: write
 
+# One run per branch or tag at a time. Every push to main rebuilds and re-uploads the same rolling release assets; two runs doing that together
+# delete each other's files with --clobber (the upload then fails with HTTP 404). A newer push replaces a run that is still going.
+concurrency:
+  group: lxc-template-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   template:
     # Two templates: the default with ClickHouse, and one without it (embedded SQLite) for small sites.
