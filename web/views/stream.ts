@@ -3,7 +3,7 @@ import { get, qs } from '../api.js';
 import { go } from '../state.js';
 import { btn, chip, note, seg, spinner, status as statusEl } from '../components.js';
 import { neighborLines, portLink, type Neighbor, type PortSource } from '../neighbors.js';
-import { bytes, clock, dur, ms, num, stamp, svcLabel } from '../util.js';
+import { bps, bytes, clock, dur, ms, num, stamp, svcLabel } from '../util.js';
 import { hideTip, showTip } from '../tooltip.js';
 
 /** The "Following stream" panel: the path a stream took hop by hop, QoS and TTL findings, layers and activity. Shared by Flow explorer and Flows by port. */
@@ -233,19 +233,22 @@ function activity(d: Detail, f: Follower): VNode {
       onpointermove: (e: PointerEvent) => hoverBar(e, i),
       onpointerdown: (e: PointerEvent) => hoverBar(e, i)
     }, h('i', { style: `height:${Math.max(1, (v / max) * 100)}%` }))));
+  /** Bits per second over an interval, counting at least one second so a very short stream is not shown as an absurd rate. */
+  const rate = (v: number, ms: number) => v * 8 / (Math.max(1000, ms) / 1000);
+  const peak = (arr: number[]) => Math.max(0, ...arr.map(v => rate(v, slot)));
   const hoverBar = (e: PointerEvent, i: number) => {
     const el = e.currentTarget as HTMLElement;
     const rev = !!el.parentElement?.classList.contains('rev');
     const v = (rev ? a.rev : a.fwd)[i] ?? 0;
     const total = sums[rev ? 'rev' : ''];
     const s0 = a.t0 + i * slot, s1 = i === n - 1 ? a.t1 : s0 + slot;
+    const share = total > 0 ? v / total * 100 : null;
     showTip({
       title: `${clock(s0)} → ${clock(s1)}`,
       rows: [
-        { color: rev ? 'var(--warn)' : 'var(--accent)', label: rev ? 'Responder → initiator' : 'Initiator → responder', value: bytes(v) },
-        ...(v >= 1024 ? [{ label: 'Exact', value: `${num(v)} bytes` }] : []),
-        ...(total > 0 ? [{ label: 'Share of this direction', value: (v / total * 100 < 10 ? (v / total * 100).toFixed(1) : (v / total * 100).toFixed(0)) + '%' }] : []),
-        ...(slot > 0 ? [{ label: 'Average rate', value: bytes(v / (Math.max(1, s1 - s0) / 1000)) + '/s' }] : [])
+        { color: rev ? 'var(--warn)' : 'var(--accent)', label: rev ? 'Responder → initiator' : 'Initiator → responder', value: bps(rate(v, s1 - s0)) },
+        { label: 'Data in interval', value: v >= 1000 ? `${bytes(v)} (${num(v)} B)` : `${num(v)} B` },
+        ...(share !== null ? [{ label: 'Share of this direction', value: (share < 10 ? share.toFixed(1) : share.toFixed(0)) + '%' }] : [])
       ],
       note: `Interval ${i + 1} of ${n} · ${dur(s1 - s0)} each`
     }, e.clientX, e.clientY);
@@ -254,8 +257,8 @@ function activity(d: Detail, f: Follower): VNode {
     h('div', { class: 'row', style: 'justify-content:space-between' }, h('b', null, 'Stream activity'), h('span', { class: 'muted mono', style: 'font-size:12px' }, `${clock(a.t0)} → ${clock(a.t1)}`)),
     h('div', { class: 'col', style: 'gap:6px;margin:10px 0' }, bars(a.fwd, ''), bars(a.rev, 'rev')),
     h('div', { class: 'legendrow' },
-      h('span', null, h('i', { class: 'sw', style: 'background:var(--accent)' }), 'Initiator → responder · ', h('b', null, bytes(d.totals.fwdBytes))),
-      h('span', null, h('i', { class: 'sw', style: 'background:var(--warn)' }), 'Responder → initiator · ', h('b', null, bytes(d.totals.revBytes)))),
+      h('span', null, h('i', { class: 'sw', style: 'background:var(--accent)' }), 'Initiator → responder · ', h('b', null, bytes(d.totals.fwdBytes)), h('span', { class: 'dim' }, ` · peak ${bps(peak(a.fwd))}`)),
+      h('span', null, h('i', { class: 'sw', style: 'background:var(--warn)' }), 'Responder → initiator · ', h('b', null, bytes(d.totals.revBytes)), h('span', { class: 'dim' }, ` · peak ${bps(peak(a.rev))}`))),
     h('div', { class: 'col', style: 'gap:6px;margin-top:12px' },
       h('span', { class: 'muted' }, 'Other conversations between these hosts'),
       f.related.length ? f.related.map(r => h('button', { key: r.id, type: 'button', class: 'cardbtn', onclick: () => f.onPick(r.id) }, h('span', { class: 't mono' }, `${r.srcIp}:${r.sport} → ${r.dstIp}:${r.dport}`), h('span', { class: 's' }, `${svcLabel(r.app, r.appPort)} · ${bytes(r.bytes)}`))) : h('span', { class: 'dim' }, 'None in this time range.')));

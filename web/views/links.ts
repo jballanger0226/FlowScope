@@ -2,7 +2,7 @@ import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw, go } from '../state.js';
 import { bar, btn, chip, empty, heading, lineChart, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
-import { ago, bps, bytes, clock, dayClock, dur, num, pct, debounce, svcLabel } from '../util.js';
+import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, svcLabel } from '../util.js';
 import { post } from '../api.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
@@ -515,6 +515,10 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
     h('div', { class: 'charts' }, lineChart({
       wide: true, title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
       series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }], aria: `Utilisation of ${itf.name}`
+    })),
+    h('div', { class: 'charts' }, lineChart({
+      wide: true, title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)))), from, to, fmtT,
+      series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }], aria: `Throughput of ${itf.name} in bits per second`
     })),
     h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
     h('div', { class: 'col', style: 'gap:6px' },

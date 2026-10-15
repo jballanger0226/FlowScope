@@ -112,7 +112,7 @@ export const PALETTE = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var
 
 /** A line chart drawn with SVG. Shaded bands mark time spans (events). */
 export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; fmtT: (t: number) => string; /** Precise value text for the hover readout (defaults to unit) */ fmtV?: (v: number) => string; /** Full timestamp for the hover readout */ fmtFull?: (t: number) => string; wide?: boolean }): VNode {
-  const W = o.wide ? 1100 : 520, H = 190, L = 64, R = 10, T = 8, B = 22;
+  const W = o.wide ? 1100 : 520, H = 190, L = 76, R = 10, T = 8, B = 22;
   const all = o.series.flatMap(s => s.points.map(p => p.v));
   const maxV = o.yMax ?? Math.max(o.threshold ?? 0, ...all, 1e-9) * 1.1;
   const x = (t: number) => L + ((t - o.from) / Math.max(1, o.to - o.from)) * (W - L - R);
