@@ -254,4 +254,9 @@ a.btn { text-decoration: none; }
 .verstrip code { user-select: all; }
 
 .tr.pick { cursor: pointer; } .tr.pick:hover { background: var(--field); } .tr.pick[aria-current="true"] { background: var(--sel-bg); box-shadow: inset 3px 0 0 var(--accent); }
+.devlist { display: flex; flex-direction: column; max-height: 232px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.devopt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--line); background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.devopt:last-child { border-bottom: 0; } .devopt:hover { background: var(--field); } .devopt[aria-selected="true"] { background: var(--sel-bg); box-shadow: inset 3px 0 0 var(--accent); }
+.devopt .devname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; } .devopt .devsub { color: var(--muted); font-size: 12px; }
+.devmore { padding: 8px 12px; font-size: 12px; color: var(--muted); }
 .rowbtn { background: none; border: 0; padding: 0; font: inherit; font-weight: inherit; color: inherit; text-align: left; cursor: pointer; }

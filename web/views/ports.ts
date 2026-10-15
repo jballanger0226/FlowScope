@@ -1,7 +1,7 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw, go } from '../state.js';
-import { chip, empty, field, heading, note, seg, select, spinner, textInput } from '../components.js';
+import { btn, chip, empty, field, heading, note, seg, select, spinner, textInput } from '../components.js';
 import { bytes, dayClock, debounce, num, RANGES } from '../util.js';
 
 /** Flows by port: pick a network device and one of its ports, say how many of the biggest flows to list, and open any of them in the Flow explorer. */
@@ -25,13 +25,15 @@ let src: Sources | null = null; let srcError = '';
 let who = '';                    // 'd:<device id>' or 'e:<exporter ip>'
 let port = '0';                  // interface number as text; '0' is every port
 let portFilter = '';
+let devQuery = '';              // text typed into the device finder
+let finding = false;             // the finder is open even though a device is chosen ("Change device")
 let dir = 'either', sort = 'bytes', range = '1h', count = 50;
 let res: Result | null = null; let loading = false; let err = '';
 
 export function enter(p: URLSearchParams): void {
   const dev = p.get('dev'), exp = p.get('exporter');
   // A link that names a device starts from defaults, so a port picked earlier is not carried over to it.
-  if ((dev && /^\d+$/.test(dev)) || exp) { port = '0'; portFilter = ''; dir = 'either'; sort = 'bytes'; range = '1h'; count = 50; res = null; }
+  if ((dev && /^\d+$/.test(dev)) || exp) { port = '0'; portFilter = ''; devQuery = ''; finding = false; dir = 'either'; sort = 'bytes'; range = '1h'; count = 50; res = null; }
   if (dev && /^\d+$/.test(dev)) who = 'd:' + dev; else if (exp) who = 'e:' + exp;
   if (p.has('if') && /^\d+$/.test(p.get('if')!)) port = p.get('if')!;
   const d = p.get('dir'), s = p.get('sort'), r = p.get('range'), n = Number(p.get('n'));
@@ -77,16 +79,57 @@ function changed(soon = false): void { syncHash(); if (soon) loadSoon(); else vo
 
 const portLabel = (p: Port): string => [p.name, p.alias, p.speedMbps ? (p.speedMbps >= 1000 ? p.speedMbps / 1000 + ' G' : p.speedMbps + ' M') : '', p.oper !== 'up' ? p.oper : ''].filter(Boolean).join(' · ');
 
+interface Choice { key: string; name: string; sub: string; kind: string; hay: string }
+function choices(): Choice[] {
+  const devs = src?.devices ?? [], exps = src?.exporters ?? [];
+  return [
+    ...devs.map(d => ({ key: 'd:' + d.id, name: d.name, sub: d.ip, kind: d.role, hay: `${d.name} ${d.ip} ${d.role} ${d.ports.map(p => p.name + ' ' + p.alias).join(' ')}`.toLowerCase() })),
+    ...exps.map(e => ({ key: 'e:' + e.ip, name: e.name, sub: e.ip, kind: 'not polled', hay: `${e.name} ${e.ip} not polled exporter`.toLowerCase() }))
+  ];
+}
+const matching = (): Choice[] => {
+  const terms = devQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return choices().filter(c => terms.every(t => c.hay.includes(t)));
+};
+function choose(c: Choice): void { who = c.key; port = '0'; portFilter = ''; devQuery = ''; finding = false; changed(); }
+function openFinder(): void {
+  finding = true; redraw();
+  setTimeout(() => document.getElementById('port-dev-find')?.focus(), 0);
+}
+
+/** The device search. Typing narrows the list by name, address, role or any port name on it; Enter takes the first match. Once a device is chosen it collapses to one line with a Change button. */
+function deviceFinder(): VNode {
+  const cur = choices().find(c => c.key === who);
+  if (who && !finding) {
+    return h('div', { class: 'field' }, h('span', { class: 'flabel' }, 'Network device'),
+      h('div', { class: 'row', style: 'gap:10px;align-items:center;min-height:38px' },
+        h('strong', null, cur?.name ?? who.slice(2)), cur && cur.sub !== cur.name ? h('span', { class: 'mono', style: 'color:var(--muted)' }, cur.sub) : null, cur ? chip(cur.kind, cur.kind === 'not polled' ? 'warn' : 'default') : null,
+        btn('Change device', { small: true, onclick: openFinder })));
+  }
+  const all = choices(), found = matching();
+  const shown = found.slice(0, 50);
+  return h('div', { class: 'field', style: 'min-width:340px;flex:1 1 340px;max-width:560px' }, h('span', { class: 'flabel' }, 'Find a network device'),
+    textInput(devQuery, v => { devQuery = v; }, {
+      id: 'port-dev-find', placeholder: all.length ? `Search ${all.length} device${all.length === 1 ? '' : 's'}: name, address, role, port…` : 'No devices yet', aria: 'Search network devices', width: '100%',
+      onenter: () => { if (found[0]) choose(found[0]); }
+    }),
+    h('div', { class: 'devlist', role: 'listbox', 'aria-label': 'Matching network devices' },
+      shown.length ? shown.map(c => h('button', { key: c.key, type: 'button', role: 'option', class: 'devopt', 'aria-selected': c.key === who, onclick: () => choose(c) },
+        h('span', { class: 'devname' }, c.name), c.sub !== c.name ? h('span', { class: 'mono devsub' }, c.sub) : null, chip(c.kind, c.kind === 'not polled' ? 'warn' : 'default')))
+        : h('div', { class: 'empty', role: 'status' }, all.length ? `No device matches "${devQuery.trim()}".` : 'No devices are polled and no exporter has sent flows yet.'),
+      found.length > shown.length ? h('div', { class: 'devmore' }, `${found.length - shown.length} more. Keep typing to narrow the list.`) : null),
+    who ? h('span', { class: 'hint' }, btn('Keep the current device', { small: true, onclick: () => { finding = false; devQuery = ''; redraw(); } })) : null);
+}
+
 function picker(): VNode {
   const devs = src?.devices ?? [], exps = src?.exporters ?? [];
-  const devOpts: [string, string][] = [['', 'Choose a device…'], ...devs.map(d => ['d:' + d.id, `${d.name} (${d.role})`] as [string, string]), ...exps.map(e => ['e:' + e.ip, `${e.name} — sends flows, not polled`] as [string, string])];
   const d = devOf();
   const terms = portFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const ports = (d?.ports ?? []).filter(p => !terms.length || terms.every(t => portLabel(p).toLowerCase().includes(t)) || String(p.ifIndex) === port);
   const portOpts: [string, string][] = [['0', d ? `All ports of ${d.name.split('.')[0]}` : 'All ports'], ...ports.map(p => [String(p.ifIndex), portLabel(p)] as [string, string])];
   return h('div', { class: 'panel col', style: 'gap:14px' },
     h('div', { class: 'row', style: 'align-items:end;gap:14px' },
-      field('Network device', select(who, devOpts, v => { who = v; port = '0'; portFilter = ''; changed(); }, { aria: 'Network device', width: '340px' })),
+      deviceFinder(),
       who.startsWith('d:') && d ? [
         field('Find a port', textInput(portFilter, v => { portFilter = v; }, { placeholder: 'Gi1/0/46, uplink, AP…', aria: 'Filter the port list', width: '190px' })),
         field('Port', select(port, portOpts, v => { port = v; changed(); }, { aria: 'Port', width: '340px' }))]
