@@ -207,7 +207,7 @@ export async function ldapLogin(s: LdapSettings, username: string, password: str
   try { svc = await LdapConn.open({ ...u, verify: s.verify, timeoutMs }); } catch (e) { return { ok: false, reason: (e as Error).message, groups: [], unreachable: true }; }
   try {
     if (s.bindDn) await svc.bind(s.bindDn, s.bindPw, timeoutMs).catch(e => { throw new LdapError('The service account could not bind: ' + (e as Error).message, 'config'); });
-    const filter = s.filter.replace(/\{user\}/g, escapeFilter(username));
+    const filter = s.filter.replace(/\{user\}/g, () => escapeFilter(username));
     const found = await svc.search(s.baseDn, filter, ['dn', 'memberOf', 'displayName', 'cn'], { sizeLimit: 2, timeoutMs });
     if (found.length === 0) return { ok: false, reason: 'No such user', groups: [] };
     if (found.length > 1) return { ok: false, reason: 'More than one directory entry matches this user name', groups: [] };

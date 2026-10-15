@@ -96,7 +96,8 @@ export class WebServer {
   }
 
   private async handle(req: http.IncomingMessage, res: http.ServerResponse, secure: boolean): Promise<void> {
-    const url = new URL(req.url || '/', 'http://x');
+    let url: URL;
+    try { url = new URL(req.url || '/', 'http://x'); } catch { res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8', Connection: 'close' }); res.end('Bad request'); return; }
     const method = (req.method || 'GET').toUpperCase();
     const ip = this.clientIp(req);
     const apiPath = url.pathname.startsWith('/api/');

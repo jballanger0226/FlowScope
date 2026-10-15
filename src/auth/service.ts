@@ -257,6 +257,8 @@ export class AuthService {
   }
 
   /** Checks credentials for a service using the provider chosen for it. Creates no session. */
+  private recentApiLogins = new Map<string, number>();
+
   async authenticate(service: Service, usernameIn: string, password: string, ip: string): Promise<{ principal: Principal; mustChange: boolean }> {
     const username = (usernameIn || '').trim();
     const key = `${ip}|${username.toLowerCase()}`;
@@ -294,8 +296,13 @@ export class AuthService {
     }
     this.limiter.clear(key);
     const canon = outcome.name ?? username;
-    this.cdb.db.prepare('UPDATE users SET last_login = ?, last_source = ? WHERE username = ?').run(Date.now(), `${service} from ${ip}`, canon);
-    this.log.audit(canon, `Signed in to ${service} from ${ip} (${outcome.source})`);
+    // API clients using Basic auth sign in on every request; record that at most once every five minutes per user, service and address.
+    const seenKey = `${canon}|${service}|${ip}`, nowMs = Date.now();
+    if (service !== 'api' || nowMs - (this.recentApiLogins.get(seenKey) ?? 0) >= 300_000) {
+      if (service === 'api') { if (this.recentApiLogins.size > 5000) this.recentApiLogins.clear(); this.recentApiLogins.set(seenKey, nowMs); }
+      this.cdb.db.prepare('UPDATE users SET last_login = ?, last_source = ? WHERE username = ?').run(nowMs, `${service} from ${ip}`, canon);
+      this.log.audit(canon, `Signed in to ${service} from ${ip} (${outcome.source})`);
+    }
     return { principal: { username: canon, role: outcome.role!, source: outcome.source!, service }, mustChange: !!outcome.mustChange };
   }
 
