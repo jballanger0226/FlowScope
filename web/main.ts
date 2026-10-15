@@ -80,7 +80,7 @@ export function logo(): VNode {
 /* ------------------------------------------------------------------ shell */
 
 function navItems(me: Me): { v: View; label: string }[] {
-  const n: { v: View; label: string }[] = [{ v: 'explorer', label: 'Flow explorer' }, { v: 'ports', label: 'Flows by port' }, { v: 'links', label: 'Links and QoS' }, { v: 'reports', label: 'Report builder' }];
+  const n: { v: View; label: string }[] = [{ v: 'explorer', label: 'Flow explorer' }, { v: 'ports', label: 'Flows by port' }, { v: 'links', label: 'Network health' }, { v: 'reports', label: 'Report builder' }];
   if (me.caps.storage) n.push({ v: 'storage', label: 'Storage and retention' });
   if (me.caps.devices) n.push({ v: 'devices', label: 'SNMP devices' });
   if (me.caps.admin) n.push({ v: 'admin', label: 'Admin' });

@@ -93,6 +93,8 @@ export interface HopView {
   /** Set on a multicast stream when SNMP data says the source host is plugged into this device: the port it is on, and whether the flow's ingress interface agrees. */
   sourcePort?: string | null; sourceConfirmed?: boolean;
   frameSrc: string | null; frameDst: string | null;
+  /** Set by the path enrichment when a frame MAC address belongs to a polled device ("fw-edge-01 · ix0, +4 more"). */
+  frameSrcOwner?: string | null; frameDstOwner?: string | null;
   vlan: number | null; vlanName: string;
   ttl: number | null;
   /** The TTL ran out at this hop ('ttl'), or this hop exported an ICMP Time Exceeded message ('icmp'). */

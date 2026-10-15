@@ -185,6 +185,53 @@ const MIGRATIONS: string[] = [
   -- what each class matches and how it re-marks packets, read from the device's service policy, so a re-marked stream can be told from one nobody configured
   ALTER TABLE class_defs ADD COLUMN matched TEXT NOT NULL DEFAULT '[]';
   ALTER TABLE class_defs ADD COLUMN sets TEXT;
+  `,
+  `
+  -- each interface's own MAC address (so a MAC seen in a flow can be named), the netmask of each device address, and the latest uptime / CPU / memory / disk reading of each device
+  ALTER TABLE interfaces ADD COLUMN mac TEXT NOT NULL DEFAULT '';
+  ALTER TABLE device_ips ADD COLUMN mask TEXT NOT NULL DEFAULT '';
+  CREATE TABLE device_resources (dev_id INTEGER PRIMARY KEY, data TEXT NOT NULL, read_at INTEGER NOT NULL);
+  CREATE INDEX interfaces_mac ON interfaces(mac);
+  `,
+  `
+  -- history of device resources: a reading about every minute for a few days, and an hourly summary (average and peak) for a year
+  CREATE TABLE resource_samples (dev_id INTEGER NOT NULL, ts INTEGER NOT NULL, cpu REAL, mem REAL, swap REAL, disk REAL, load1 REAL, up INTEGER, PRIMARY KEY (dev_id, ts)) WITHOUT ROWID;
+  CREATE TABLE resource_1h (dev_id INTEGER NOT NULL, ts INTEGER NOT NULL, n INTEGER NOT NULL,
+    cpu_sum REAL, cpu_n INTEGER NOT NULL DEFAULT 0, cpu_max REAL, mem_sum REAL, mem_n INTEGER NOT NULL DEFAULT 0, mem_max REAL,
+    swap_sum REAL, swap_n INTEGER NOT NULL DEFAULT 0, swap_max REAL, disk_sum REAL, disk_n INTEGER NOT NULL DEFAULT 0, disk_max REAL,
+    load_sum REAL, load_n INTEGER NOT NULL DEFAULT 0, load_max REAL, up_min INTEGER, up_max INTEGER, PRIMARY KEY (dev_id, ts)) WITHOUT ROWID;
+  `,
+  `
+  -- hardware and protocol health of each device (sensors, PoE, spanning tree, OSPF, BGP) and per-interface link quality, both as the latest read; temperature and sessions join the resource history
+  CREATE TABLE device_health (dev_id INTEGER PRIMARY KEY, data TEXT NOT NULL, read_at INTEGER NOT NULL);
+  CREATE TABLE iface_extra (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, data TEXT NOT NULL, read_at INTEGER NOT NULL, PRIMARY KEY (dev_id, if_index)) WITHOUT ROWID;
+  ALTER TABLE resource_samples ADD COLUMN temp REAL;
+  ALTER TABLE resource_samples ADD COLUMN sess REAL;
+  ALTER TABLE resource_1h ADD COLUMN temp_sum REAL;
+  ALTER TABLE resource_1h ADD COLUMN temp_n INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE resource_1h ADD COLUMN temp_max REAL;
+  ALTER TABLE resource_1h ADD COLUMN sess_sum REAL;
+  ALTER TABLE resource_1h ADD COLUMN sess_n INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE resource_1h ADD COLUMN sess_max REAL;
+  `,
+  `
+  -- resource history can now belong to one access point of a device (ap = its MAC), not only to the device itself (ap = '')
+  CREATE TABLE resource_samples_n (dev_id INTEGER NOT NULL, ap TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL, cpu REAL, mem REAL, swap REAL, disk REAL, load1 REAL, up INTEGER, temp REAL, sess REAL, PRIMARY KEY (dev_id, ap, ts)) WITHOUT ROWID;
+  INSERT INTO resource_samples_n(dev_id, ap, ts, cpu, mem, swap, disk, load1, up, temp, sess) SELECT dev_id, '', ts, cpu, mem, swap, disk, load1, up, temp, sess FROM resource_samples;
+  DROP TABLE resource_samples; ALTER TABLE resource_samples_n RENAME TO resource_samples;
+  CREATE TABLE resource_1h_n (dev_id INTEGER NOT NULL, ap TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL, n INTEGER NOT NULL,
+    cpu_sum REAL, cpu_n INTEGER NOT NULL DEFAULT 0, cpu_max REAL, mem_sum REAL, mem_n INTEGER NOT NULL DEFAULT 0, mem_max REAL,
+    swap_sum REAL, swap_n INTEGER NOT NULL DEFAULT 0, swap_max REAL, disk_sum REAL, disk_n INTEGER NOT NULL DEFAULT 0, disk_max REAL,
+    load_sum REAL, load_n INTEGER NOT NULL DEFAULT 0, load_max REAL, up_min INTEGER, up_max INTEGER,
+    temp_sum REAL, temp_n INTEGER NOT NULL DEFAULT 0, temp_max REAL, sess_sum REAL, sess_n INTEGER NOT NULL DEFAULT 0, sess_max REAL, PRIMARY KEY (dev_id, ap, ts)) WITHOUT ROWID;
+  INSERT INTO resource_1h_n(dev_id, ap, ts, n, cpu_sum, cpu_n, cpu_max, mem_sum, mem_n, mem_max, swap_sum, swap_n, swap_max, disk_sum, disk_n, disk_max, load_sum, load_n, load_max, up_min, up_max, temp_sum, temp_n, temp_max, sess_sum, sess_n, sess_max)
+    SELECT dev_id, '', ts, n, cpu_sum, cpu_n, cpu_max, mem_sum, mem_n, mem_max, swap_sum, swap_n, swap_max, disk_sum, disk_n, disk_max, load_sum, load_n, load_max, up_min, up_max, temp_sum, temp_n, temp_max, sess_sum, sess_n, sess_max FROM resource_1h;
+  DROP TABLE resource_1h; ALTER TABLE resource_1h_n RENAME TO resource_1h;
+  `,
+  `
+  -- history of per-interface counters read every few minutes: the change between two reads (raw, a few days) and hourly sums (long term)
+  CREATE TABLE iface_extra_samples (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, ts INTEGER NOT NULL, dt INTEGER NOT NULL, fcs INTEGER, align INTEGER, symbol INTEGER, late INTEGER, excessive INTEGER, collisions INTEGER, carrier INTEGER, too_long INTEGER, unknown_proto INTEGER, in_mc INTEGER, in_bc INTEGER, out_mc INTEGER, out_bc INTEGER, in_err INTEGER, out_err INTEGER, in_disc INTEGER, out_disc INTEGER, PRIMARY KEY (dev_id, if_index, ts)) WITHOUT ROWID;
+  CREATE TABLE iface_extra_1h (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, ts INTEGER NOT NULL, dt INTEGER NOT NULL, fcs INTEGER, align INTEGER, symbol INTEGER, late INTEGER, excessive INTEGER, collisions INTEGER, carrier INTEGER, too_long INTEGER, unknown_proto INTEGER, in_mc INTEGER, in_bc INTEGER, out_mc INTEGER, out_bc INTEGER, in_err INTEGER, out_err INTEGER, in_disc INTEGER, out_disc INTEGER, PRIMARY KEY (dev_id, if_index, ts)) WITHOUT ROWID;
   `
 ];
 

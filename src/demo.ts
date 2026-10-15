@@ -1,17 +1,153 @@
 import type { App } from './app.js';
+import { apAsResources, recordResources } from './snmp/resource_history.js';
+import { recordIfExtra } from './snmp/iface_history.js';
+import { diffExtra, EMPTY_HEALTH, EXTRA_COUNTERS, hottest, type ExtraCounter, type Health, type IfExtra, type Sensor } from './snmp/health.js';
 import type { FlowRecord } from './collector/types.js';
 import type { ClsPoint, IfPoint } from './store/types.js';
 import { dscpName } from './query/apps.js';
+import type { Resources } from './snmp/resources.js';
 
 /** Demo mode: a small simulated network (eight devices, the traffic between them and SNMP history) written straight into
  *  the real stores, so every screen has realistic data without any exporters. Nothing here talks to the network. */
 
-type Role = 'switch' | 'router' | 'firewall';
+type Role = 'switch' | 'router' | 'firewall' | 'ap';
 // interface: [name, description, speed Mbps, output policy, out util %, in util %]
 type Ifc = [string, string, number, string | null, number, number];
 interface Dev { name: string; ip: string; role: Role; descr: string; secs: number; ifs: Ifc[]; mac: string }
 
+/** A plausible, slowly moving uptime / CPU / memory / disk reading for a demo device, so the resource panels have something to show. */
+function demoResources(d: Dev, now: number): Resources {
+  const k = [...d.name].reduce((a, c) => a + c.charCodeAt(0), 0);
+  const wave = (period: number, phase = 0) => (Math.sin((now / 1000 + k * 37 + phase) / period) + 1) / 2;
+  const base = { switch: [6, 14, 38, 20, 4], router: [10, 24, 44, 24, 8], firewall: [14, 34, 58, 20, 16], ap: [9, 30, 52, 18, 1] }[d.role];
+  // now and then a short burst, so the history has something worth looking at; the firewall also has a slow memory leak that is reset by its restart
+  const burst = wave(1700, 11) > 0.96 ? 30 + wave(90) * 25 : 0;
+  const cpu = Math.min(99, Math.round(base[0] + wave(500) * base[1] + burst));
+  const memTotal = base[4] * 1024 ** 3;
+  const memPct = Math.round((base[2] + wave(2400, 5) * base[3]) * 10) / 10;
+  const up = (3 + (k % 40)) * 86400 + 5 * 3600 + (k % 59) * 60;
+  // the first switch restarted 20 hours ago, which the history marks
+  const restartAt = d.name === 'dist-sw-01' ? DEMO_BOOT - 20 * 3600_000 : 0;
+  const uptimeSec = restartAt && now >= restartAt ? Math.floor((now - restartAt) / 1000) : up + Math.floor((now - DEMO_BOOT) / 1000);
+  const sessions = d.role === 'firewall' ? Math.round(5200 + wave(900, 3) * 4800 + burst * 60) : null;
+  return {
+    uptimeSec, tempC: hottest(demoHealth(d, now).sensors), sessions, sessionsMax: d.role === 'firewall' ? 64000 : null, cpuPct: cpu, cores: d.role === 'firewall' ? 8 : d.role === 'router' ? 4 : null,
+    load: d.role === 'firewall' ? [Math.round(cpu / 12) / 10, Math.round(cpu / 14) / 10, Math.round(cpu / 16) / 10] : null,
+    memPct, memTotal, memUsed: Math.round(memTotal * memPct / 100), swapPct: d.role === 'firewall' ? 1.2 : null,
+    disks: d.role === 'firewall' ? [{ name: '/', usedPct: 18.4, totalBytes: 120 * 1024 ** 3, usedBytes: Math.round(120 * 1024 ** 3 * 0.184) }, { name: '/var/log', usedPct: 41.0, totalBytes: 20 * 1024 ** 3, usedBytes: Math.round(20 * 1024 ** 3 * 0.41) }] : [],
+    source: d.role === 'firewall' ? 'UCD-SNMP-MIB + HOST-RESOURCES-MIB' : 'CISCO-PROCESS-MIB + CISCO-MEMORY-POOL-MIB', readAt: now
+  };
+}
+const DEMO_BOOT = Date.now();
+
+/** Two access points answering for one device, each with its own slowly moving CPU and memory, so the Wi-Fi view has per-AP readings and history. */
+function demoAps(now: number): { mac: string; name: string; ip: string; serial: string; model: string; cpuPct: number; memFree: number; memTotal: number; uptimeSec: number; role: string }[] {
+  return [['ap-4f-01', '00:1c:73:aa:04:01', 'AP-515', 11, 2, 31], ['ap-4f-02', '00:1c:73:aa:04:02', 'AP-535', 23, 5, 47]].map(([name, mac, model, phase, days, memBase], i) => {
+    const wave = (period: number, ph = 0) => (Math.sin((now / 1000 + (phase as number) * 97 + ph) / period) + 1) / 2;
+    const burst = wave(1900, 7) > 0.95 ? 28 + wave(80) * 20 : 0;
+    const total = 1024 * 1024 * 1024;
+    return { mac: mac as string, name: name as string, ip: `10.1.7.${40 + i}`, serial: `DEMO${phase}AP${i}`, model: model as string, cpuPct: Math.min(99, Math.round(8 + wave(600) * 22 + burst)),
+      memTotal: total, memFree: Math.round(total * (1 - ((memBase as number) + wave(2600, 3) * 14) / 100)), uptimeSec: (days as number) * 86400 + Math.floor((now - DEMO_BOOT) / 1000), role: i === 0 ? 'primary' : 'member' };
+  });
+}
+function seedWlan(app: App, devId: number, now: number, history = false): void {
+  const db = app.cdb.db;
+  const aps = demoAps(now);
+  db.prepare('DELETE FROM wlan_ap WHERE dev_id = ?').run(devId); db.prepare('DELETE FROM wlan_radio WHERE dev_id = ?').run(devId);
+  for (const a of aps) {
+    db.prepare('INSERT INTO wlan_ap(dev_id, mac, name, ip, serial, model, cpu_pct, mem_free, mem_total, uptime_sec, role, read_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(devId, a.mac, a.name, a.ip, a.serial, a.model, a.cpuPct, a.memFree, a.memTotal, a.uptimeSec, a.role, now);
+    [['2.4 GHz', '6', 14, 31], ['5 GHz', '44', 17, 22]].forEach(([band, ch, tx, busy], idx) => db.prepare('INSERT OR REPLACE INTO wlan_radio(dev_id, ap_mac, idx, mac, channel, band, tx_power, noise_floor, util4, util64, clients, mode, up) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(devId, a.mac, idx, a.mac, ch, band, tx, -92, busy, (busy as number) - 3, 4 + idx * 3, 'ap', 1));
+    try { recordResources(db, devId, apAsResources(a, now), a.mac); } catch { /* demo history is a bonus */ }
+  }
+  if (history) app.cdb.tx(() => { for (let t = now - 14 * 86400_000; t < now - 60_000; t += t < now - 3 * 86400_000 ? 300_000 : 60_000) for (const a of demoAps(t)) recordResources(db, devId, apAsResources(a, t), a.mac); });
+}
+
+/** Sensors, PoE, spanning tree and routing neighbours for a demo device, drifting slowly with the time. */
+function demoHealth(d: Dev, now: number): Health {
+  const k = [...d.name].reduce((a, c) => a + c.charCodeAt(0), 0);
+  const wave = (period: number, phase = 0) => (Math.sin((now / 1000 + k * 53 + phase) / period) + 1) / 2;
+  const h = EMPTY_HEALTH(now);
+  const S = (kind: Sensor['kind'], name: string, value: number | null, unit: string, state: Sensor['state'] = 'ok', stateText = 'ok', extra: Partial<Sensor> = {}): void => { h.sensors.push({ id: `demo:${h.sensors.length}`, kind, name, value, unit, state, stateText, ...extra }); };
+  const base = d.role === 'firewall' ? 44 : d.role === 'router' ? 41 : 36;
+  const t = Math.round((base + wave(3000) * 9 + (d.name === 'dc-leaf-07' ? 22 : 0)) * 10) / 10;
+  S('temperature', d.role === 'switch' ? 'Switch 1 - Mainboard Temperature' : 'Chassis inlet temperature', t, '°C', t >= 65 ? 'warn' : 'ok', t >= 65 ? 'over a minor limit' : 'ok');
+  S('temperature', d.role === 'switch' ? 'Switch 1 - ASIC Temperature' : 'CPU package temperature', Math.round((t + 11) * 10) / 10, '°C');
+  S('fan', 'Fan tray 1', 4200 + Math.round(wave(700) * 900), 'RPM'); S('fan', 'Fan tray 2', 4100 + Math.round(wave(800, 4) * 900), 'RPM');
+  S('power', 'Power supply A', null, '', 'ok', 'ok');
+  if (d.name === 'dc-leaf-11') S('power', 'Power supply B', null, '', 'bad', 'not functioning'); else S('power', 'Power supply B', null, '', 'ok', 'ok');
+  S('voltage', '12 V rail', 12.02, 'V');
+  // 10 G ports carry optics: the second uplink of the distribution switch has a weak receive level
+  for (const i of d.ifs.filter(x => x[2] >= 10000 && !/^V/i.test(x[0]))) {
+    const weak = d.name === 'dist-sw-01' && i[0] === 'Te1/0/2';
+    S('optic', `${i[0]} Transmit Power`, -2.1 + Math.round(wave(900, k) * 4) / 10, 'dBm', 'ok', 'ok', { optic: 'tx' });
+    S('optic', `${i[0]} Receive Power`, weak ? -14.6 : -5.3 + Math.round(wave(1100, k) * 6) / 10, 'dBm', weak ? 'warn' : 'ok', weak ? 'over a minor limit' : 'ok', { optic: 'rx' });
+    S('optic', `${i[0]} Module Temperature`, 34 + Math.round(wave(1500) * 50) / 10, '°C', 'ok', 'ok', { optic: 'temp' });
+  }
+  if (d.name === 'dist-sw-01') {
+    h.poe = [{ group: 1, budgetW: 740, usedW: 205 + Math.round(wave(600) * 40), usedPct: 0, status: 'on', portsDelivering: 3, portsFault: 0, portsTotal: 24 }];
+    h.poe[0].usedPct = Math.round((h.poe[0].usedW! / 740) * 1000) / 10;
+    h.stp = { rootId: '32768/00:1c:73:00:00:11', isRoot: false, rootPort: 3, rootCost: 4, topChanges: 17, sinceChangeSec: 3 * 86400 + 7200, blockingPorts: 1, ports: 12 };
+  } else if (d.name === 'dc-spine-01') h.stp = { rootId: '4096/' + d.mac, isRoot: true, rootPort: 0, rootCost: 0, topChanges: 4, sinceChangeSec: 9 * 86400, blockingPorts: 0, ports: 8 };
+  else if (d.role === 'switch') h.stp = { rootId: '4096/00:1c:73:00:01:01', isRoot: false, rootPort: 1, rootCost: 4, topChanges: 6, sinceChangeSec: 5 * 86400, blockingPorts: 0, ports: 6 };
+  if (d.name === 'core-rtr-01') h.ospf = [{ id: '10.255.0.2', address: '10.0.0.2', state: 'full', level: 'ok' }, { id: '10.255.0.5', address: '10.0.0.6', state: 'full', level: 'ok' }, { id: '10.255.0.9', address: '10.0.0.10', state: 'full', level: 'ok' }];
+  if (d.name === 'wan-rtr-01') {
+    h.ospf = [{ id: '10.255.0.1', address: '10.0.0.9', state: 'full', level: 'ok' }];
+    h.bgpLocalAs = 65010;
+    h.bgp = [
+      { address: '203.0.113.1', as: 64500, state: 'established', level: 'ok', admin: 'start', upSec: 12 * 86400, updatesIn: 912_440, updatesOut: 4_120 },
+      { address: '198.51.100.1', as: 64501, state: 'active', level: 'warn', admin: 'start', upSec: null, updatesIn: 88_120, updatesOut: 3_904 }
+    ];
+  }
+  return h;
+}
+
+/** How fast each link quality counter grows (per second) at time t. One port has a duplex mismatch and one carries bursts of broadcast; busy ports drop packets now and then. */
+function exRates(d: Dev, i: Ifc, t: number): Record<ExtraCounter, number> {
+  const mismatch = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/16', storm = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/24';
+  const k = [...(d.name + i[0])].reduce((a, c) => a + c.charCodeAt(0), 0);
+  const sec = t / 1000;
+  const wave = (period: number, ph = 0) => (Math.sin((sec + ph + k * 31) / period) + 1) / 2;
+  const mc = (i[2] >= 10000 ? 40 : 3) * (0.7 + 0.6 * wave(3000));
+  const bc = storm ? (wave(2400, 5) > 0.88 ? 2400 + 600 * wave(120) : 60 + 30 * wave(300)) : 2 * (0.6 + 0.8 * wave(1800));
+  const fcs = mismatch ? 0.9 * (0.3 + wave(900, 3)) : wave(7000) > 0.985 ? 0.08 : 0;
+  const align = mismatch ? 0.25 * (0.3 + wave(900, 9)) : 0, late = mismatch ? 0.06 * (0.3 + wave(900, 5)) : 0;
+  const busy = Math.max(0, i[4] - 38);
+  const outDisc = busy ? busy * 0.12 * (0.2 + wave(700)) : wave(9000) > 0.99 ? 0.02 : 0;
+  return {
+    fcs, align, symbol: 0, late, excessive: 0, collisions: mismatch ? 0.4 * (0.3 + wave(900, 7)) : 0, carrier: 0, tooLong: 0, unknown: 0.002 * (1 + wave(4000)),
+    inMc: mc, inBc: bc, outMc: 2 * (0.7 + 0.6 * wave(2500)), outBc: storm ? bc * 0.3 : 1 * (0.6 + 0.8 * wave(2100)),
+    inErr: fcs + align, outErr: mismatch ? late : 0, inDisc: wave(11000) > 0.99 ? 0.01 : 0, outDisc
+  };
+}
+const EXACC = new Map<string, { t: number; v: Record<string, number> }>();
+
+/** Link quality counters that grow with time, so the change between two reads is a rate. Each counter is the sum of its rate so far, so the history has ups and downs. */
+function demoIfExtra(d: Dev, ifIndex: (name: string) => number | undefined, now: number): Map<number, IfExtra> {
+  const out = new Map<number, IfExtra>();
+  for (const i of d.ifs) {
+    const ix = ifIndex(i[0]); if (ix === undefined || /^V/i.test(i[0])) continue;
+    const key = d.name + '|' + i[0];
+    let st = EXACC.get(key);
+    if (!st) {
+      // counters have been running for a few days, not since 1970
+      const r = exRates(d, i, now), v: Record<string, number> = {};
+      for (const c of EXTRA_COUNTERS) v[c] = r[c] * 4 * 86400 + ix * 7;
+      st = { t: now, v }; EXACC.set(key, st);
+    }
+    // step through the time since the last call, in steps of at most a minute, so a burst is not averaged away
+    for (let t = st.t; t < now; t += 60_000) { const e = Math.min(now, t + 60_000), r = exRates(d, i, (t + e) / 2); for (const c of EXTRA_COUNTERS) st.v[c] += r[c] * (e - t) / 1000; }
+    st.t = Math.max(st.t, now);
+    const totals: Partial<Record<ExtraCounter, number>> = {};
+    for (const c of EXTRA_COUNTERS) totals[c] = Math.round(st.v[c]);
+    const mismatch = d.name === 'dist-sw-01' && i[0] === 'Gi1/0/16';
+    out.set(ix, { duplex: mismatch ? 'half' : 'full', admin: 1, delta: null, dtSec: null, readAt: now, totals });
+  }
+  return out;
+}
+
 const DEVS: Dev[] = [
+  { name: 'wifi-ctl-01', ip: '10.255.0.30', role: 'ap', descr: 'Wireless access points, floor 4', secs: 60, mac: '00:1c:73:00:00:30', ifs: [['Gi0', 'Uplink to dist-sw-01', 1000, null, 9, 6]] },
   { name: 'dist-sw-01', ip: '10.255.0.2', role: 'switch', descr: 'Distribution switch', secs: 60, mac: '00:1c:73:00:00:02', ifs: [
     ['Vl140', 'VLAN 140 CAMPUS-USERS (SVI)', 10000, null, 12, 9], ['Vl150', 'VLAN 150 CAMPUS-WIFI (SVI)', 10000, null, 7, 6],
     ['Te1/0/1', 'Uplink to core-rtr-01', 10000, 'CORE-OUT', 31, 28], ['Te1/0/2', 'Uplink to core-rtr-01 (DC path)', 10000, 'CORE-OUT', 22, 35],
@@ -337,6 +473,23 @@ function seedConfig(app: App, net: Net): void {
     });
     const ifs = db.prepare('SELECT if_index, name FROM interfaces WHERE dev_id = ?').all(row.id) as unknown as { if_index: number; name: string }[];
     for (const i of ifs) net.ifIdx.set(d.name + '|' + i.name, i.if_index);
+    // every interface answers with the device's MAC address in the demo, so a MAC seen in a stream can be named
+    db.prepare("UPDATE interfaces SET mac = ? WHERE dev_id = ? AND mac = ''").run(d.mac, row.id);
+    app.devices.saveResources(row.id, demoResources(d, Date.now()));
+    const nowMs = Date.now();
+    // two weeks of link quality history too: a read every three minutes for three days, one every quarter of an hour before that
+    {
+      const prev = new Map<number, IfExtra>();
+      app.cdb.tx(() => {
+        for (let t = nowMs - 14 * 86400_000; t < nowMs - 5 * 60_000; t += t < nowMs - 3 * 86400_000 ? 900_000 : 180_000) {
+          for (const [ix, x] of demoIfExtra(d, n => net.ifIdx.get(d.name + '|' + n), t)) { const df = diffExtra(prev.get(ix), x); prev.set(ix, x); recordIfExtra(db, row!.id, ix, df); }
+        }
+      });
+    }
+    seedHealth(app, row.id, d, net, true);
+    // two weeks of history: a reading a minute for the last three days, one every five minutes before that
+    if (d.role === 'ap') seedWlan(app, row.id, nowMs, true);
+    app.cdb.tx(() => { for (let t = nowMs - 14 * 86400_000; t < nowMs - 60_000; t += t < nowMs - 3 * 86400_000 ? 300_000 : 60_000) recordResources(db, row.id, demoResources(d, t)); });
   }
   seedHosts(app, net);
   for (const [id, name] of VLANS) db.prepare("INSERT OR IGNORE INTO vlans(id, name, source) VALUES (?,?,'manual')").run(id, name);
@@ -346,6 +499,16 @@ function seedConfig(app: App, net: Net): void {
 }
 
 /** Writes (and keeps fresh) what host tracking would have read from the switches: MAC address tables, ARP and LLDP neighbours. */
+/** Writes the demo device's current health and link quality. At seeding it writes two reads a minute apart, so rates show at once. */
+function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void {
+  const ifIdx = (name: string) => net.ifIdx.get(d.name + '|' + name);
+  const now = Date.now();
+  if (twice) app.devices.saveIfExtra(id, demoIfExtra(d, ifIdx, now - 60_000));
+  app.devices.saveIfExtra(id, demoIfExtra(d, ifIdx, now));
+  const h = demoHealth(d, now);
+  app.devices.saveHealth(id, h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length ? h : null);
+}
+
 function seedHosts(app: App, net: Net): void {
   const db = app.cdb.db; const now = Date.now(), first = now - 6 * 3600_000;
   const fdb = db.prepare(`INSERT INTO fdb(dev_id, mac, vlan, if_index, first_seen, last_seen, since) VALUES (?,?,?,?,?,?,?)
@@ -421,7 +584,7 @@ export async function startDemo(app: App): Promise<void> {
     await app.store.insertSnmp(p.ifs, p.cls);
     for (const d of DEVS) if (only.has(d.name)) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
   });
-  every(60_000, async () => { seedHosts(app, net); });
+  every(60_000, async () => { seedHosts(app, net); for (const d of DEVS) { const id = net.ids.get(d.name)!; app.devices.saveResources(id, demoResources(d, Date.now())); seedHealth(app, id, d, net); if (d.role === 'ap') seedWlan(app, id, Date.now()); } });
   for (const d of DEVS) app.devices.recordPoll(net.ids.get(d.name)!, true, null);
   void dscpName;
   console.log(' Demo sign-ins:  ' + DEMO_LOGINS.map(l => `${l.user} / ${l.password} (${l.role})`).join('   '));

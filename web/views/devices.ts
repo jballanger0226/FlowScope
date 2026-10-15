@@ -21,8 +21,8 @@ let nName = '', nIp = '', nCred = '', nSec = '60'; let addBusy = false; let addM
 // manage
 let mQ = ''; let sel = 0; let confirmRemove = false; let mMsg = ''; let mBusy = false;
 // diagnostics
-interface Check { id: string; title: string; state: 'ok' | 'warn' | 'fail' | 'na'; count: number; detail: string; hint?: string }
-let diagFor = 0; let chk: { checkedAt: number; checks: Check[] } | null = null; let chkBusy = false; let chkErr = '';
+interface Check { id: string; title: string; group: string; state: 'ok' | 'warn' | 'fail' | 'na'; count: number; detail: string; hint?: string }
+let diagFor = 0; let chk: { checkedAt: number; checks: Check[]; vendor: string; role: string } | null = null; let chkBusy = false; let chkErr = '';
 interface WalkRow { oid: string; type: string; text: string }
 interface WalkJob { id: string; device: string; startOid: string; state: 'running' | 'done' | 'cancelled' | 'error'; error: string | null; truncated: boolean; rows: number; startedAt: number; finishedAt: number | null; maxRows: number }
 const PAGE = 100;
@@ -119,7 +119,7 @@ function modeManage(): VNode {
         d.lastError && d.status !== 'ok' ? note(`The last poll failed: ${d.lastError}`, 'warn') : null,
         h('div', { class: 'row' },
           btn(d.polling ? 'Pause polling' : 'Resume polling', { disabled: mBusy, onclick: () => void setPolling(d, !d.polling) }),
-          btn('Open in Links and QoS', { onclick: () => go('links', { dev: d.name }) }),
+          btn('Open in Network health', { onclick: () => go('links', { dev: d.name }) }),
           btn('Read interfaces again', { kind: 'ghost', disabled: mBusy, onclick: () => void rediscover(d) }),
           !confirmRemove ? btn('Remove device', { kind: 'danger', onclick: () => { confirmRemove = true; redraw(); } }) : null),
         confirmRemove ? h('div', { class: 'note bad col', style: 'gap:10px' },
@@ -133,6 +133,8 @@ function modeManage(): VNode {
 
 const WALK_PRESETS: [string, string][] = [['*', 'Everything (full walk)'], ['1.0.8802.1.1.2.1.4', 'LLDP neighbours (LLDP-MIB lldpRemTable)'], ['1.0.8802.1.1.2.1.3', 'LLDP local system and ports'], ['1.3.6.1.4.1.9.9.23.1.2.1', 'CDP neighbours (Cisco)'],
   ['1.3.6.1.2.1.1', 'System (name, description, uptime)'], ['1.3.6.1.2.1.31.1.1.1.1', 'Interface names (ifName)'], ['1.3.6.1.2.1.4.35.1.4', 'ARP / neighbour cache (MAC addresses)']];
+const CHK_GROUP: Record<string, string> = { basics: 'Basics', neighbours: 'Neighbours', hosts: 'Hosts and VLANs', hardware: 'Hardware', routing: 'Spanning tree and routing', quality: 'Link quality and queues', wifi: 'Wi-Fi' };
+const VENDOR_NAME: Record<string, string> = { cisco: 'Cisco', juniper: 'Juniper', huawei: 'Huawei', h3c: 'H3C / HPE Comware', hp: 'HP ProCurve', fortinet: 'Fortinet', paloalto: 'Palo Alto', arista: 'Arista', aruba: 'Aruba', unifi: 'UniFi', ruckus: 'Ruckus', mikrotik: 'MikroTik', netsnmp: 'net-snmp (FreeBSD or Linux)', other: 'generic' };
 const CHK_LABEL: Record<Check['state'], [string, 'ok' | 'warn' | 'bad' | 'default']> = { ok: ['Published', 'ok'], warn: ['Check', 'warn'], fail: ['Missing', 'bad'], na: ['Not applicable', 'default'] };
 
 function syncDiag(d: Dev): void {
@@ -141,7 +143,7 @@ function syncDiag(d: Dev): void {
 }
 async function runCheck(d: Dev): Promise<void> {
   chkBusy = true; chkErr = ''; redraw();
-  try { const r = await post<{ checkedAt: number; checks: Check[] }>(`/api/devices/${d.id}/check`, {}); if (diagFor === d.id) chk = r; }
+  try { const r = await post<{ checkedAt: number; checks: Check[]; vendor: string; role: string }>(`/api/devices/${d.id}/check`, {}); if (diagFor === d.id) chk = r; }
   catch (e) { if (diagFor === d.id) { chk = null; chkErr = (e as Error).message; } }
   chkBusy = false; redraw();
 }
@@ -216,12 +218,12 @@ function diagnostics(d: Dev): VNode {
     chkErr ? note(chkErr, 'bad', true) : null,
     chkBusy && !chk ? spinner('Reading the device…') : null,
     chk ? h('div', { class: 'col', style: 'gap:8px' },
-      h('span', { class: 'dim', style: 'font-size:12px' }, `Checked ${ago(chk.checkedAt)}. "Not applicable" means this kind of device normally does not publish it.`),
+      h('span', { class: 'dim', style: 'font-size:12px' }, `Checked ${ago(chk.checkedAt)}. Only what a ${VENDOR_NAME[chk.vendor] ?? chk.vendor} ${chk.role} normally publishes was asked for, so MIBs from other vendors are not tried. "Not applicable" is an optional table that is empty, which is normal when the feature is not in use.`),
       h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:700px` },
         h('div', { class: 'tr head' }, ...['What', 'Result', 'Detail'].map(t => h('span', null, t))),
-        h('div', null, chk.checks.map(k => h('div', { key: k.id, class: 'tr tall', style: 'align-items:start' },
+        h('div', null, chk.checks.flatMap((k, i) => [i === 0 || chk!.checks[i - 1].group !== k.group ? h('div', { key: 'g-' + k.group, class: 'muted', style: 'font-size:12px;font-weight:600;padding:10px 12px 2px' }, CHK_GROUP[k.group] ?? k.group) : null, h('div', { key: k.id, class: 'tr tall', style: 'align-items:start' },
           h('span', { style: 'font-weight:600' }, k.title), h('span', null, chip(CHK_LABEL[k.state][0], CHK_LABEL[k.state][1])),
-          h('span', { class: 'col', style: 'gap:4px' }, h('span', null, k.detail), k.hint ? h('span', { class: 'dim', style: 'font-size:12px' }, k.hint) : null))))))) : null,
+          h('span', { class: 'col', style: 'gap:4px' }, h('span', null, k.detail), k.hint ? h('span', { class: 'dim', style: 'font-size:12px' }, k.hint) : null))]))))) : null,
     wOpen ? walkPanel(d) : null);
 }
 

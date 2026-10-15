@@ -1,9 +1,11 @@
 import type { DeviceRow, DeviceService } from './devices.js';
-import { classLabel, delta, perInterface, pollIfCounters, pollQosCounters, readQosStructure, type ClassCounters, type IfCounters, type QosPolicy } from './collect.js';
+import { hottest, readHealth, readIfExtra } from './health.js';
+import { classLabel, delta, perInterface, pollIfCounters, QOS_SOURCES, type ClassCounters, type IfCounters, type QosPolicy } from './collect.js';
 import type { HostOpts, HostTracker } from './hosts.js';
 import type { ClsPoint, IfPoint, TsStore } from '../store/types.js';
 import type { AppLog } from '../logger.js';
 import type { SnmpClient } from './client.js';
+import { readResources } from './resources.js';
 
 interface PrevIf { t: number; c: IfCounters }
 interface PrevCls { t: number; c: ClassCounters }
@@ -26,6 +28,10 @@ export class Poller {
   private refreshDue = new Map<number, number>();
   private refreshing = false;
   private lastPurge = 0;
+  private resourcesAt = new Map<number, number>();
+  /** Hardware and link-quality reads are slower to change and heavier to ask for, so they run less often than the counters. */
+  private healthAt = new Map<number, number>();
+  private hottest = new Map<number, number | null>();
 
   constructor(private devs: DeviceService, private store: Pick<TsStore, 'insertSnmp'>, private log: AppLog, private o: PollerOpts, private hosts?: HostTracker) {}
 
@@ -37,7 +43,7 @@ export class Poller {
 
   /** Forget cached counters and structure for a device (after removal or re-discovery). */
   forget(devId: number): void {
-    this.due.delete(devId); this.fails.delete(devId); this.structure.delete(devId); this.structureAt.delete(devId); this.hostDue.delete(devId); this.refreshDue.delete(devId);
+    this.due.delete(devId); this.fails.delete(devId); this.structure.delete(devId); this.structureAt.delete(devId); this.hostDue.delete(devId); this.refreshDue.delete(devId); this.resourcesAt.delete(devId); this.healthAt.delete(devId); this.hottest.delete(devId);
     for (const k of [...this.prevIf.keys()]) if (k.startsWith(devId + '/')) this.prevIf.delete(k);
     for (const k of [...this.prevCls.keys()]) if (k.startsWith(devId + '/')) this.prevCls.delete(k);
   }
@@ -136,12 +142,13 @@ export class Poller {
           inDisc: d32(cur.inDisc, prev.c.inDisc), outDisc: d32(cur.outDisc, prev.c.outDisc), inErr: d32(cur.inErr, prev.c.inErr), outErr: d32(cur.outErr, prev.c.outErr), oper: cur.oper
         });
       }
-      if (d.profile === 'cisco-cbqos') {
+      const qosSource = QOS_SOURCES[d.profile ?? ''];
+      if (qosSource) {
         const age = Date.now() - (this.structureAt.get(d.id) ?? 0);
         if (!this.structure.has(d.id) || age > 3600_000) {
-          this.structure.set(d.id, await readQosStructure(c)); this.structureAt.set(d.id, Date.now());
+          this.structure.set(d.id, await qosSource.read(c)); this.structureAt.set(d.id, Date.now());
         }
-        const q = await pollQosCounters(c);
+        const q = await qosSource.poll(c, this.structure.get(d.id) ?? []);
         for (const pol of this.structure.get(d.id) ?? []) {
           if (!perInterface(pol)) continue;
           for (const k of pol.classes) {
@@ -160,6 +167,20 @@ export class Poller {
             cls.push({ ts: t, dev: d.id, ifIndex: pol.ifIndex, cls: label, dt, prePkts: Number(pre), preBytes: Number(preB), postBytes: Number(postB), dropPkts: Number(drop), dropBytes: Number(dropB), qdepth: qd });
           }
         }
+      }
+      // Uptime, CPU, memory and disk change slowly, so they are read about once a minute. A device that does not publish them never fails the poll.
+      if (Date.now() - (this.resourcesAt.get(d.id) ?? 0) >= 55_000) {
+        this.resourcesAt.set(d.id, Date.now());
+        try { const r = await readResources(c, d.sys_object_id ?? ''); if (r) { const t = this.hottest.get(d.id); if (t !== undefined && t !== null) r.tempC = t; this.devs.saveResources(d.id, r); } } catch { /* optional */ }
+      }
+      // Sensors, PoE, spanning tree, routing neighbours and per-interface link quality, about every three minutes
+      if (Date.now() - (this.healthAt.get(d.id) ?? 0) >= 170_000) {
+        this.healthAt.set(d.id, Date.now());
+        try {
+          const hl = await readHealth(c, d.sys_object_id ?? '');
+          this.devs.saveHealth(d.id, hl); this.hottest.set(d.id, hl ? hottest(hl.sensors) : null);
+          const ex = await readIfExtra(c); if (ex.size) this.devs.saveIfExtra(d.id, ex);
+        } catch { /* optional */ }
       }
       if (ifs.length || cls.length) await this.store.insertSnmp(ifs, cls);
       this.devs.recordPoll(d.id, true, null);

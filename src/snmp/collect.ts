@@ -1,10 +1,13 @@
 import { SnmpClient, toBigInt, toNum, toStr, type SnmpValue } from './client.js';
 import { OID, CBQOS_OBJ, IF_TYPE_IGNORED } from './oids.js';
 import { readPortVlans, type PortVlan } from './ports.js';
+import { readResources, type Resources } from './resources.js';
+import { guessRole } from './roles.js';
+import { diffservSource, juniperSource, type QosSource } from './qos_vendors.js';
 
 export interface DeviceInfo { sysName: string; sysDescr: string; sysObjectId: string; uptimeSec: number }
-export interface IfaceInfo { index: number; name: string; descr: string; alias: string; speedMbps: number; oper: number; type: number }
-export interface QosClass { name: string; objIdx: number; queueObjIdx: number | null; parentName: string | null; bandwidth: string | null }
+export interface IfaceInfo { index: number; name: string; descr: string; alias: string; speedMbps: number; oper: number; type: number; /** The interface's own MAC address, lower case with colons, or '' */ mac: string }
+export interface QosClass { name: string; objIdx: number; queueObjIdx: number | null; parentName: string | null; bandwidth: string | null; /** Where the class's counters are, for sources whose tables are not indexed like Cisco's */ ref?: string }
 /** cbQosIfType: 1 main interface, 2 sub-interface, 5 control plane, 6 one VLAN of a trunk (cbQosVlanIndex), 7 EVC, 8 tunnel, 9 wireless. */
 /**
  * What a class does to the marking of the packets it matches ("set" actions). `dscp` is the value of a "set dscp" action. A value of 0 cannot be told from a
@@ -14,7 +17,7 @@ export interface ClassSets { dscp: number | null; cos: number | null; precedence
 export interface QosClassMarking { matched: number[]; sets: ClassSets | null }
 export interface QosPolicy { policyIdx: number; ifIndex: number; direction: 'input' | 'output'; policyName: string; classes: (QosClass & QosClassMarking)[]; ifType: number; vlan: number; parentPolicyIdx: number }
 export interface Probe {
-  info: DeviceInfo; ifaces: IfaceInfo[]; ips: { ip: string; ifIndex: number }[]; vlans: { id: number; name: string }[]; qos: QosPolicy[]; profile: string;
+  info: DeviceInfo; ifaces: IfaceInfo[]; ips: { ip: string; ifIndex: number; mask: string }[]; resources: Resources | null; vlans: { id: number; name: string }[]; qos: QosPolicy[]; profile: string;
   /** Why no QoS data could be read, or a short summary of what was found. */
   qosNote: string; ports: Map<number, PortVlan>;
 }
@@ -31,26 +34,53 @@ export async function readInfo(c: SnmpClient): Promise<DeviceInfo> {
 
 const num = (v: SnmpValue | undefined, d = 0): number => (v === undefined ? d : toNum(v) ?? d);
 
-export async function readInterfaces(c: SnmpClient): Promise<IfaceInfo[]> {
-  const [descr, type, speed, oper, name, high, alias] = await Promise.all([
+/** Speeds in Mbps that do not fit a 32-bit bits-per-second counter. */
+const FAST_MBPS = [10_000, 20_000, 25_000, 40_000, 50_000, 100_000, 200_000, 400_000];
+
+/**
+ * Link speed in Mbps from ifHighSpeed (Mbps) and ifSpeed (bps). Some agents, net-snmp on FreeBSD for one, work out the speed in a 32-bit integer, so a
+ * 10 Gbps port arrives as 1410065408 bps and ifHighSpeed 1410. When ifSpeed is exactly what a standard fast speed becomes after that wrap, the real speed is used.
+ */
+export function speedMbpsOf(highMbps: number, ifSpeedBps: number): number {
+  for (const m of FAST_MBPS) if ((m * 1e6) % 4294967296 === ifSpeedBps) return m;
+  return highMbps > 0 ? highMbps : Math.round(ifSpeedBps / 1e6);
+}
+
+/** "20:7c:14:f4:a8:e3" from the six bytes of ifPhysAddress, or '' for anything else (loopbacks and tunnels have none). */
+export function macText(v: SnmpValue | undefined): string {
+  if (!v || !Buffer.isBuffer(v) || v.length !== 6) return '';
+  const t = [...v].map(b => b.toString(16).padStart(2, '0')).join(':');
+  return t === '00:00:00:00:00:00' ? '' : t;
+}
+
+/**
+ * `keepVlans`: routers and firewalls carry their traffic on VLAN subinterfaces, which usually have no description. They are kept there,
+ * where on a switch the same interface types are the per-VLAN virtual interfaces that nobody watches.
+ */
+export async function readInterfaces(c: SnmpClient, keepVlans = false): Promise<IfaceInfo[]> {
+  const [descr, type, speed, oper, name, high, alias, phys] = await Promise.all([
     c.column(OID.ifDescr), c.column(OID.ifType), c.column(OID.ifSpeed), c.column(OID.ifOperStatus),
-    c.column(OID.ifName).catch(() => new Map<string, SnmpValue>()), c.column(OID.ifHighSpeed).catch(() => new Map<string, SnmpValue>()), c.column(OID.ifAlias).catch(() => new Map<string, SnmpValue>())
+    c.column(OID.ifName).catch(() => new Map<string, SnmpValue>()), c.column(OID.ifHighSpeed).catch(() => new Map<string, SnmpValue>()), c.column(OID.ifAlias).catch(() => new Map<string, SnmpValue>()),
+    c.column(OID.ifPhysAddress).catch(() => new Map<string, SnmpValue>())
   ]);
   const out: IfaceInfo[] = [];
   for (const [k, d] of descr) {
     const idx = Number(k);
     if (!Number.isInteger(idx)) continue;
     const t = num(type.get(k));
-    if (IF_TYPE_IGNORED.has(t) && !toStr(alias.get(k) ?? null)) continue;
-    const hs = num(high.get(k)), sp = num(speed.get(k));
-    out.push({ index: idx, name: toStr(name.get(k) ?? null) || toStr(d), descr: toStr(d), alias: toStr(alias.get(k) ?? null), speedMbps: hs > 0 ? hs : Math.round(sp / 1e6), oper: num(oper.get(k), 4), type: t });
+    const vlanType = t === 135 || t === 136;
+    if (IF_TYPE_IGNORED.has(t) && !toStr(alias.get(k) ?? null) && !(keepVlans && vlanType)) continue;
+    out.push({
+      index: idx, name: toStr(name.get(k) ?? null) || toStr(d), descr: toStr(d), alias: toStr(alias.get(k) ?? null), speedMbps: speedMbpsOf(num(high.get(k)), num(speed.get(k))),
+      oper: num(oper.get(k), 4), type: t, mac: macText(phys.get(k))
+    });
   }
   return out.sort((a, b) => a.index - b.index);
 }
 
-export async function readIps(c: SnmpClient): Promise<{ ip: string; ifIndex: number }[]> {
-  const m = await c.column(OID.ipAdEntIfIndex).catch(() => new Map<string, SnmpValue>());
-  return [...m].map(([ip, v]) => ({ ip, ifIndex: num(v) })).filter(x => /^\d+\.\d+\.\d+\.\d+$/.test(x.ip));
+export async function readIps(c: SnmpClient): Promise<{ ip: string; ifIndex: number; mask: string }[]> {
+  const [m, masks] = await Promise.all([c.column(OID.ipAdEntIfIndex).catch(() => new Map<string, SnmpValue>()), c.column(OID.ipAdEntNetMask).catch(() => new Map<string, SnmpValue>())]);
+  return [...m].map(([ip, v]) => ({ ip, ifIndex: num(v), mask: toStr(masks.get(ip) ?? null) })).filter(x => /^\d+\.\d+\.\d+\.\d+$/.test(x.ip));
 }
 
 export async function readVlans(c: SnmpClient): Promise<{ id: number; name: string }[]> {
@@ -180,15 +210,39 @@ export function qosSummary(policies: QosPolicy[], ifaces: Pick<IfaceInfo, 'index
   return parts.join('; ') + '.';
 }
 
+/** Where queue and class statistics can come from, by the name stored in the device's profile. */
+export const ciscoSource: QosSource = {
+  id: 'cisco-cbqos', note: '', read: readQosStructure, poll: pollQosCounters
+};
+export const QOS_SOURCES: Record<string, QosSource> = { 'cisco-cbqos': ciscoSource, 'juniper-cos': juniperSource, diffserv: diffservSource };
+
+/** Tries the QoS MIBs the device is likely to have, in order, and keeps the first that has policies. */
+export async function discoverQos(c: SnmpClient, objectId: string, ifaces: Pick<IfaceInfo, 'index'>[]): Promise<{ profile: string; qos: QosPolicy[]; note: string }> {
+  const tried: QosSource[] = [ciscoSource];
+  if (objectId.startsWith('1.3.6.1.4.1.2636.')) tried.push(juniperSource);
+  tried.push(diffservSource);
+  let firstError = '';
+  for (const src of tried) {
+    try {
+      const qos = await src.read(c);
+      if (qos.length) return { profile: src.id, qos, note: src.id === 'cisco-cbqos' ? qosSummary(qos, ifaces) : `${src.note} ${qosSummary(qos, ifaces)}` };
+    } catch (e) { if (!firstError) firstError = (e as Error).message; }
+  }
+  if (firstError) return { profile: 'generic', qos: [], note: `The QoS tables could not be read: ${firstError}` };
+  return { profile: 'generic', qos: [], note: `${qosSummary([], ifaces)} ${tried.includes(juniperSource) ? 'Juniper CoS and DIFFSERV-MIB were looked for too.' : 'DIFFSERV-MIB was looked for too.'}` };
+}
+
 export async function probe(c: SnmpClient): Promise<Probe> {
   const info = await readInfo(c);
-  const [ifaces, ips, vlans] = await Promise.all([readInterfaces(c), readIps(c).catch(() => []), readVlans(c).catch(() => [])]);
+  const role = guessRole(info.sysDescr, info.sysName, info.sysObjectId);
+  const keepVlans = role === 'firewall' || role === 'router';
+  const [ifaces, ips, vlans, resources] = await Promise.all([readInterfaces(c, keepVlans), readIps(c).catch(() => []), readVlans(c).catch(() => []), readResources(c, info.sysObjectId).catch(() => null)]);
   // A failure here is kept as a note instead of being hidden, so "no policy" can be told apart from "the device did not answer in time"
-  let qos: QosPolicy[] = []; let qosNote: string;
-  try { qos = await readQosStructure(c); qosNote = qosSummary(qos, ifaces); } catch (e) { qosNote = `The QoS tables could not be read: ${(e as Error).message}`; }
+  const found = await discoverQos(c, info.sysObjectId, ifaces);
+  const qos = found.qos, qosNote = found.note;
   const ports = await readPortVlans(c, ifaces, ips).catch(() => new Map<number, PortVlan>());
-  const profile = qos.length ? 'cisco-cbqos' : 'generic';
-  return { info, ifaces, ips, vlans, qos, profile, qosNote, ports };
+  const profile = found.profile;
+  return { info, ifaces, ips, vlans, qos, profile, qosNote, ports, resources };
 }
 
 export interface IfCounters { inOct: bigint; outOct: bigint; inDisc: bigint; outDisc: bigint; inErr: bigint; outErr: bigint; oper: number; speedMbps: number; hc: boolean }
@@ -213,7 +267,7 @@ export async function pollIfCounters(c: SnmpClient): Promise<Map<number, IfCount
     out.set(idx, {
       inOct: hc ? big(hin, k) : big(in32, k), outOct: hc ? big(hout, k) : big(out32, k),
       inDisc: big(ind, k), outDisc: big(outd, k), inErr: big(ine, k), outErr: big(oute, k), oper: num(oper.get(k), 4),
-      speedMbps: hs > 0 ? hs : Math.round(num(speed.get(k)) / 1e6), hc
+      speedMbps: speedMbpsOf(hs, num(speed.get(k))), hc
     });
   }
   return out;
