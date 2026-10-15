@@ -134,7 +134,10 @@ function deviceFinder(): VNode {
 function portFinder(d: Dev): VNode {
   const terms = portFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const hay = (p: Port): string => `${p.name} ${p.alias} ${p.ifIndex} ${p.oper} ${p.speedMbps >= 1000 ? p.speedMbps / 1000 + 'g' : p.speedMbps + 'm'}`.toLowerCase();
-  const found = d.ports.filter(p => terms.every(t => hay(p).includes(t)));
+  // Ports that are up come first, then the rest, and ports reported down last: a port that is down now may still have flows from before it went down.
+  const rank = (p: Port): number => (p.oper === 'up' ? 0 : p.oper === 'down' ? 2 : 1);
+  const found = d.ports.map((p, i) => ({ p, i })).sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i).map(x => x.p).filter(p => terms.every(t => hay(p).includes(t)));
+  const firstDown = found.findIndex(p => p.oper === 'down');
   const allRow = !terms.length || terms.every(t => `all ports ${d.name}`.toLowerCase().includes(t));
   const pickPort = (v: string): void => { port = v; changed(); };
   const first = allRow ? '0' : found[0] ? String(found[0].ifIndex) : null;
@@ -143,10 +146,10 @@ function portFinder(d: Dev): VNode {
     h('div', { class: 'devlist', role: 'listbox', 'aria-label': 'Matching ports' },
       allRow ? h('button', { key: 'all', type: 'button', role: 'option', class: 'devopt', 'aria-selected': port === '0', onclick: () => pickPort('0') },
         h('span', { class: 'devname' }, `All ports of ${d.name.split('.')[0]}`)) : null,
-      found.map(p => h('button', { key: p.ifIndex, type: 'button', role: 'option', class: 'devopt', 'aria-selected': String(p.ifIndex) === port, onclick: () => pickPort(String(p.ifIndex)) },
+      found.map((p, i) => [i === firstDown && i > 0 ? h('div', { key: 'down-label', class: 'devmore', role: 'presentation' }, 'Down now. Flows from before they went down can still be listed.') : null, h('button', { key: p.ifIndex, type: 'button', role: 'option', class: 'devopt', 'aria-selected': String(p.ifIndex) === port, onclick: () => pickPort(String(p.ifIndex)) },
         h('span', { class: 'devname' }, p.name, p.alias ? h('span', { class: 'dim' }, ' · ' + p.alias) : null),
         p.speedMbps ? h('span', { class: 'mono devsub' }, p.speedMbps >= 1000 ? p.speedMbps / 1000 + ' G' : p.speedMbps + ' M') : null,
-        p.oper !== 'up' ? chip(p.oper, 'warn') : null)),
+        p.oper !== 'up' ? chip(p.oper, 'warn') : null)]),
       !allRow && !found.length ? h('div', { class: 'empty', role: 'status' }, d.ports.length ? `No port matches "${portFilter.trim()}".` : 'No ports are known for this device yet. Poll it once from the SNMP devices tab, or leave it on all ports.') : null));
 }
 
