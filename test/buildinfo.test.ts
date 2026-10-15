@@ -43,11 +43,11 @@ test('the build writes the revision it was given, or the checkout commit', () =>
   const script = path.join(root, 'tools', 'build.mjs');
   // run only the revision logic: copy the script's function by running the real build would recompile everything, so load it as text
   const src = fs.readFileSync(script, 'utf8');
-  const m = /function revision\(\) \{[\s\S]*?\n\}\n/.exec(src);
+  const m = /function revision\(\) \{[\s\S]*?\r?\n\}\r?\n/.exec(src)   // the file has CRLF line ends in a Windows checkout;
   assert.ok(m, 'revision() is in tools/build.mjs');
   const run = (env: Record<string, string>, cwd: string) => {
     const code = `import { execFileSync } from 'node:child_process'; const root = ${JSON.stringify(cwd)}; ${m[0]} console.log(revision());`;
-    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { env: { PATH: process.env.PATH ?? '', ...env }, encoding: 'utf8' });
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, FLOWSCOPE_REVISION: '', GIT_CEILING_DIRECTORIES: path.dirname(cwd), ...env }, encoding: 'utf8' });
     return r.stdout.trim();
   };
   const d = tmp();
