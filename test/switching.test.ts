@@ -114,6 +114,21 @@ test('neighbours: LLDP capabilities and CDP platform decide whether a port is an
   assert.equal(by('cdp', 12).kind, 'phone');
 });
 
+test('neighbours: the LLDP local port number is mapped through the local port table, not read as an ifIndex (Catalyst)', async () => {
+  // Port numbers 1..N overlap real ifIndexes: LLDP port 44 is Gi1/0/44 even though ifIndex 44 is another interface
+  const w = fake({
+    [OID.lldpRemSysName]: { '0.44.1': 'RAP', '0.46.1': 'AP', '0.3.1': 'nomatch' },
+    [OID.lldpRemPortId]: { '0.44.1': 'aa', '0.46.1': 'bb', '0.3.1': 'cc' },
+    [OID.lldpLocPortId]: { '44': 'Gi1/0/44', '46': 'Gi1/0/46', '3': 'Gi9/9/9' },
+    [OID.lldpLocPortDesc]: { '44': 'GigabitEthernet1/0/44', '46': 'GigabitEthernet1/0/46', '3': 'Gi9/9/9' }
+  });
+  const ifs = [{ index: 37, name: 'Gi1/0/37' }, { index: 44, name: 'Gi1/0/50' }, { index: 3, name: 'Gi1/0/3' }, { index: 10144, name: 'Gi1/0/44', descr: 'GigabitEthernet1/0/44' }, { index: 10146, name: 'Gi1/0/46', descr: 'GigabitEthernet1/0/46' }];
+  const n = await readNeighbors(w, ifs);
+  assert.equal(n.find(x => x.name === 'RAP')?.ifIndex, 10144);
+  assert.equal(n.find(x => x.name === 'AP')?.ifIndex, 10146);
+  assert.equal(n.find(x => x.name === 'nomatch'), undefined, 'a port the local table names but that matches no interface is not guessed from the number');
+});
+
 test('ARP: ipNetToPhysical for IPv4 and IPv6, falling back to ipNetToMedia', async () => {
   const v6 = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
   const w = fake({

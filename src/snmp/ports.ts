@@ -149,7 +149,7 @@ export function cdpKind(caps: string[], platform: string): NeighborKind {
 export async function readNeighbors(c: Walker, ifaces: { index: number; name: string; descr?: string }[]): Promise<Neighbor[]> {
   const out: Neighbor[] = [];
   const known = new Set(ifaces.map(i => i.index));
-  // LLDP: index is timeMark.localPortNum.remoteIndex. localPortNum is the ifIndex on most devices; otherwise match the local port id or description to an interface name.
+  // LLDP: index is timeMark.localPortNum.remoteIndex. localPortNum is a port number that the local port table maps to an interface name; without that table it is taken as the ifIndex.
   const [lName, lCap, lChassis, lPortId, lPortDesc, locId, locDesc] = await Promise.all([
     rd(c, OID.lldpRemSysName), rd(c, OID.lldpRemSysCapEnabled), rd(c, OID.lldpRemChassisId), rd(c, OID.lldpRemPortId), rd(c, OID.lldpRemPortDesc),
     rd(c, OID.lldpLocPortId), rd(c, OID.lldpLocPortDesc)
@@ -157,9 +157,11 @@ export async function readNeighbors(c: Walker, ifaces: { index: number; name: st
   const byName = new Map<string, number>();
   for (const i of ifaces) { byName.set(i.name.toLowerCase(), i.index); if (i.descr) byName.set(i.descr.toLowerCase(), i.index); }
   const localIf = (port: number): number | null => {
-    if (known.has(port)) return port;
-    for (const t of [locDesc.get(String(port)), locId.get(String(port))]) { const s = toStr(t ?? null).toLowerCase(); if (s && byName.has(s)) return byName.get(s)!; }
-    return null;
+    // lldpRemLocalPortNum is an LLDP port number, not an ifIndex. Cisco Catalyst switches number them 1..N, and those numbers collide with real ifIndexes
+    // (port 44 is not interface 44), so the device's own local port table decides whenever it has a row for the port.
+    const names = [locDesc.get(String(port)), locId.get(String(port))].map(t => toStr(t ?? null).toLowerCase()).filter(Boolean);
+    if (names.length) { for (const s of names) if (byName.has(s)) return byName.get(s)!; return null; }
+    return known.has(port) ? port : null;   // no local port table: the number is the ifIndex, as on most other devices
   };
   const keys = new Set([...lName.keys(), ...lCap.keys(), ...lChassis.keys(), ...lPortId.keys()]);
   for (const k of keys) {
