@@ -27,7 +27,6 @@ let who = '';                    // 'd:<device id>' or 'e:<exporter ip>'
 let port = '0';                  // interface number as text; '0' is every port
 let portFilter = '';
 let devQuery = '';              // text typed into the device finder
-let showDown = false;            // ports the device reports as down are left out of the list unless asked for
 let finding = false;             // the finder is open even though a device is chosen ("Change device")
 let dir = 'either', sort = 'bytes', range = '1h', count = 50;
 /** The followed stream shown under the table. The detail is looked up over at least 24 hours so a flow found a while ago still opens. */
@@ -135,25 +134,23 @@ function deviceFinder(): VNode {
 function portFinder(d: Dev): VNode {
   const terms = portFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const hay = (p: Port): string => `${p.name} ${p.alias} ${p.ifIndex} ${p.oper} ${p.speedMbps >= 1000 ? p.speedMbps / 1000 + 'g' : p.speedMbps + 'm'}`.toLowerCase();
-  // A port reported down is clutter, so it is left out. It stays when it is the chosen port, when the person asks for down ports, or searches for "down".
-  const withDown = showDown || terms.includes('down');
-  const visible = d.ports.filter(p => p.oper !== 'down' || withDown || String(p.ifIndex) === port);
-  const hidden = d.ports.length - visible.length;
-  const found = visible.filter(p => terms.every(t => hay(p).includes(t)));
+  // Ports that are up come first, then the rest, and ports reported down last: a port that is down now may still have flows from before it went down.
+  const rank = (p: Port): number => (p.oper === 'up' ? 0 : p.oper === 'down' ? 2 : 1);
+  const found = d.ports.map((p, i) => ({ p, i })).sort((a, b) => rank(a.p) - rank(b.p) || a.i - b.i).map(x => x.p).filter(p => terms.every(t => hay(p).includes(t)));
+  const firstDown = found.findIndex(p => p.oper === 'down');
   const allRow = !terms.length || terms.every(t => `all ports ${d.name}`.toLowerCase().includes(t));
   const pickPort = (v: string): void => { port = v; changed(); };
   const first = allRow ? '0' : found[0] ? String(found[0].ifIndex) : null;
   return h('div', { class: 'field', style: 'min-width:340px;flex:1 1 340px;max-width:560px' }, h('span', { class: 'flabel' }, 'Find a port'),
-    textInput(portFilter, v => { portFilter = v; }, { id: 'port-find', placeholder: `Search ${visible.length} port${visible.length === 1 ? '' : 's'}: Gi1/0/46, uplink, AP…`, aria: 'Search the ports of this device', width: '100%', onenter: () => { if (first !== null) pickPort(first); } }),
+    textInput(portFilter, v => { portFilter = v; }, { id: 'port-find', placeholder: `Search ${d.ports.length} port${d.ports.length === 1 ? '' : 's'}: Gi1/0/46, uplink, AP, down…`, aria: 'Search the ports of this device', width: '100%', onenter: () => { if (first !== null) pickPort(first); } }),
     h('div', { class: 'devlist', role: 'listbox', 'aria-label': 'Matching ports' },
       allRow ? h('button', { key: 'all', type: 'button', role: 'option', class: 'devopt', 'aria-selected': port === '0', onclick: () => pickPort('0') },
         h('span', { class: 'devname' }, `All ports of ${d.name.split('.')[0]}`)) : null,
-      found.map(p => h('button', { key: p.ifIndex, type: 'button', role: 'option', class: 'devopt', 'aria-selected': String(p.ifIndex) === port, onclick: () => pickPort(String(p.ifIndex)) },
+      found.map((p, i) => [i === firstDown && i > 0 ? h('div', { key: 'down-label', class: 'devmore', role: 'presentation' }, 'Down now. Flows from before they went down can still be listed.') : null, h('button', { key: p.ifIndex, type: 'button', role: 'option', class: 'devopt', 'aria-selected': String(p.ifIndex) === port, onclick: () => pickPort(String(p.ifIndex)) },
         h('span', { class: 'devname' }, p.name, p.alias ? h('span', { class: 'dim' }, ' · ' + p.alias) : null),
         p.speedMbps ? h('span', { class: 'mono devsub' }, p.speedMbps >= 1000 ? p.speedMbps / 1000 + ' G' : p.speedMbps + ' M') : null,
-        p.oper !== 'up' ? chip(p.oper, 'warn') : null)),
-      !allRow && !found.length ? h('div', { class: 'empty', role: 'status' }, d.ports.length ? `No port matches "${portFilter.trim()}".${hidden ? ' Down ports are hidden.' : ''}` : 'No ports are known for this device yet. Poll it once from the SNMP devices tab, or leave it on all ports.') : null),
-    hidden || showDown ? h('span', { class: 'hint' }, hidden ? `${hidden} down port${hidden === 1 ? '' : 's'} hidden. ` : '', btn(showDown ? 'Hide down ports' : 'Show down ports', { small: true, kind: 'ghost', onclick: () => { showDown = !showDown; redraw(); } })) : null);
+        p.oper !== 'up' ? chip(p.oper, 'warn') : null)]),
+      !allRow && !found.length ? h('div', { class: 'empty', role: 'status' }, d.ports.length ? `No port matches "${portFilter.trim()}".` : 'No ports are known for this device yet. Poll it once from the SNMP devices tab, or leave it on all ports.') : null));
 }
 
 function picker(): VNode {
