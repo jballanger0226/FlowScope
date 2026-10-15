@@ -3,12 +3,12 @@ import { get, qs } from '../api.js';
 import { go } from '../state.js';
 import { btn, chip, note, seg, spinner, status as statusEl } from '../components.js';
 import { neighborLines, portLink, type Neighbor, type PortSource } from '../neighbors.js';
-import { bytes, clock, dur, ms, num, stamp } from '../util.js';
+import { bytes, clock, dur, ms, num, stamp, svcLabel } from '../util.js';
 
 /** The "Following stream" panel: the path a stream took hop by hop, QoS and TTL findings, layers and activity. Shared by Flow explorer and Flows by port. */
 
 export interface Row {
-  id: string; srcIp: string; dstIp: string; sport: number; dport: number; proto: number; protoName: string; app: string; vlan: number | null; vlanName: string;
+  id: string; srcIp: string; dstIp: string; sport: number; dport: number; proto: number; protoName: string; app: string; appPort: number | null; vlan: number | null; vlanName: string;
   t0: number; t1: number; bytes: number; pkts: number; fwdBytes: number; revBytes: number; hopCount: number; hops: string[]; qosChanged: boolean;
   ttlExpired: boolean; ttlReason: 'ttl' | 'icmp' | null; ttlLow: number | null;
   dscpInS: string; dscpOutS: string | null; flags: number; health: { kind: 'ok' | 'warn' | 'bad'; text: string } | null;
@@ -24,7 +24,7 @@ interface Attach { dev: string; ifName: string; vlan: number; macCount: number; 
 interface Located { ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
 interface Multicast { group: string; source: string; location: Located | null }
 export interface Detail {
-  skey: string; initiator: { ip: string; port: number }; responder: { ip: string; port: number }; proto: number; protoName: string; app: string; t0: number; t1: number;
+  skey: string; initiator: { ip: string; port: number }; responder: { ip: string; port: number }; proto: number; protoName: string; app: string; appPort: number | null; t0: number; t1: number;
   forward: Hop[]; reverse: Hop[]; qosChanged: boolean; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null; multicast: Multicast | null;
   activity: { t0: number; t1: number; fwd: number[]; rev: number[] };
 }
@@ -193,7 +193,7 @@ function layers(d: Detail, r: { flags: number } | undefined, first: Hop | undefi
   const L = [
     { tag: 'L2', name: 'Data link', items: [['Src MAC', first?.frameSrc ?? '—'], ['Dst MAC', first?.frameDst ?? '—'], ['VLAN', first?.vlan ? `${first.vlan} ${first.vlanName}`.trim() : 'untagged']] },
     { tag: 'L3', name: 'Network', items: [['Src IP', d.initiator.ip], ['Dst IP', d.responder.ip], ['Protocol', d.protoName], ['DSCP', first ? (fwdLast && fwdLast.dscpOutS !== 'not reported' && fwdLast.dscpOutS !== first.dscpInS ? `${first.dscpInS} → ${fwdLast.dscpOutS}` : first.dscpInS) : '—'], ['TTL seen', first?.ttl === null || !first ? '—' : String(first.ttl)]] },
-    { tag: 'L4', name: 'Transport', items: [['Src port', String(d.initiator.port || '—')], ['Dst port', String(d.responder.port || '—')], ['Service', d.app], ['TCP flags', r ? flagText(r.flags) : '—']] }
+    { tag: 'L4', name: 'Transport', items: [['Src port', String(d.initiator.port || '—')], ['Dst port', String(d.responder.port || '—')], ['Service', svcLabel(d.app, d.appPort)], ['TCP flags', r ? flagText(r.flags) : '—']] }
   ];
   return h('div', { class: 'layers' }, L.map(l => h('div', { key: l.tag, class: 'layer' },
     h('div', { class: 'lh' }, chip(l.tag, l.tag === 'L2' ? 'violet' : l.tag === 'L3' ? 'info' : 'accent'), h('span', null, l.name)),
@@ -212,7 +212,7 @@ function activity(d: Detail, f: Follower): VNode {
       h('span', null, h('i', { class: 'sw', style: 'background:var(--warn)' }), 'Responder → initiator · ', h('b', null, bytes(d.totals.revBytes)))),
     h('div', { class: 'col', style: 'gap:6px;margin-top:12px' },
       h('span', { class: 'muted' }, 'Other conversations between these hosts'),
-      f.related.length ? f.related.map(r => h('button', { key: r.id, type: 'button', class: 'cardbtn', onclick: () => f.onPick(r.id) }, h('span', { class: 't mono' }, `${r.srcIp}:${r.sport} → ${r.dstIp}:${r.dport}`), h('span', { class: 's' }, `${r.app} · ${bytes(r.bytes)}`))) : h('span', { class: 'dim' }, 'None in this time range.')));
+      f.related.length ? f.related.map(r => h('button', { key: r.id, type: 'button', class: 'cardbtn', onclick: () => f.onPick(r.id) }, h('span', { class: 't mono' }, `${r.srcIp}:${r.sport} → ${r.dstIp}:${r.dport}`), h('span', { class: 's' }, `${svcLabel(r.app, r.appPort)} · ${bytes(r.bytes)}`))) : h('span', { class: 'dim' }, 'None in this time range.')));
 }
 
 function followed(f: Follower, row: { flags: number } | undefined): VNode | null {
@@ -235,7 +235,7 @@ function followed(f: Follower, row: { flags: number } | undefined): VNode | null
         h('span', { class: 'eyebrow' }, 'Following stream'),
         mc ? h('h2', { class: 'mono', style: 'font-size:18px;font-weight:600' }, `${mc.source}${d.initiator.port ? ':' + d.initiator.port : ''} → group ${mc.group}${d.responder.port ? ':' + d.responder.port : ''}`) : h('h2', { class: 'mono', style: 'font-size:18px;font-weight:600' }, `${d.initiator.ip}${d.initiator.port ? ':' + d.initiator.port : ''} → ${d.responder.ip}${d.responder.port ? ':' + d.responder.port : ''}`),
         h('div', { class: 'row', style: 'gap:8px 16px;color:var(--muted)' },
-          h('span', null, `${d.protoName} · ${d.app}`), mc ? chip('Multicast', 'violet') : null,
+          h('span', null, `${d.protoName} · ${svcLabel(d.app, d.appPort)}`), mc ? chip('Multicast', 'violet') : null,
           h('span', null, mc ? `seen by ${d.forward.length} device${d.forward.length === 1 ? '' : 's'}` : `${d.forward.length} hop${d.forward.length === 1 ? '' : 's'} forward, ${d.reverse.length} back`),
           !mc && lat !== null ? h('span', null, `about ${ms(lat)} end to end`) : null,
           h('span', null, `Started ${stamp(d.t0)} · lasted ${dur(d.t1 - d.t0)}`),

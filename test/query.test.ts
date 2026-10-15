@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseQuery, parseIpMatch, splitTokens } from '../src/query/tokens.js';
 import { analyzeStream } from '../src/analysis/hops.js';
-import { appName } from '../src/query/apps.js';
+import { appName, service, serviceLabel } from '../src/query/apps.js';
 import { ipToN } from '../src/store/ops.js';
 import type { FlowRecord } from '../src/collector/types.js';
 
@@ -135,4 +135,15 @@ test('well-known ports below 1024 are named, and the name and the number both se
   assert.deepEqual((ok.conds[5] as any).ports, [319, 320]);
   assert.equal(parseQuery('port:notaservice', res).errors.length, 1);
   assert.deepEqual(parseQuery('app:https', res).conds[0], { kind: 'port', ports: [443, 8443] }, 'the app list is still consulted first');
+});
+
+test('service labels carry the real port: "rtsp (554)"', () => {
+  assert.deepEqual(service(6, 39540, 554), { name: 'rtsp', port: 554 });
+  assert.equal(serviceLabel(service(6, 39540, 554)), 'rtsp (554)');
+  assert.equal(serviceLabel(service(6, 51522, 443)), 'https (443)');
+  assert.equal(serviceLabel(service(6, 8443, 51522)), 'https (8443)', 'an app with several ports shows the one in the flow');
+  assert.equal(serviceLabel(service(17, 161, 46812)), 'snmp (161)', 'the server port can be the source side');
+  assert.equal(serviceLabel(service(6, 40000, 8086)), 'tcp/8086', 'a label that already is the number gets no second one');
+  assert.equal(serviceLabel(service(6, 40000, 1000)), '1000');
+  assert.equal(serviceLabel(service(1, 0, 0)), 'icmp');
 });

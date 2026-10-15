@@ -26,17 +26,23 @@ export const PROTO_NAMES: Record<number, string> = Object.fromEntries(Object.ent
 
 export function protoName(p: number): string { return PROTO_NAMES[p] ?? String(p); }
 
-/** Names the service for a stream. Looks at the server (lower or well-known) port. */
-export function appName(proto: number, sport: number, dport: number): string {
-  if (proto !== TCP && proto !== UDP) return protoName(proto).toLowerCase();
+/**
+ * Names the service for a stream. Looks at the server (lower or well-known) port. `port` is the port the name stands for, so a screen can
+ * show "rtsp (554)"; it is null when the name is not about one port (ICMP, GRE, ...) or the label already is the number ("1000", "tcp/8086").
+ */
+export function service(proto: number, sport: number, dport: number): { name: string; port: number | null } {
+  if (proto !== TCP && proto !== UDP) return { name: protoName(proto).toLowerCase(), port: null };
   for (const p of [dport, sport]) {
-    for (const a of APPS) if (a.ports.includes(p) && a.proto.includes(proto)) return a.name;
+    for (const a of APPS) if (a.ports.includes(p) && a.proto.includes(proto)) return { name: a.name, port: p };
   }
   // the other well-known ports: the server side is the lower port, and only a port below 1024 is read as a service
   const lo = Math.min(sport, dport), hi = Math.max(sport, dport);
-  for (const p of [lo, hi]) { if (p > 0 && p < 1024) { const n = wellKnownName(p, proto); if (n) return n; } }
-  return lo > 0 && lo < 1024 ? String(lo) : (proto === TCP ? 'tcp/' : 'udp/') + Math.min(sport, dport);
+  for (const p of [lo, hi]) { if (p > 0 && p < 1024) { const n = wellKnownName(p, proto); if (n) return { name: n, port: p }; } }
+  return { name: lo > 0 && lo < 1024 ? String(lo) : (proto === TCP ? 'tcp/' : 'udp/') + Math.min(sport, dport), port: null };
 }
+/** The label for a screen: "rtsp (554)" when the name stands for one port, otherwise just the name. */
+export const serviceLabel = (s: { name: string; port: number | null }): string => (s.port ? `${s.name} (${s.port})` : s.name);
+export const appName = (proto: number, sport: number, dport: number): string => service(proto, sport, dport).name;
 
 /** The ports a service name stands for: the app list first (https, dns, ...), then any well-known service name (nntp, ftp-data, ...). */
 export function servicePorts(name: string): number[] | null {

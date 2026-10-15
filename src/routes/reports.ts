@@ -1,7 +1,7 @@
 import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { parseQuery } from '../query/tokens.js';
-import { appName, dscpName, protoName } from '../query/apps.js';
+import { dscpName, protoName, service, serviceLabel } from '../query/apps.js';
 import type { Cond, ReportDim, ReportRow, ReportSpec, TimeRange } from '../store/types.js';
 import { attachment, int, parseRange, stamp, str, toCsv } from './util.js';
 
@@ -53,7 +53,7 @@ async function run(app: App, c: { query: URLSearchParams }, b: ReportBody) {
     const m = new Map<string, ReportRow>();
     for (const r of rows) {
       const dm: Record<string, string | number | null> = {};
-      for (const d of dims) dm[d] = d === 'app' ? appName(Number(r.dims.proto), Number(r.dims.svc), Number(r.dims.svc)) : r.dims[d];
+      for (const d of dims) dm[d] = d === 'app' ? serviceLabel(service(Number(r.dims.proto), Number(r.dims.svc), Number(r.dims.svc))) : r.dims[d];
       const key = JSON.stringify(dims.map(d => dm[d]));
       const e = m.get(key);
       if (e) { e.bytes += r.bytes; e.pkts += r.pkts; e.flows += r.flows; } else m.set(key, { dims: dm, bytes: r.bytes, pkts: r.pkts, flows: r.flows });

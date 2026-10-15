@@ -2,7 +2,7 @@ import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw, go } from '../state.js';
 import { bar, btn, chip, empty, heading, lineChart, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
-import { ago, bps, bytes, clock, dayClock, dur, num, pct, debounce } from '../util.js';
+import { ago, bps, bytes, clock, dayClock, dur, num, pct, debounce, svcLabel } from '../util.js';
 import { post } from '../api.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
@@ -26,7 +26,7 @@ interface NbRes { ports: NbPort[]; readAt: number | null; note: string; tracking
 interface HostsRes { hosts: PortHost[]; neighbors: Neighbor[]; readAt: number | null; note: string; tracking: boolean }
 interface Attach { devId: number; dev: string; ifIndex: number; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; lastSeen: number; active: boolean; mac: string; confidence?: 'high' | 'medium' | 'low' }
 interface Located { query: string; ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
-interface StreamRow { id: string; srcIp: string; dstIp: string; sport: number; dport: number; app: string; protoName: string; bytes: number; qosChanged: boolean }
+interface StreamRow { id: string; srcIp: string; dstIp: string; sport: number; dport: number; app: string; appPort: number | null; protoName: string; bytes: number; qosChanged: boolean }
 
 let data: Overview | null = null; let loadError = ''; let loading = false;
 let search = '';
@@ -428,7 +428,7 @@ function streamsPanel(dev: Dev, itf: Iface): VNode {
     !streamsLoading && !streams.length ? h('span', { class: 'dim' }, 'No sampled streams leave through this interface in the current data.') : null,
     h('div', { class: 'cards' }, streams.map(x => h('button', { key: x.id, type: 'button', class: 'cardbtn', onclick: () => go('explorer', { s: x.id, q: `ip:${x.srcIp} ip:${x.dstIp}`, range: '24h' }) },
       h('span', { class: 't mono' }, `${x.srcIp}:${x.sport} → ${x.dstIp}:${x.dport}`),
-      h('span', { class: 's' }, `${x.app} · ${bytes(x.bytes)}`, x.qosChanged ? h('span', { class: 'tag bad', style: 'margin-left:8px' }, 'QoS re-marked') : null)))),
+      h('span', { class: 's' }, `${svcLabel(x.app, x.appPort)} · ${bytes(x.bytes)}`, x.qosChanged ? h('span', { class: 'tag bad', style: 'margin-left:8px' }, 'QoS re-marked') : null)))),
     streamsTotal > streams.length ? h('span', { class: 'dim' }, `${num(streamsTotal)} streams in total in the last hour; the busiest are shown.`) : null);
 }
 
