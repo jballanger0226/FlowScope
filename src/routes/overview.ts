@@ -26,6 +26,8 @@ interface FlowSummary {
   traffic: { bytes: number; flows: number; apps: { name: string; bytes: number; share: number }[] } | null;
   /** How many streams in the window had a TTL that ran out, and how many had their DSCP marking changed on the way. null when that could not be counted. */
   anomalies: { ttlExpired: number | null; qosChanged: number | null };
+  /** The hosts that sent the most bytes in the window, with their share of all traffic. */
+  talkers: { ip: string; name: string; bytes: number; share: number }[] | null;
 }
 
 export function registerOverview(app: App): void {
@@ -36,11 +38,12 @@ export function registerOverview(app: App): void {
     if (cache && now - cache.at < FLOW_CACHE_MS) return cache.value;
     const range = { from: now - FLOW_WINDOW_MIN * 60_000, to: now + 60_000 };
     const localIps = app.localIps();
-    const [top, traffic, ttl, qos] = await Promise.allSettled([
+    const [top, traffic, ttl, qos, talk] = await Promise.allSettled([
       app.store.searchStreams({ range, conds: [], sort: 'bytes', dir: 'desc', limit: TOP, localIps }),
       app.store.report({ range, tier: chooseTier(app, range, undefined), dims: ['proto', 'svc'], prefix: 32, bidir: false, conds: [], sortBy: 'bytes', topN: 20000, localIps }),
       app.store.searchStreams({ range, conds: [{ kind: 'ttl', mode: 'expired' }], sort: 'time', dir: 'desc', limit: 1, localIps }),
-      app.store.searchStreams({ range, conds: [{ kind: 'qos', mode: 'changed' }], sort: 'time', dir: 'desc', limit: 1, localIps })
+      app.store.searchStreams({ range, conds: [{ kind: 'qos', mode: 'changed' }], sort: 'time', dir: 'desc', limit: 1, localIps }),
+      app.store.report({ range, tier: chooseTier(app, range, undefined), dims: ['srcIp'], prefix: 32, bidir: false, conds: [], sortBy: 'bytes', topN: TOP, localIps })
     ]);
     let apps: NonNullable<FlowSummary['traffic']>['apps'] = [];
     if (traffic.status === 'fulfilled') {
@@ -54,7 +57,9 @@ export function registerOverview(app: App): void {
       top: top.status === 'fulfilled' ? top.value.rows.map(r => streamView(app, r)) : null,
       error: top.status === 'rejected' ? (top.reason as Error).message : null,
       traffic: traffic.status === 'fulfilled' ? { bytes: traffic.value.totals.bytes, flows: traffic.value.totals.flows, apps } : null,
-      anomalies: { ttlExpired: ttl.status === 'fulfilled' ? ttl.value.total : null, qosChanged: qos.status === 'fulfilled' ? qos.value.total : null }
+      anomalies: { ttlExpired: ttl.status === 'fulfilled' ? ttl.value.total : null, qosChanged: qos.status === 'fulfilled' ? qos.value.total : null },
+      // a polled device's own address shows its name; every other host shows just the address
+      talkers: talk.status === 'fulfilled' ? talk.value.rows.map(r => { const ip = String(r.dims.srcIp); const nm = app.devices.deviceName(ip); return { ip, name: nm === ip ? '' : nm, bytes: r.bytes, share: talk.value.totals.bytes > 0 ? r.bytes / talk.value.totals.bytes : 0 }; }) : null
     };
     cache = { at: now, value };
     return value;
@@ -122,7 +127,7 @@ export function registerOverview(app: App): void {
       notices: { total: notices.length, bad, warn: notices.length - bad, items: notices.slice(0, NOTICES) },
       devices: { total: states.length, ok: answering.length, paused: states.filter(d => d.status === 'paused').length, pending: states.filter(d => d.status === 'pending').length, down, busyCpu, restarted },
       flows: {
-        windowMinutes: FLOW_WINDOW_MIN, top: flows.top, error: flows.error, traffic: flows.traffic, anomalies: flows.anomalies,
+        windowMinutes: FLOW_WINDOW_MIN, top: flows.top, error: flows.error, traffic: flows.traffic, anomalies: flows.anomalies, talkers: flows.talkers,
         stats: { packets: app.collector.stats.packets, records: app.collector.stats.records, errors: app.collector.stats.errors, dropped: app.collector.droppedRecords },
         exporters: { total: ex.total, active: ex.active, silent: ex.silent.slice(0, TOP), top: [...exporters].sort((a, b) => b.records - a.records).slice(0, TOP) }
       },

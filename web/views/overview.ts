@@ -29,6 +29,7 @@ interface Reply {
     windowMinutes: number; top: Flow[] | null; error: string | null;
     traffic: { bytes: number; flows: number; apps: { name: string; bytes: number; share: number }[] } | null;
     anomalies: { ttlExpired: number | null; qosChanged: number | null };
+    talkers: { ip: string; name: string; bytes: number; share: number }[] | null;
     stats: { packets: number; records: number; errors: number; dropped: number };
     exporters: { total: number; active: number; silent: (Exp & { silentMs: number })[]; top: Exp[] };
   };
@@ -153,6 +154,17 @@ function appsBox(d: Reply): VNode {
   return box('Top applications', 'Where the last hour\'s traffic went, by service. Each stream is counted once, however many devices reported it.', body, btn('Open Report builder', { small: true, onclick: () => go('reports') }));
 }
 
+function talkersBox(d: Reply): VNode {
+  const t = d.flows.talkers;
+  const body: Child[] = !t ? [none('Hosts could not be counted just now.')] : !t.length ? [none(d.collect.flow ? 'No flows were recorded in the last hour.' : 'Flow collection is off, so nothing new is being recorded.')]
+    : [h('ul', { class: 'ovlist' }, t.map(x => h('li', { key: x.ip },
+      h('button', { type: 'button', class: 'ovitem ovbtn', title: 'List the flows this host sent in Flow explorer', onclick: () => go('explorer', { q: `src:${x.ip}`, range: '1h' }) },
+        h('div', { class: 'ovmain', style: 'flex:1' }, h('span', { class: 'ovtitle mono' }, x.ip, x.name ? h('span', { class: 'muted', style: 'font-weight:400;font-family:inherit' }, ` (${x.name})`) : null),
+          h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, bar(x.share * 100, 100, 'accent'), h('span', { class: 'mono muted', style: 'font-size:12px;flex:none' }, pct(x.share * 100, x.share < 0.1 ? 1 : 0)))),
+        h('b', { class: 'mono', style: 'flex:none' }, bytes(x.bytes)))))) ];
+  return box('Top talkers', 'The hosts that sent the most data in the last hour, with their share of all traffic. Select one to list what it sent.', body, btn('Open Flow explorer', { small: true, onclick: () => go('explorer') }));
+}
+
 function flowsBox(d: Reply): VNode {
   const f = d.flows;
   const body: Child[] = [];
@@ -242,7 +254,7 @@ export function render(): VNode {
     verdictHead(d),
     loadError ? note('Could not refresh: ' + loadError + '. Showing the last data received.', 'warn', true) : null,
     tiles(d),
-    section('Traffic', h('div', { class: 'ovgrid' }, appsBox(d), flowsBox(d), portsBox(d), exportersBox(d), unusualBox(d))),
+    section('Traffic', h('div', { class: 'ovgrid' }, appsBox(d), flowsBox(d), portsBox(d), exportersBox(d), unusualBox(d), talkersBox(d))),
     attention(d),
     section('Devices and system', h('div', { class: 'ovgrid' }, devicesBox(d), logsBox(d))),
     h('div', { style: 'height:24px' }));

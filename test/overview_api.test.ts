@@ -66,6 +66,7 @@ test('Overview API: an installation with nothing set up still answers', { timeou
     assert.deepEqual(r.json.freshness, { lastFlowAt: null, lastPollAt: null });
     assert.equal(r.json.flows.traffic.bytes, 0); assert.deepEqual(r.json.flows.traffic.apps, []);
     assert.deepEqual(r.json.flows.anomalies, { ttlExpired: 0, qosChanged: 0 });
+    assert.deepEqual(r.json.flows.talkers, []);
     assert.deepEqual(r.json.devices.restarted, []);
     assert.ok(r.json.logs, 'an administrator gets the log summary even when it is empty');
     assert.equal(typeof r.json.logs.errors, 'number'); assert.ok(Array.isArray(r.json.logs.items));
@@ -145,6 +146,11 @@ test('Overview API: down devices with duration, ranked notices, top flows and po
     assert.equal(o.flows.traffic.apps.length, 1); assert.match(o.flows.traffic.apps[0].name, /443/);
     assert.ok(Math.abs(o.flows.traffic.apps[0].share - 1) < 1e-9);
     assert.deepEqual(o.flows.anomalies, { ttlExpired: 0, qosChanged: 0 });
+    // top talkers: the sending hosts, biggest first, with their share of all traffic
+    assert.deepEqual(o.flows.talkers.map((t: any) => t.ip), ['10.1.4.21', '10.1.4.22']);
+    assert.equal(o.flows.talkers[0].bytes, 9_000_000);
+    assert.ok(Math.abs(o.flows.talkers[0].share - 9_000_000 / 9_001_000) < 1e-9);
+    assert.equal(o.flows.talkers[0].name, '');
 
     // busiest ports: the uplink first, with its alias
     assert.equal(o.ports.busiest[0].name, 'Gi0/1'); assert.equal(o.ports.busiest[0].alias, 'WAN uplink'); assert.equal(o.ports.busiest[0].util, 96);

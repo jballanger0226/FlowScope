@@ -230,7 +230,8 @@ button.tr { cursor: pointer; } button.tr:hover { background: var(--field); } but
 .cardbtn .t { font-weight: 600; font-size: 13.5px; } .cardbtn .s { font-size: 12px; color: var(--muted); }
 
 /* overview (home page) */
-.ovgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 16px; align-items: start; }
+/* at most three boxes across, so six boxes make two even rows on a wide screen; boxes in a row share one height */
+.ovgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, max(380px, calc((100% - 32px) / 3))), 1fr)); gap: 16px; align-items: stretch; }
 .ovbox { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .ovhead { display: flex; flex-direction: column; gap: 4px; }
 .ovdesc { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); max-width: 72ch; }
