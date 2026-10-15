@@ -15,6 +15,7 @@ let tab: Tab = 'cert';
 export function enter(p: URLSearchParams): void {
   const t = p.get('tab') as Tab | null;
   if (t && TABS.some(x => x[0] === t)) tab = t;
+  void loadSys();
   openTab();
 }
 function openTab(): void {
@@ -31,6 +32,26 @@ function openTab(): void {
 
 interface Sys { version: string; revision: string; builtAt: string | null; node: string; platform: string; os: string; container: boolean; dataDir: string; freeBytes: number | null; ports: { https?: number; http?: number }; flowPorts: number[]; tls: string; store: { backend: string; bytesOnDisk: number }; uptimeSec: number; memoryMb: number; demo: boolean }
 let sys: Sys | null = null; let col = { flow: true, snmp: true, flowAt: 0, snmpAt: 0 }; let colErr = ''; let confirming: '' | 'flow' | 'snmp' = ''; let colBusy = false; let colMsg = '';
+
+/* The version strip sits above every tab, so the system facts are fetched whenever the page opens. */
+async function loadSys(): Promise<void> {
+  try { sys = await get<Sys>('/api/admin/system'); } catch { /* the strip falls back to the status poll */ }
+  redraw();
+}
+
+function versionStrip(): VNode {
+  const st = session.status;
+  const version = sys?.version ?? st?.version ?? '';
+  const full = sys?.revision ?? st?.revision ?? '';
+  const short = full.length > 12 ? full.slice(0, 7) + (full.endsWith('-dirty') ? '-dirty' : '') : full;
+  const built = sys?.builtAt ? new Date(sys.builtAt).toLocaleString() : '';
+  return h('div', { class: 'verstrip', role: 'status', 'aria-label': 'Running version' },
+    h('span', { class: 'dim' }, 'Running'),
+    h('strong', null, 'FlowScope ' + (version || '…')),
+    h('span', { class: 'dim' }, 'revision'),
+    h('code', { class: 'mono', title: full && full !== short ? full : undefined }, short || 'unknown'),
+    built ? h('span', { class: 'dim' }, 'built ' + built) : null);
+}
 
 async function loadCollect(): Promise<void> {
   try {
@@ -147,6 +168,7 @@ function logsTab(): VNode {
 export function render(): VNode {
   return h('main', null,
     heading('Administration', 'Certificate, authentication, roles and logs', 'Only users with the full admin role can open this page.'),
+    versionStrip(),
     tabs('Administration sections', TABS.map(([id, label]) => ({ id, label, on: tab === id })), id => { tab = id as Tab; history.replaceState(null, '', '#/admin?tab=' + tab); openTab(); }),
     tab === 'cert' ? cert.render() : tab === 'collect' ? collectTab() : tab === 'aaa' ? aaa.render() : tab === 'roles' ? users.renderUsers() : tab === 'snmp' ? users.renderCreds() : tab === 'vlans' ? vlanTab() : logsTab());
 }
