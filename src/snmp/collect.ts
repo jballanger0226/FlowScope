@@ -6,7 +6,13 @@ export interface DeviceInfo { sysName: string; sysDescr: string; sysObjectId: st
 export interface IfaceInfo { index: number; name: string; descr: string; alias: string; speedMbps: number; oper: number; type: number }
 export interface QosClass { name: string; objIdx: number; queueObjIdx: number | null; parentName: string | null; bandwidth: string | null }
 /** cbQosIfType: 1 main interface, 2 sub-interface, 5 control plane, 6 one VLAN of a trunk (cbQosVlanIndex), 7 EVC, 8 tunnel, 9 wireless. */
-export interface QosPolicy { policyIdx: number; ifIndex: number; direction: 'input' | 'output'; policyName: string; classes: QosClass[]; ifType: number; vlan: number; parentPolicyIdx: number }
+/**
+ * What a class does to the marking of the packets it matches ("set" actions). `dscp` is the value of a "set dscp" action. A value of 0 cannot be told from a
+ * table map ("set dscp dscp table ...", as AutoQoS does), whose values the MIB does not publish, so `table` is true for it and `dscp` stays null.
+ */
+export interface ClassSets { dscp: number | null; cos: number | null; precedence: number | null; table: boolean }
+export interface QosClassMarking { matched: number[]; sets: ClassSets | null }
+export interface QosPolicy { policyIdx: number; ifIndex: number; direction: 'input' | 'output'; policyName: string; classes: (QosClass & QosClassMarking)[]; ifType: number; vlan: number; parentPolicyIdx: number }
 export interface Probe {
   info: DeviceInfo; ifaces: IfaceInfo[]; ips: { ip: string; ifIndex: number }[]; vlans: { id: number; name: string }[]; qos: QosPolicy[]; profile: string;
   /** Why no QoS data could be read, or a short summary of what was found. */
@@ -85,6 +91,7 @@ export async function readQosStructure(c: SnmpClient): Promise<QosPolicy[]> {
     c.column(OID.cbQosPolicyMapName), c.column(OID.cbQosCMName), c.column(OID.cbQosQueueingCfgBandwidth).catch(empty),
     c.column(OID.cbQosQueueingCfgBandwidthUnits).catch(empty)
   ]);
+  const [matchName, setFeature, setDscp, setPrec, setCos] = await Promise.all([OID.cbQosMatchStmtName, OID.cbQosSetCfgFeature, OID.cbQosSetCfgIpDSCPValue, OID.cbQosSetCfgIpPrecedenceValue, OID.cbQosSetCfgL2CosValue].map(o => c.column(o).catch(empty)));
   // group the objects by policy once, instead of scanning the whole table for every policy
   const byPolicy = new Map<number, { idx: number; cfg: string; type: number; parent: number }[]>();
   for (const [k, t] of objType) {
@@ -109,14 +116,17 @@ export async function readQosStructure(c: SnmpClient): Promise<QosPolicy[]> {
     const maps = objs.filter(x => x.type === CBQOS_OBJ.classmap);
     const count = new Map<string, number>();
     for (const o of maps) count.set(nameOf(o), (count.get(nameOf(o)) ?? 0) + 1);
-    const classes: QosClass[] = [];
+    const classes: (QosClass & QosClassMarking)[] = [];
     for (const o of maps) {
       const name = (count.get(nameOf(o)) ?? 0) > 1 ? path(o).join('/') : nameOf(o);
       const q = objs.find(x => x.type === CBQOS_OBJ.queueing && x.parent === o.idx) ?? null;
       const bw = q ? bandwidthText(num(qBw.get(q.cfg), -1), num(qUnits.get(q.cfg), 0)) : null;
       const par = byIdx.get(o.parent);
       const parentName = par && par.type === CBQOS_OBJ.classmap ? nameOf(par) : null;
-      classes.push({ name, objIdx: o.idx, queueObjIdx: q ? q.idx : null, parentName, bandwidth: bw });
+      const kids = objs.filter(x => x.parent === o.idx);
+      const matched = [...new Set(kids.filter(x => x.type === CBQOS_OBJ.matchStatement).flatMap(x => matchedDscps(toStr(matchName.get(x.cfg) ?? null))))].sort((a, b) => a - b);
+      const sets = setActions(kids.filter(x => x.type === CBQOS_OBJ.set).map(x => x.cfg), setFeature, setDscp, setPrec, setCos);
+      classes.push({ name, objIdx: o.idx, queueObjIdx: q ? q.idx : null, parentName, bandwidth: bw, matched, sets });
     }
     out.push({
       policyIdx, ifIndex: num(ifIdx.get(pk)), direction, policyName: pmap ? toStr(pmName.get(pmap.cfg) ?? null) : '', classes,
@@ -135,6 +145,26 @@ export function policyText(p: Pick<QosPolicy, 'policyName' | 'vlan'>): string { 
 export function classLabel(p: Pick<QosPolicy, 'direction' | 'vlan'>, name: string): string { return (p.direction === 'input' ? 'in:' : '') + name + (p.vlan > 0 ? ` (VLAN ${p.vlan})` : ''); }
 /** Policies that belong to an interface, as opposed to the control plane or an entry without a usable ifIndex. */
 export const perInterface = (p: Pick<QosPolicy, 'ifType' | 'ifIndex'>): boolean => p.ifType !== 5 && p.ifIndex > 0;
+
+/** The DSCP values in a class's match statement, as the device words it: "Match  dscp af41 (34) af42 (36)". Other kinds of match give none. */
+export function matchedDscps(text: string): number[] {
+  const m = /\bdscp\b(.*)$/i.exec(text);
+  return m ? [...m[1].matchAll(/\((\d{1,2})\)/g)].map(x => Number(x[1])).filter(n => n <= 63) : [];
+}
+
+/** The marking actions of a class from its set objects' configuration rows; null when the class does not mark anything. */
+export function setActions(cfgs: string[], feature: Map<string, SnmpValue>, dscp: Map<string, SnmpValue>, prec: Map<string, SnmpValue>, cos: Map<string, SnmpValue>): ClassSets | null {
+  let out: ClassSets | null = null;
+  for (const cfg of cfgs) {
+    const f = feature.get(cfg); const bits = Buffer.isBuffer(f) ? f : Buffer.alloc(0);
+    const bit = (n: number) => bits.length > (n >> 3) && (bits[n >> 3] & (0x80 >> (n & 7))) !== 0;   // SetFeatureType numbers its bits from the most significant
+    out ??= { dscp: null, cos: null, precedence: null, table: false };
+    if (bit(0)) { const v = num(dscp.get(cfg), 0); if (v > 0) out.dscp = v; else out.table = true; }
+    if (bit(1)) { const v = num(prec.get(cfg), 0); if (v > 0) out.precedence = v; else out.table = true; }
+    if (bit(5)) { const v = num(cos.get(cfg), 0); if (v > 0) out.cos = v; else out.table = true; }
+  }
+  return out;
+}
 
 /** A plain-language summary of what the QoS tables returned, kept so an admin can see why a policy is missing. */
 export function qosSummary(policies: QosPolicy[], ifaces: Pick<IfaceInfo, 'index'>[]): string {

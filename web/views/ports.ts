@@ -13,7 +13,7 @@ interface Exp { ip: string; name: string; lastSeen: number }
 interface Sources { devices: Dev[]; exporters: Exp[]; counts: number[] }
 interface Row {
   id: string; srcIp: string; dstIp: string; sport: number; dport: number; protoName: string; app: string; appPort: number | null; vlan: number | null; t0: number; t1: number;
-  bytes: number; pkts: number; flags: number; qosChanged: boolean; dscpInS: string; dscpOutS: string | null; ttlExpired: boolean; hopCount: number;
+  bytes: number; pkts: number; flags: number; qosChanged: boolean; qosVerdict?: { kind: string; text: string } | null; dscpInS: string; dscpOutS: string | null; ttlExpired: boolean; hopCount: number;
 }
 interface Result { device: { id: number | null; name: string; address: string }; port: { ifIndex: number; name: string; alias: string } | null; dir: string; sort: string; limit: number; total: number; shown: number; rows: Row[] }
 
@@ -197,7 +197,7 @@ function results(): VNode {
           h('span', { style: 'font-weight:500' }, x.protoName),
           h('span', null, svcLabel(x.app, x.appPort)),
           h('span', { class: 'row', style: 'gap:6px;flex-wrap:nowrap' }, h('span', { 'aria-hidden': 'true', style: 'flex:1;height:6px;border-radius:3px;background:var(--raised);overflow:hidden' }, h('span', { style: `display:block;height:100%;width:${top ? Math.max(2, Math.round(x.bytes / top * 100)) : 0}%;background:var(--accent)` })),
-            x.qosChanged ? chip('QoS', 'bad', `DSCP re-marked ${x.dscpInS} → ${x.dscpOutS ?? ''}`) : null, x.ttlExpired ? chip('TTL', 'bad', 'TTL expired') : null),
+            x.qosChanged ? (x.qosVerdict?.kind === 'policy' ? chip('QoS', 'info', `Re-marked by a configured policy: ${x.dscpInS} → ${x.dscpOutS ?? ''}`) : x.qosVerdict?.kind === 'mixed' ? chip('QoS', 'warn', 'Mixed DSCP values') : chip('QoS', 'bad', `DSCP re-marked ${x.dscpInS} → ${x.dscpOutS ?? ''}`)) : null, x.ttlExpired ? chip('TTL', 'bad', 'TTL expired') : null),
           h('span', { class: 'mono', style: 'font-size:12px' }, bytes(x.bytes)),
           h('span', { class: 'mono', style: 'font-size:12px' }, num(x.pkts)),
           h('span', { class: 'mono muted', style: 'font-size:12px' }, dayClock(x.t1)))),

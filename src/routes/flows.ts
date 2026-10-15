@@ -5,9 +5,27 @@ import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { parseQuery } from '../query/tokens.js';
 import { appName, dscpName, protoName, service } from '../query/apps.js';
-import { analyzeStream, type HopContext } from '../analysis/hops.js';
+import { analyzeStream, type HopContext, type PolicyView } from '../analysis/hops.js';
 import type { StreamRow } from '../store/types.js';
 import { int, parseRange, str } from './util.js';
+
+/** The service policy and what its classes match and mark, for an interface of a polled device, so the path analysis can tell a configured re-marking from an unexplained one. */
+function policyLookup(app: App): NonNullable<HopContext['policyAt']> {
+  const ifs = new Map<number, { list: ReturnType<App['devices']['interfaces']>; hasQos: boolean }>();
+  return (ip, ifIndex, dir): PolicyView | null => {
+    const devId = app.devices.deviceIdForExporter(ip);
+    if (devId === null) return null;
+    let d = ifs.get(devId);
+    if (!d) { const list = app.devices.interfaces(devId); d = { list, hasQos: list.some(i => i.policy || i.policyIn) }; ifs.set(devId, d); }
+    const i = d.list.find(x => x.ifIndex === ifIndex);
+    if (!i) return null;
+    const mine = i.classes.filter(c => (dir === 'in') === c.cls.startsWith('in:'));
+    return {
+      device: app.devices.deviceName(ip), ifName: i.name, dir, policy: dir === 'in' ? i.policyIn : i.policy, deviceHasQos: d.hasQos,
+      classes: mine.map(c => ({ cls: c.cls.replace(/^in:/, '').replace(/ \(VLAN \d+\)$/, ''), matches: c.matched, sets: c.sets }))
+    };
+  };
+}
 
 export function streamView(app: App, r: StreamRow) {
   return {
@@ -52,8 +70,9 @@ export function registerFlows(app: App): void {
     const user = c.user().username;
     // health of the first rows: a quick hop analysis of each stream (loss between hops, slow links) without the SNMP lookups
     const localIps = new Set(app.localIps());
-    const quick: HopContext = { localIps, deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i) };
+    const quick: HopContext = { localIps, deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i), policyAt: policyLookup(app) };
     const health = new Map<string, { kind: 'ok' | 'warn' | 'bad'; text: string }>();
+    const verdicts = new Map<string, { kind: string; text: string }>();
     // a partial preview skips this per-stream analysis (it is the slow part); the full answer that follows has it
     await Promise.all((page.partial ? [] : page.rows.slice(0, 100)).map(async r => {
       try {
@@ -61,6 +80,7 @@ export function registerFlows(app: App): void {
         const d = analyzeStream(r.skey, recs, quick);
         if (!d) return;
         const obs = [...d.forward, ...d.reverse].flatMap(h => h.obs);
+        if (d.qosVerdict) verdicts.set(r.skey, d.qosVerdict);
         const loss = obs.filter(o => o.kind === 'loss').map(o => Number(/^([\d.]+)%/.exec(o.text)?.[1] ?? 0));
         if (r.ttlExpired) health.set(r.skey, { kind: 'bad', text: 'TTL expired' });
         else if (loss.length) health.set(r.skey, { kind: Math.max(...loss) >= 5 ? 'bad' : 'warn', text: `Loss ${Math.max(...loss).toFixed(1)}%` });
@@ -69,7 +89,7 @@ export function registerFlows(app: App): void {
       } catch { /* leave the status blank */ }
     }));
     if (q.trim() && !page.partial) app.log.info('query', `Flow search: ${q.trim()} (${page.total} result${page.total === 1 ? '' : 's'})`, user);
-    c.json({ rows: page.rows.map(r => ({ ...streamView(app, r), health: health.get(r.skey) ?? null })), total: page.total, truncated: page.truncated, partial: !!page.partial, offset, scanned: page.partial ? preview : null, errors: parsed.errors, range, tier: page.tier });
+    c.json({ rows: page.rows.map(r => ({ ...streamView(app, r), health: health.get(r.skey) ?? null, qosVerdict: verdicts.get(r.skey) ?? null })), total: page.total, truncated: page.truncated, partial: !!page.partial, offset, scanned: page.partial ? preview : null, errors: parsed.errors, range, tier: page.tier });
   });
 
   // One stream with its hops. The stream id contains punctuation, so it goes in the query string.
@@ -103,7 +123,7 @@ export function registerFlows(app: App): void {
     }
     const detail = analyzeStream(id, recs, {
       localIps: new Set(app.localIps()),
-      deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i), policyOf: (ip, i) => app.devices.policyOf(ip, i),
+      deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i), policyOf: (ip, i) => app.devices.policyOf(ip, i), policyAt: policyLookup(app),
       vlanName: id2 => app.vlanName(id2),
       classDrops: (ip, outIf, _a, _b, dscp) => (drops.get(`${ip}|${outIf}`) ?? []).filter(d => d.dscps.includes(dscp)).map(d => ({ cls: d.cls, dropPct: d.dropPct, dropPkts: d.dropPkts }))
     });

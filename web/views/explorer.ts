@@ -131,7 +131,12 @@ const COLS = '78px minmax(160px,1.4fr) minmax(160px,1.4fr) 60px 160px 150px 80px
 
 function qosTag(r: Row): VNode {
   if (!r.qosChanged) return h('span', { class: 'dim' }, '—');
-  return h('span', { class: 'tag bad' }, r.dscpOutS ? `${r.dscpInS.replace(/ \(\d+\)/, '')} → ${r.dscpOutS.replace(/ \(\d+\)/, '')}` : 'changed');
+  const k = r.qosVerdict?.kind;
+  const change = r.dscpOutS ? `${r.dscpInS.replace(/ \(\d+\)/, '')} → ${r.dscpOutS.replace(/ \(\d+\)/, '')}` : 'changed';
+  // a change a policy explains is shown quietly; one nothing configured, or that is unknown, keeps the red tag, and mixed markings are a warning
+  if (k === 'policy') return h('span', { class: 'tag info', title: 'Re-marked by a configured policy. ' + r.qosVerdict!.text }, change + ' · policy');
+  if (k === 'mixed') return h('span', { class: 'tag warn', title: r.qosVerdict!.text }, 'mixed DSCP');
+  return h('span', { class: 'tag bad', title: r.qosVerdict?.text }, change);
 }
 
 function ttlTag(r: Row): VNode {
@@ -143,11 +148,12 @@ function ttlTag(r: Row): VNode {
 function list(): VNode {
   const hdrBtn = (label: string, key: 'time' | 'bytes' | 'pkts') => h('button', { type: 'button', class: 'sortbtn', onclick: () => { sort = sort.key === key ? { key, dir: sort.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }; void load(); } },
     label + (sort.key === key ? (sort.dir === 'desc' ? ' ↓' : ' ↑') : ''));
-  const qosCount = rows.filter(r => r.qosChanged).length;
+  const qosCount = rows.filter(r => r.qosChanged && r.qosVerdict?.kind !== 'policy').length;
+  const policyCount = rows.filter(r => r.qosChanged && r.qosVerdict?.kind === 'policy').length;
   const ttlCount = rows.filter(r => r.ttlExpired).length;
   return h('section', { 'aria-label': 'Flow results', class: 'col', style: 'gap:10px' },
     qosCount && !qosOnly ? h('div', { class: 'note bad row', style: 'justify-content:space-between' },
-      h('span', null, h('b', null, `${qosCount} stream${qosCount === 1 ? '' : 's'}`), ' had their QoS marking (DSCP) changed somewhere along the path.'),
+      h('span', null, h('b', null, `${qosCount} stream${qosCount === 1 ? '' : 's'}`), ' had their QoS marking (DSCP) changed somewhere along the path', policyCount ? ` (${policyCount} more ${policyCount === 1 ? 'was' : 'were'} re-marked by a configured policy and ${policyCount === 1 ? 'is' : 'are'} not counted)` : '', '.'),
       btn('Show only these', { kind: 'danger', onclick: () => { qosOnly = true; void load(); redraw(); } })) : null,
     ttlCount && !ttlOnly ? h('div', { class: 'note bad row', style: 'justify-content:space-between' },
       h('span', null, h('b', null, `${ttlCount} stream${ttlCount === 1 ? '' : 's'}`), ' had the TTL expire before reaching the destination, or a router reported Time Exceeded for them.'),
