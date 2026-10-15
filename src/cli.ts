@@ -16,7 +16,7 @@ Usage:
   flowscope version
 
 Settings are environment variables; see the README. The most useful:
-  FLOWSCOPE_DATA_DIR, FLOWSCOPE_HTTPS_PORT (8443), FLOWSCOPE_FLOW_PORTS (2055,4739), FLOWSCOPE_TLS (auto|off), FLOWSCOPE_HTTP_PORT, FLOWSCOPE_ADMIN_PASSWORD
+  FLOWSCOPE_DATA_DIR, FLOWSCOPE_HTTPS_PORT (8443; the container image and the Linux and Proxmox installs set 443), FLOWSCOPE_FLOW_PORTS (2055,4739), FLOWSCOPE_TLS (auto|off), FLOWSCOPE_HTTP_PORT, FLOWSCOPE_ADMIN_PASSWORD
 `;
 
 async function healthcheck(): Promise<number> {

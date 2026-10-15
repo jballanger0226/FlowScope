@@ -4,7 +4,7 @@ FlowScope listens on three ports. Whatever you choose below, these have to be re
 
 | Port | Protocol | Purpose |
 | --- | --- | --- |
-| 8443 | TCP | Web console (HTTPS, self-signed certificate until you install your own) |
+| 443 | TCP | Web console (HTTPS, self-signed certificate until you install your own). The default for the container image and the Linux and Proxmox installs; Windows and macOS use 8443, and `FLOWSCOPE_HTTPS_PORT` changes it anywhere. An existing Linux or Proxmox install keeps the 8443 it had until you change that setting |
 | 2055 | UDP | NetFlow v5 / v9 / IPFIX |
 | 4739 | UDP | IPFIX |
 
@@ -26,13 +26,13 @@ What has and has not been tested for each is in [verification.md](verification.m
 git clone https://github.com/jballanger0226/flowscope && cd flowscope
 docker build -t flowscope .
 docker run -d --name flowscope --restart unless-stopped \
-  -p 8443:8443 -p 2055:2055/udp -p 4739:4739/udp \
+  -p 443:443 -p 2055:2055/udp -p 4739:4739/udp \
   -v flowscope-data:/data \
   -e FLOWSCOPE_ADMIN_PASSWORD='a-password-of-12-or-more-characters' \
   flowscope
 ```
 
-Open `https://<docker host>:8443/` and sign in as `admin`. If you left `FLOWSCOPE_ADMIN_PASSWORD` out, a password is generated once and printed in `docker logs flowscope`. The variable is only read the first time, when the account is created.
+Open `https://<docker host>/` and sign in as `admin`. If you left `FLOWSCOPE_ADMIN_PASSWORD` out, a password is generated once and printed in `docker logs flowscope`. The variable is only read the first time, when the account is created.
 
 ### Compose
 
@@ -77,7 +77,7 @@ The image starts as root only to make sure `/data` belongs to the unprivileged `
 -e FLOWSCOPE_TLS=off -e FLOWSCOPE_TRUST_PROXY=1 -e FLOWSCOPE_PUBLIC_URL=https://flows.example.com
 ```
 
-FlowScope then serves plain HTTP on 8080 (publish that instead of 8443). The UDP ports are unaffected and cannot go through an HTTP proxy.
+FlowScope then serves plain HTTP on 8080 (publish that instead of 443). The UDP ports are unaffected and cannot go through an HTTP proxy.
 
 ### Upgrade
 
@@ -135,14 +135,14 @@ Click **Create CT** (top right) and fill in the tabs:
    cat /root/flowscope-admin-password.txt
    ```
 
-3. Find the container's address on its **Summary** tab (or run `hostname -I`) and open `https://<address>:8443/`. The browser warns about the self-signed certificate once; install your own under Admin → HTTPS certificate when you are ready.
+3. Find the container's address on its **Summary** tab (or run `hostname -I`) and open `https://<address>/`. The browser warns about the self-signed certificate once; install your own under Admin → HTTPS certificate when you are ready.
 4. Sign in as `admin`, change the password, then delete the file: `rm /root/flowscope-admin-password.txt`.
 
 The password is generated for you; you can change it in FlowScope after signing in. If you ever lose it, run `flowscope-ctl reset-password admin` in the container's console for a new one-time password.
 
 ### If the web console does not answer (only SSH, port 22, is open)
 
-FlowScope starts by itself when the container boots; there is nothing to run by hand. If TCP 8443 is closed, the service did not start, and the container's console tells you why:
+FlowScope starts by itself when the container boots; there is nothing to run by hand. If TCP 443 is closed, the service did not start, and the container's console tells you why:
 
 ```sh
 flowscope-ctl doctor          # service state, listening ports, container type, last log lines
@@ -157,7 +157,7 @@ printf '[Service]\nProtectSystem=no\nProtectHome=no\nPrivateTmp=no\nPrivateDevic
   > /etc/systemd/system/flowscope.service.d/lxc.conf
 systemctl daemon-reload
 systemctl restart flowscope
-ss -ltn | grep 8443        # should now show a listener
+ss -ltn | grep 443         # should now show a listener
 ```
 
 If it still does not start, send the output of `systemctl status flowscope` and `journalctl -u flowscope -n 50` (an issue on GitHub is fine).
@@ -165,7 +165,7 @@ If it still does not start, send the output of `systemctl status flowscope` and 
 ### 5. Finish up in the GUI
 
 * **Start at boot:** container → **Options** → **Start at boot** → Yes.
-* **Firewall:** if you enable the Proxmox firewall on the container, allow TCP 8443 and UDP 2055 and 4739 in.
+* **Firewall:** if you enable the Proxmox firewall on the container, allow TCP 443 and UDP 2055 and 4739 in.
 * **Exporters:** send NetFlow v5/v9 or IPFIX from your routers and switches to the container's address, UDP 2055 or 4739. See [After installing](#after-installing).
 * **Backups:** *Datacenter → Backup → Add*, select the container. All FlowScope data lives on its root disk, so a normal backup is complete.
 * **More disk later:** container → **Resources** → *Root Disk* → **Volume Action** → **Resize**.
@@ -188,17 +188,20 @@ Take a snapshot first: container → **Snapshots** → **Take Snapshot**. To und
 Then, in the container's **Console**:
 
 ```sh
-flowscope-ctl update
+flowscope-ctl update                 # the main branch
+flowscope-ctl update my-branch       # a branch or a tag
 ```
 
-This downloads the current source from GitHub, builds it, swaps it in and restarts FlowScope; your data and settings are kept, and the previous version stays in `/opt/flowscope.prev`. The container needs internet access for this. Because the repository is private, give it a GitHub token (a fine-grained token with read access to the repository's **Contents**) once:
+This downloads the source from GitHub (the **main** branch unless you name another, so a change that is still on a branch is not installed by a plain `flowscope-ctl update`), builds it, swaps it in and restarts FlowScope; your data and settings are kept, and the previous version stays in `/opt/flowscope.prev`. The container needs internet access for this. Because the repository is private, give it a GitHub token (a fine-grained token with read access to the repository's **Contents**) once:
 
 ```sh
 install -m 600 /dev/null /etc/flowscope/update.env
 echo 'GITHUB_TOKEN=github_pat_xxxxxxxx' >> /etc/flowscope/update.env
 ```
 
-`update.env` can also set `FLOWSCOPE_REF=` (a branch or tag; default `main`) and `FLOWSCOPE_REPO=owner/name` for a fork.
+`update.env` can also set `FLOWSCOPE_REF=` (a branch or tag; default `main`; a name given on the command line wins) and `FLOWSCOPE_REPO=owner/name` for a fork.
+
+When it finishes, the update prints what was installed before and what is installed now (for example `0.1.0 (revision a1b2c3d)`), and says so if the two are the same build. Check later with `flowscope-ctl version` (see *Which version is running*). The installer that runs is the copy from the version you are updating **from**, so a change to the installer itself (this helper, the settings template) takes effect from the update after the one that brings it.
 
 The alternative, with no internet access in the container, is to upload a newer template and create a new container from it, then move your exporters to it. Data is not carried over automatically in that case; use a Proxmox backup of the old container if you need to restore it.
 
@@ -286,7 +289,7 @@ Everything is on the container's root disk (FlowScope's settings in `/var/lib/fl
 * **ClickHouse and older CPUs.** The installers and the template use the ClickHouse **25.8** LTS line, held with `apt-mark hold` so `apt upgrade` does not move it. Newer lines need newer CPUs: 26.8 was killed with signal `ILL` (illegal instruction) at start on an Intel Xeon X5650 (2010, SSE4.2 but no AVX), where 25.8 ran. A container uses the Proxmox host's CPU, so the same happens on a VM host with a generic CPU type such as `kvm64`. The installer and the template's first-boot service test the binary by starting it; when it fails they skip ClickHouse, FlowScope uses SQLite, and `flowscope-ctl doctor` says why. To use ClickHouse on such a host, give the host (or its VM: Hardware → Processors → Type = host) a newer CPU type, then run the installer again with `FLOWSCOPE_STORAGE=clickhouse`; for a template container, delete `/etc/flowscope/.clickhouse-unsupported`, `systemctl start clickhouse-server`, then choose ClickHouse under Storage. To move to another release line later: `apt-mark unhold clickhouse-server clickhouse-common-static clickhouse-client`, then install the line you want (`FLOWSCOPE_CH_VERSION` does this for the installers). ClickHouse 25.8 LTS is supported for a limited time; plan the move.
 * **ClickHouse in the container.** `flowscope-ctl doctor` shows whether it is running and answering on `127.0.0.1:8123`. FlowScope waits up to a minute for it at start-up and then uses SQLite for that run, with a warning under Storage. The script's defaults are 4096 MB and a 32 GB disk for this reason; `--sqlite` (or `STORAGE_BACKEND=sqlite`) skips ClickHouse (2048 MB is then enough).
 * **Unprivileged.** root inside the container is an unprivileged uid on the host. If you add your own bind mount to the container, mind the uid mapping.
-* **Firewall.** The installer does not install a firewall. If you turn on the Proxmox firewall for the container, allow TCP 8443 and UDP 2055 and 4739.
+* **Firewall.** The installer does not install a firewall. If you turn on the Proxmox firewall for the container, allow TCP 443 and UDP 2055 and 4739.
 
 ## Proxmox OCI
 
@@ -299,7 +302,7 @@ Proxmox VE 9.1 and newer can create an LXC container from an OCI image ("applica
 3. **Create CT**, and pick that template. Give it a network with its own address (bridge, DHCP or static).
 4. Add a **mount point** for `/data` on persistent storage (Resources → Add → Mount Point, path `/data`). Without it the data is lost when the container is re-created.
 5. Set environment variables in the container's **Options → Environment** (for example `FLOWSCOPE_ADMIN_PASSWORD`; see the README for the others). The image's default command is `start`, so no command needs to be set.
-6. Start it, open `https://<container address>:8443/`.
+6. Start it, open `https://<container address>/`.
 
 The image's entrypoint takes care of ownership of `/data`: it starts as root (which is an unprivileged uid on the host for an unprivileged container), makes `/data` writable for the `node` user and drops to it. If the container keeps restarting with a permission error about `/data`, look at the log (Proxmox's task/console output, or `pct console`) first.
 
@@ -333,7 +336,7 @@ Compare the revision with the commit list on GitHub (`https://github.com/jballan
 2. **Exporters.** On each router or switch, send NetFlow v5/v9 or IPFIX to the FlowScope address, UDP 2055 or 4739. The log (`docker logs flowscope` or `flowscope-ctl logs`) shows `new exporter <address>` the first time each one is heard from.
 3. **SNMP.** Add SNMP credential sets under Admin and the devices under SNMP devices to get interface names, speeds, VLANs, QoS policies and host tracking. Allow UDP 161 from FlowScope to the devices.
 4. **HTTPS certificate.** Admin → HTTPS certificate replaces the self-signed one.
-5. **Firewalls.** Allow TCP 8443 from your admin networks and UDP 2055/4739 from your exporters only. NetFlow is unauthenticated, and FlowScope does not yet limit what an unknown sender can make it store. Ready-to-use rules for nftables, ufw, Docker, Windows and Proxmox are in [security.md](security.md). The Windows installer opens these ports to every address, so tighten them there.
+5. **Firewalls.** Allow TCP 443 from your admin networks and UDP 2055/4739 from your exporters only. NetFlow is unauthenticated, and FlowScope does not yet limit what an unknown sender can make it store. Ready-to-use rules for nftables, ufw, Docker, Windows and Proxmox are in [security.md](security.md). The Windows installer opens these ports to every address, so tighten them there.
 6. **Storage sizing.** Roughly allow for the retention you set times your flow rate; ClickHouse is the default storage on the Docker, Linux and Proxmox installs; SQLite is still fine for a small network and needs nothing else running.
 
 ## Troubleshooting

@@ -25,7 +25,7 @@ LABEL org.opencontainers.image.revision="$GIT_SHA" \
 ENV NODE_ENV=production \
     FLOWSCOPE_CONTAINER=1 \
     FLOWSCOPE_DATA_DIR=/data \
-    FLOWSCOPE_HTTPS_PORT=8443 \
+    FLOWSCOPE_HTTPS_PORT=443 \
     FLOWSCOPE_FLOW_PORTS=2055,4739
 WORKDIR /app
 COPY --from=build /src/package.json ./
@@ -37,8 +37,10 @@ RUN mkdir -p /data && chown node:node /data && chmod 0755 /usr/local/bin/flowsco
 # The entrypoint starts as root only to make /data writable (Proxmox mount points and new bind mounts are owned by root),
 # then drops to the "node" user. Use `docker run --user 1000:1000` to skip that and never run as root.
 VOLUME /data
-# Web console (HTTPS, self-signed until you install your own certificate) and flow export ports.
-EXPOSE 8443/tcp 2055/udp 4739/udp
+# Web console (HTTPS on 443, self-signed until you install your own certificate) and flow export ports.
+# Port 443 is below 1024: the entrypoint gives the unprivileged "node" user that one capability (CAP_NET_BIND_SERVICE). If you drop it
+# (cap_drop: ALL), set FLOWSCOPE_HTTPS_PORT=8443 and publish that instead.
+EXPOSE 443/tcp 2055/udp 4739/udp
 HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 CMD ["node", "dist/src/cli.js", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/flowscope-entrypoint"]
 CMD ["start"]

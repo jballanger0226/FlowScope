@@ -19,8 +19,14 @@ if [ "$(id -u)" = "0" ]; then
     chown -R node:node "$DATA" || echo "flowscope: could not change ownership of $DATA; start with --user matching the owner of the volume" >&2
   fi
   if command -v setpriv >/dev/null 2>&1; then
+    # The web console is on port 443, which an unprivileged user may not open. Keep just CAP_NET_BIND_SERVICE for "node" (part of Docker's
+    # and Podman's default set), probing first so a container started without it still runs, on a port above 1023.
+    caps=""
+    if setpriv --reuid=node --regid=node --init-groups --inh-caps=+net_bind_service --ambient-caps=+net_bind_service -- true 2>/dev/null; then
+      caps="--inh-caps=+net_bind_service --ambient-caps=+net_bind_service"
+    fi
     # shellcheck disable=SC2086
-    exec setpriv --reuid=node --regid=node --init-groups -- $RUN "$@"
+    exec setpriv --reuid=node --regid=node --init-groups $caps -- $RUN "$@"
   fi
   echo "flowscope: setpriv not found, running as root" >&2
 fi

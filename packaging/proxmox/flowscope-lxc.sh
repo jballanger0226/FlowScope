@@ -139,7 +139,7 @@ addr="$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}')"
 cat <<DONE
 
 FlowScope is installed in container $CTID.
-  Web console:  https://${addr:-<container ip>}:8443/        (self-signed certificate: the browser will warn once)
+  Web console:  https://${addr:-<container ip>}/             (self-signed certificate: the browser will warn once)
   Sign in:      admin / $password   (change it after signing in)
   Exporters:    send NetFlow v5/v9 or IPFIX to ${addr:-<container ip>} UDP 2055 or 4739
   Logs:         pct exec $CTID -- flowscope-ctl logs

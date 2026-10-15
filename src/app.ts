@@ -25,6 +25,7 @@ import type { Resolver } from './query/tokens.js';
 import { SamlState } from './auth/saml/saml.js';
 import { registerRoutes } from './routes/index.js';
 import { describeVersion } from './buildinfo.js';
+import { listenHint } from './server/listenerr.js';
 
 export const VERSION = '0.1.0';
 
@@ -200,10 +201,10 @@ export class App {
     if (cfg.tls === 'auto') await this.certs.ensureActive(hosts);
     this.initialAdminPassword = this.auth.bootstrap(process.env.FLOWSCOPE_ADMIN_PASSWORD);
     try { await this.collector.start(); } catch (e) { this.log.error('collector', 'Could not open the flow ports: ' + (e as Error).message); }
-    this.ports = await this.web.listen({
-      host: cfg.bind, httpsPort: cfg.tls === 'auto' ? cfg.httpsPort : undefined, httpPort: cfg.httpPort > 0 ? cfg.httpPort : undefined,
-      tls: cfg.tls === 'auto' ? this.certs.options() : null, redirectToHttps: cfg.tls === 'auto'
-    });
+    const webPorts = { https: cfg.tls === 'auto' ? cfg.httpsPort : undefined, http: cfg.httpPort > 0 ? cfg.httpPort : undefined };
+    try {
+      this.ports = await this.web.listen({ host: cfg.bind, httpsPort: webPorts.https, httpPort: webPorts.http, tls: cfg.tls === 'auto' ? this.certs.options() : null, redirectToHttps: cfg.tls === 'auto' });
+    } catch (e) { throw listenHint(e, [webPorts.https, webPorts.http]); }
     if (!this.demo) this.poller.start();
     const every = (ms: number, fn: () => void | Promise<void>) => { this.timers.push(guardedInterval(ms, fn, e => this.log.error('app', String(e)))); };
     every(60_000, async () => { const r = await this.store.maintain(this.settings.get('retention')); if (r.dropped.length) this.log.info('store', `Retention removed ${r.dropped.join(', ')}`); });

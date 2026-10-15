@@ -47,7 +47,7 @@ cp -a "$here/dist" "$here/package.json" /opt/flowscope/
 [ -f /etc/flowscope/flowscope.env ] || cat > /etc/flowscope/flowscope.env <<'ENV'
 # One KEY=value per line. See the README for all settings.
 # FLOWSCOPE_ADMIN_PASSWORD=change-me-please-12+
-# FLOWSCOPE_HTTPS_PORT=8443
+FLOWSCOPE_HTTPS_PORT=443
 # FLOWSCOPE_FLOW_PORTS=2055,4739
 # FLOWSCOPE_CLICKHOUSE_URL=http://user:password@127.0.0.1:8123/flowscope
 ENV
@@ -68,7 +68,8 @@ fi
 install -m 644 "$here/packaging/linux/flowscope.service" /etc/systemd/system/flowscope.service
 systemctl daemon-reload
 systemctl enable --now flowscope
-echo "FlowScope is starting. Web console: https://$(hostname):8443/   (journalctl -u flowscope shows the first-run admin password if none was set)"
-echo "Open TCP 8443 and UDP 2055/4739 in the host firewall if needed."
+webport="$(sed -n 's/^[[:space:]]*FLOWSCOPE_HTTPS_PORT=\([0-9]*\).*/\1/p' /etc/flowscope/flowscope.env | tail -n1)"; webport="${webport:-8443}"   # an install from before 443 became the default keeps 8443
+echo "FlowScope is starting. Web console: https://$(hostname):$webport/   (journalctl -u flowscope shows the first-run admin password if none was set)"
+echo "Open TCP $webport and UDP 2055/4739 in the host firewall if needed."
 if grep -Eq '^[[:space:]]*FLOWSCOPE_CLICKHOUSE_URL=.+' /etc/flowscope/flowscope.env; then echo "Storage: ClickHouse on this machine (data in /var/lib/clickhouse; back it up with /var/lib/flowscope)."
 else echo "Storage: embedded SQLite (FLOWSCOPE_STORAGE=clickhouse sets up ClickHouse instead; see docs/deployment.md)."; fi
