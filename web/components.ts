@@ -110,9 +110,51 @@ export function spinner(text = 'Loading…'): VNode { return h('div', { class: '
 export interface Series { name: string; color: string; points: { t: number; v: number }[] }
 export const PALETTE = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)', 'var(--s6)', 'var(--s7)', 'var(--s8)'];
 
+/* ------------------------------------------------------------------ chart grid */
+
+/** Last measured width of the chart grid and height of the window. Charts are drawn at the size they will be shown, so tall, wide and ultrawide windows all get graphs that fit. */
+const gridBox = { cw: 0, vh: 0 };
+const GAP = 16, CHART_PAD = 26, CAPTION = 24, MIN_W = 300, MIN_H = 140, MAX_H = 320;
+
+function measure(el: Element): boolean {
+  // A grid that is not on the page yet (or is hidden) has no width to go by.
+  if (!el.isConnected || !el.clientWidth) return false;
+  const cw = Math.floor(el.clientWidth), vh = window.innerHeight;
+  const changed = Math.abs(cw - gridBox.cw) >= 2 || Math.abs(vh - gridBox.vh) >= 2;
+  if (changed) { gridBox.cw = cw; gridBox.vh = vh; }
+  return changed;
+}
+
+/**
+ * Lays out `count` charts so they fit the space: side by side when the window is wide enough (all in one row on an ultrawide),
+ * two by two on a normal screen, stacked on a narrow one. Heights follow the window height so a whole set of graphs can be seen at once.
+ * `make` receives the pixel size to draw each chart at.
+ */
+export function chartGrid(count: number, make: (size: { w: number; h: number }) => (VNode | null)[]): VNode {
+  const cw = gridBox.cw || 1100, vh = gridBox.vh || window.innerHeight;
+  const cols = count <= 1 ? 1 : cw >= count * 440 + (count - 1) * GAP ? count : cw >= 820 ? 2 : 1;
+  const rows = Math.ceil(count / cols);
+  const w = Math.max(MIN_W, Math.floor((cw - GAP * (cols - 1)) / cols) - CHART_PAD);
+  const ch = Math.round(Math.min(MAX_H, Math.max(MIN_H, (vh - 170) / rows - CAPTION - 24)));
+  return h('div', {
+    class: 'charts', style: `--cols:${cols}`,
+    ref: (el: Element) => {
+      const e = el as any;
+      if (!e.__ro && typeof ResizeObserver !== 'undefined') {
+        e.__ro = new ResizeObserver(() => { if (measure(el)) redraw(); });
+        e.__ro.observe(el);
+        // The window height changes the chart height without changing the grid width.
+        e.__onResize = () => { if (!el.isConnected) { window.removeEventListener('resize', e.__onResize); return; } if (measure(el)) redraw(); };
+        window.addEventListener('resize', e.__onResize);
+      }
+      if (measure(el)) requestAnimationFrame(redraw);
+    }
+  }, make({ w, h: ch }));
+}
+
 /** A line chart drawn with SVG. Shaded bands mark time spans (events). */
-export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; fmtT: (t: number) => string; /** Precise value text for the hover readout (defaults to unit) */ fmtV?: (v: number) => string; /** Full timestamp for the hover readout */ fmtFull?: (t: number) => string; /** Charts sharing this name on a page follow each other's hover: pointing at one marks the same moment on the rest */ sync?: string; wide?: boolean }): VNode {
-  const W = o.wide ? 1100 : 520, H = 190, L = 76, R = 10, T = 8, B = 22;
+export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; fmtT: (t: number) => string; /** Precise value text for the hover readout (defaults to unit) */ fmtV?: (v: number) => string; /** Full timestamp for the hover readout */ fmtFull?: (t: number) => string; /** Charts sharing this name on a page follow each other's hover: pointing at one marks the same moment on the rest */ sync?: string; /** Drawing size in CSS pixels, so text stays true to size at any window shape (see chartGrid) */ w?: number; h?: number; wide?: boolean }): VNode {
+  const W = Math.round(o.w ?? (o.wide ? 1100 : 520)), H = Math.round(o.h ?? 190), L = 76, R = 10, T = 8, B = 22;
   const all = o.series.flatMap(s => s.points.map(p => p.v));
   const maxV = o.yMax ?? Math.max(o.threshold ?? 0, ...all, 1e-9) * 1.1;
   const x = (t: number) => L + ((t - o.from) / Math.max(1, o.to - o.from)) * (W - L - R);
