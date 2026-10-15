@@ -3,7 +3,8 @@ import type { AppLog } from '../logger.js';
 import type { DeviceRow, DeviceService } from './devices.js';
 import type { SnmpClient } from './client.js';
 import { readArp, readFdb, readNeighbors, readPortVlans, type Neighbor } from './ports.js';
-import { readWlan, type WlanData } from './wlan.js';
+import type { WlanData } from './wlan.js';
+import { readWlanFor } from './wlan_vendors.js';
 
 /*
  * Host tracking: which switch port a host is plugged into.
@@ -79,8 +80,8 @@ export class HostTracker {
 
     // Aruba Instant APs publish their radios, SSIDs and clients (with name, IP address and signal) in a table of their own
     let wlan: WlanData | null = null;
-    if ((d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.14823.')) {
-      try { wlan = await readWlan(c, ifs); } catch (e) { notes.push(`Wi-Fi tables not read: ${(e as Error).message}`); }
+    {
+      try { wlan = await readWlanFor(c, ifs, d.sys_object_id ?? '', d.sys_descr ?? ''); } catch (e) { notes.push(`Wi-Fi tables not read: ${(e as Error).message}`); }
     }
 
     this.cdb.tx(() => {
@@ -111,8 +112,8 @@ export class HostTracker {
     for (const s of w.ssids) is.run(devId, s.apMac, s.bssid, s.name, s.radio, s.ssidId, s.clients, s.ifName);
     const ic = this.db.prepare('INSERT OR REPLACE INTO wlan_client(dev_id, mac, ap_mac, ap_name, bssid, ssid, radio, ip, name, os, snr, tx_rate, rx_rate, tx_bytes, rx_bytes, uptime_sec, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const c of w.clients) ic.run(devId, c.mac, c.apMac, c.apName, c.bssid, c.ssid, c.radio, c.ip, c.name, c.os, c.snr, c.txRate, c.rxRate, c.txBytes, c.rxBytes, c.uptimeSec, now);
-    // a device with these tables is an access point, whatever its description says
-    this.db.prepare("UPDATE devices SET role = 'ap' WHERE id = ?").run(devId);
+    // a device with these tables is an access point, whatever its description says (a controller keeps its own role)
+    if (w.vendor !== 'cisco' && w.vendor !== 'ruckus') this.db.prepare("UPDATE devices SET role = 'ap' WHERE id = ?").run(devId);
   }
 
   /** The Wi-Fi state last read from one access point, or null when it has none. */
