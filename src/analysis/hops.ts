@@ -284,7 +284,8 @@ export function analyzeStream(skey: string, recs: (FlowRecord & { primary?: bool
   else if (!reverse.length) note = 'Only one direction was exported. Check that the exporters report both ingress and egress traffic.';
   else if (reverse.length !== forward.length) note = 'The forward and reverse paths do not cross the same devices. The route may be asymmetric.';
   const all = [...forward, ...reverse];
-  const marking = [markingOf(fwdRecs, 'forward', ctx), markingOf(revRecs, 'reverse', ctx)].filter((m): m is Marking => m !== null);
+  // the devices of a multicast stream are branches of a tree, not hops, so their markings are not compared
+  const marking = (mcast ? [] : [markingOf(fwdRecs, 'forward', ctx), markingOf(revRecs, 'reverse', ctx)]).filter((m): m is Marking => m !== null);
   return {
     skey, initiator: { ip: first.srcIp, port: first.sport }, responder: { ip: first.dstIp, port: first.dport },
     proto: first.proto, protoName: protoName(first.proto), app: appName(first.proto, first.sport, first.dport), appPort: service(first.proto, first.sport, first.dport).port,
