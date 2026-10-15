@@ -212,3 +212,15 @@ test('a stream whose packets carry two DSCP values is reported as mixed marking,
   const one = analyzeStream('k', [rec({ inIf: 1, outIf: 2 })], hctx)!;
   assert.equal(one.qosChanged, false); assert.deepEqual(one.marking, []);
 });
+
+
+test('queue drops: a huge count at a tiny rate is noted, not flagged; a real rate is flagged', () => {
+  const recs = [rec({ inIf: 1, outIf: 2 })];
+  const withDrops = (dropPct: number, dropPkts: number) => analyzeStream('k', recs, { ...hctx, classDrops: () => [{ cls: 'class-default', dropPct, dropPkts }] })!.forward[0].obs.find(o => o.kind === 'qdrop')!;
+  const tiny = withDrops(0.0003, 6_681_644);
+  assert.equal(tiny.severity, 'info');
+  assert.match(tiny.text, /6,681,644 packets/); assert.match(tiny.text, /<0\.01%/); assert.match(tiny.text, /whole class/);
+  const real = withDrops(2.5, 900);
+  assert.equal(real.severity, 'bad'); assert.match(real.text, /2\.50%/);
+  assert.equal(withDrops(0.3, 900).severity, 'warn');
+});
