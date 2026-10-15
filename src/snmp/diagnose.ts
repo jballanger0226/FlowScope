@@ -13,6 +13,10 @@ export interface CheckFacts { role: string; cisco: boolean }
 
 const LLDP_HINT = 'Switches publish LLDP over SNMP themselves. Firewalls and servers (OPNsense, pfSense, Linux) only do it through the lldpd AgentX subagent: install lldpd, turn on AgentX in the SNMP service (the master agent needs "master agentx"), and start lldpd with -x. Then check that the community or SNMPv3 user may read .1.0.8802, which lies outside .1.3.6.1 and is often cut off by a restricted view.';
 
+/** hrSWRunName and hrSWRunPath (HOST-RESOURCES-MIB). On FreeBSD the "path" of lldpd is its process title, which includes "N neighbors". */
+const HR_SWRUN_NAME = '1.3.6.1.2.1.25.4.2.1.2', HR_SWRUN_PATH = '1.3.6.1.2.1.25.4.2.1.4';
+const LLDPD_RUNNING_HINT = 'lldpd learns the neighbours but keeps them to itself; it reaches SNMP only through the AgentX socket of the SNMP agent. Both ends need switching on: start lldpd with -x (on OPNsense look for an SNMP / AgentX option in the LLDPd plugin settings), and make the agent a master agent ("master agentx" in snmpd.conf; the OPNsense Net-SNMP plugin writes it when its AgentX option is on). Then restart snmpd first and lldpd after it, and run this check again. If the rest of the device reads fine with this credential, the credential is not the problem.';
+
 type Col = { map: Map<string, SnmpValue>; error: string | null };
 async function col(c: Walker, oid: string): Promise<Col> {
   try { return { map: await c.column(oid, 20), error: null }; } catch (e) { return { map: new Map(), error: (e as Error).message }; }
@@ -39,9 +43,22 @@ export async function runChecks(c: Walker, f: CheckFacts): Promise<Check[]> {
       : { id: 'counters', title: 'Traffic counters', state: 'fail', count: 0, detail: err(hc, in32) ?? 'No interface traffic counters were returned.' });
 
   const nLoc = locPort.map.size, nRem = lldpRem.map.size;
+  // With no LLDP table at all, see whether lldpd is running on the device: that turns "not published" into the real cause.
+  let lldpd: { running: boolean; neighbours: number | null; procsRead: boolean } = { running: false, neighbours: null, procsRead: false };
+  if (!nLoc && !nRem) {
+    const [names, paths] = await Promise.all([col(c, HR_SWRUN_NAME), col(c, HR_SWRUN_PATH)]);
+    lldpd.procsRead = names.map.size > 0;
+    for (const [k, v] of names.map) {
+      if (!/(^|\/)lldpd$/.test(String(v).trim())) continue;
+      lldpd.running = true;
+      const m = /(\d+) neighbou?rs?/i.exec(String(paths.map.get(k) ?? ''));
+      if (m) lldpd.neighbours = Math.max(lldpd.neighbours ?? 0, Number(m[1]));
+    }
+  }
   out.push(nRem ? { id: 'lldp', title: 'LLDP neighbours', state: 'ok', count: nRem, detail: `${plural(nRem, 'neighbour')} on ${plural(ports(lldpRem.map, 1), 'port')}.` }
     : nLoc ? { id: 'lldp', title: 'LLDP neighbours', state: 'warn', count: 0, detail: `The device publishes LLDP (${plural(nLoc, 'local port')}) but has no neighbours yet.`, hint: 'Check that the other end sends LLDP and that LLDP is enabled on this port. On a firewall or server, lldpctl shows what lldpd has heard.' }
-      : { id: 'lldp', title: 'LLDP neighbours', state: 'fail', count: 0, detail: err(locPort, lldpRem) ?? 'Nothing came back for the LLDP-MIB (.1.0.8802.1.1.2). Either the device does not publish it over SNMP, or this credential may not read it.', hint: LLDP_HINT });
+      : lldpd.running ? { id: 'lldp', title: 'LLDP neighbours', state: 'fail', count: 0, detail: `lldpd is running on this device${lldpd.neighbours !== null ? ` and sees ${plural(lldpd.neighbours, 'neighbour')}` : ''}, but nothing is published for the LLDP-MIB (.1.0.8802.1.1.2). It is not connected to the SNMP agent.`, hint: LLDPD_RUNNING_HINT }
+      : { id: 'lldp', title: 'LLDP neighbours', state: 'fail', count: 0, detail: err(locPort, lldpRem) ?? 'Nothing came back for the LLDP-MIB (.1.0.8802.1.1.2). Either the device does not publish it over SNMP, or this credential may not read it.' + (lldpd.procsRead && f.role !== 'switch' ? ' The device\'s process list was readable and lldpd is not running on it, so there is nothing to publish: start lldpd (with -x) first.' : ''), hint: LLDP_HINT });
 
   out.push(cdp.map.size ? { id: 'cdp', title: 'CDP neighbours', state: 'ok', count: cdp.map.size, detail: `${plural(cdp.map.size, 'neighbour')} on ${plural(ports(cdp.map, 0), 'port')}.` }
     : { id: 'cdp', title: 'CDP neighbours', state: 'na', count: 0, detail: 'No CDP table. Only Cisco devices publish it, so this is normal elsewhere.' });
