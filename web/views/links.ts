@@ -331,19 +331,24 @@ function hostsPanel(dev: Dev, itf: Iface): VNode {
   const head = h('div', { class: 'row', style: 'justify-content:space-between' },
     h('div', { class: 'col', style: 'gap:2px' }, h('b', null, `Hosts on ${itf.name}`),
       h('span', { class: 'muted', style: 'font-size:12px' }, dev.hostsAt ? `From the MAC address, ARP and LLDP/CDP tables of ${dev.name}, last read ${ago(dev.hostsAt)}.` : 'From the MAC address, ARP and LLDP/CDP tables. Not read yet from this device.')),
-    h('div', { class: 'row' }, readMsg ? h('span', { class: 'muted', style: 'font-size:12px', role: 'status' }, readMsg) : null, btn(readingHosts ? 'Reading…' : 'Read tables now', { small: true, kind: 'ghost', disabled: readingHosts, title: 'Ask the device for its MAC, ARP and neighbour tables right now', onclick: () => void readHostsNow() })));
+    h('div', { class: 'row' }, readMsg ? h('span', { class: 'muted', style: 'font-size:12px', role: 'status' }, readMsg) : null,
+      btn('Flows by port', { small: true, kind: 'ghost', title: `Open ${itf.name} in Flows by port`, aria: `Flows by port for ${itf.name}`, onclick: () => go('ports', { dev: dev.id, if: itf.ifIndex }) }),
+      btn(readingHosts ? 'Reading…' : 'Read tables now', { small: true, kind: 'ghost', disabled: readingHosts, title: 'Ask the device for its MAC, ARP and neighbour tables right now', onclick: () => void readHostsNow() })));
   return h('div', { class: 'col', style: 'gap:8px' }, head,
     dev.hostsNote ? note(dev.hostsNote, 'warn') : null,
     hostsLoading && !r ? spinner('Loading hosts…') : hostsError ? note(hostsError, 'bad', true) : null,
     r && !r.tracking ? note('Host tracking is turned off, so no tables are being read automatically. Tables can still be read with the button above.', 'info') : null,
     r && r.neighbors.length ? neighborLines(r.neighbors) : null,
     r && r.neighbors.some(n => n.kind === 'infra') ? h('span', { class: 'dim', style: 'font-size:12px' }, 'This port leads to another switch or router. Addresses below are just what that device has forwarded, not hosts plugged in here.') : null,
-    r && r.hosts.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1fr) minmax(130px,1fr) minmax(140px,1fr) 110px 110px;--w:700px' },
-      h('div', { class: 'tr head' }, ...['MAC address', 'IP address', 'VLAN', 'First seen', 'Last seen'].map(t => h('span', null, t))),
+    r && r.hosts.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1fr) minmax(130px,1fr) minmax(140px,1fr) 110px 110px 150px;--w:860px' },
+      h('div', { class: 'tr head' }, ...['MAC address', 'IP address', 'VLAN', 'First seen', 'Last seen', 'Flows'].map(t => h('span', null, t))),
       h('div', { class: 'scroll', style: 'max-height:240px' }, r.hosts.slice(0, 100).map(x => h('div', { key: x.mac + x.vlan, class: 'tr' },
         h('span', { class: 'mono', style: 'font-size:12px' }, x.mac), h('span', { class: 'mono', style: 'font-size:12px' }, x.ips.join(', ') || '—'),
         h('span', null, vlanLabel(x.vlan, x.vlanName) || '—'), h('span', { class: 'muted', style: 'font-size:12px' }, dayClock(x.firstSeen)),
-        h('span', { class: x.active ? 'muted' : 'dim', style: 'font-size:12px' }, x.active ? ago(x.lastSeen) : 'gone ' + ago(x.lastSeen))))))) : null,
+        h('span', { class: x.active ? 'muted' : 'dim', style: 'font-size:12px' }, x.active ? ago(x.lastSeen) : 'gone ' + ago(x.lastSeen)),
+        h('span', { class: 'row', style: 'gap:4px;flex-wrap:nowrap' },
+          btn('Explorer', { small: true, kind: 'ghost', title: `Flows with ${x.ips[0] || x.mac} in Flow explorer`, aria: `Flow explorer for ${x.ips[0] || x.mac}`, onclick: () => go('explorer', { q: x.ips[0] ? 'ip:' + x.ips[0] : 'mac:' + x.mac, range: '1h' }) }),
+          btn('Port', { small: true, kind: 'ghost', title: `Open ${itf.name} in Flows by port`, aria: `Flows by port for ${itf.name}`, onclick: () => go('ports', { dev: dev.id, if: itf.ifIndex }) }))))))) : null,
     r && !r.hosts.length && r.tracking && !hostsError ? h('span', { class: 'dim' }, dev.hostsAt ? 'No MAC addresses have been learned on this port.' : 'Nothing read yet. The first read happens within a few minutes of adding the device, or press Read tables now.') : null,
     r && r.hosts.length > 100 ? h('span', { class: 'dim' }, `${num(r.hosts.length)} addresses; the newest 100 are shown.`) : null);
 }
