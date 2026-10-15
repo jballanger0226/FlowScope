@@ -62,6 +62,11 @@ test('Overview API: an installation with nothing set up still answers', { timeou
     assert.deepEqual(r.json.flows.top, []);
     assert.equal(r.json.flows.exporters.total, 0);
     assert.deepEqual(r.json.ports.busiest, []);
+    assert.deepEqual(r.json.verdict, { level: 'ok', headline: 'Everything looks healthy' });
+    assert.deepEqual(r.json.freshness, { lastFlowAt: null, lastPollAt: null });
+    assert.equal(r.json.flows.traffic.bytes, 0); assert.deepEqual(r.json.flows.traffic.apps, []);
+    assert.deepEqual(r.json.flows.anomalies, { ttlExpired: 0, qosChanged: 0 });
+    assert.deepEqual(r.json.devices.restarted, []);
     assert.ok(r.json.logs, 'an administrator gets the log summary even when it is empty');
     assert.equal(typeof r.json.logs.errors, 'number'); assert.ok(Array.isArray(r.json.logs.items));
   });
@@ -110,16 +115,20 @@ test('Overview API: down devices with duration, ranked notices, top flows and po
     assert.equal(o.devices.down[1].neverReached, true);
     assert.ok(Math.abs(o.devices.down[1].downMs - 2 * HOUR) < 30_000);
 
-    // notices: the two unreachable devices come first, then the saturated uplink, each with where to review it
-    const items = o.notices.items;
-    assert.deepEqual(items.slice(0, 2).map((n: any) => n.kind), ['device-down', 'device-down']);
-    assert.deepEqual(items.slice(0, 2).map((n: any) => n.dev), ['sw-down', 'sw-new']);
-    const uplink = items.find((n: any) => n.kind === 'issue');
-    assert.ok(uplink, 'the saturated uplink is a notice');
+    // notices: only devices that are answering. The two unreachable devices have their own list, so they are not repeated here.
+    assert.equal(o.notices.total, 1); assert.equal(o.notices.bad, 0); assert.equal(o.notices.warn, 1);
+    const uplink = o.notices.items[0];
+    assert.equal(uplink.kind, 'issue');
     assert.equal(uplink.dev, 'core-rtr'); assert.equal(uplink.devId, ok);
     assert.deepEqual(uplink.target, { tab: 'interfaces', ifIndex: 2, section: 'traffic' });
-    assert.equal(o.notices.total, o.notices.bad + o.notices.warn);
-    assert.ok(o.notices.bad >= 2);
+
+    // verdict: the devices that are down make it bad, and it says what is wrong in order of seriousness
+    assert.equal(o.verdict.level, 'bad');
+    assert.equal(o.verdict.headline, '2 SNMP devices not responding, 1 warning and 1 flow exporter gone quiet');
+
+    // freshness: when data last arrived
+    assert.equal(o.freshness.lastFlowAt, now - 10_000);
+    assert.ok(Math.abs(o.freshness.lastPollAt - now) < 60_000);
 
     // flows and exporters
     assert.equal(o.flows.error, null);
@@ -130,6 +139,12 @@ test('Overview API: down devices with duration, ranked notices, top flows and po
     assert.equal(o.flows.exporters.top[0].ip, '10.255.0.1');
     assert.equal(o.flows.exporters.top[0].devId, ok, 'an exporter that is a polled device says which');
     assert.equal(o.flows.exporters.silent[0].devId, null);
+
+    // traffic over the hour: totals, and the biggest applications with their share
+    assert.equal(o.flows.traffic.bytes, 9_001_000); assert.equal(o.flows.traffic.flows, 2);
+    assert.equal(o.flows.traffic.apps.length, 1); assert.match(o.flows.traffic.apps[0].name, /443/);
+    assert.ok(Math.abs(o.flows.traffic.apps[0].share - 1) < 1e-9);
+    assert.deepEqual(o.flows.anomalies, { ttlExpired: 0, qosChanged: 0 });
 
     // busiest ports: the uplink first, with its alias
     assert.equal(o.ports.busiest[0].name, 'Gi0/1'); assert.equal(o.ports.busiest[0].alias, 'WAN uplink'); assert.equal(o.ports.busiest[0].util, 96);

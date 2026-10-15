@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildNotices, downDevices, exporterSummary, impact, EXPORTER_STALE_MS, type DeviceState, type NoticeInput } from '../src/overview.js';
+import { buildNotices, downDevices, exporterSummary, impact, verdict, EXPORTER_STALE_MS, type DeviceState, type NoticeInput } from '../src/overview.js';
 import type { OvInput } from '../web/views/overview_logic.js';
 
 const NOW = Date.UTC(2026, 9, 15, 17, 0, 0);
@@ -99,4 +99,26 @@ test('exporters: the ones silent for more than five minutes are called out, long
   assert.deepEqual(s.silent.map(x => x.ip), ['d', 'c']);
   assert.equal(s.silent[0]!.silentMs, HOUR);
   assert.deepEqual(exporterSummary([], NOW), { total: 0, active: 0, silent: [] });
+});
+
+const ON = { flow: true, snmp: true };
+const v0 = { down: 0, bad: 0, warn: 0, silentExporters: 0, collect: ON };
+
+test('verdict: nothing wrong says so', () => {
+  assert.deepEqual(verdict(v0), { level: 'ok', headline: 'Everything looks healthy' });
+});
+
+test('verdict: a down device or a problem makes it bad, and the headline lists what is wrong in order of seriousness', () => {
+  assert.deepEqual(verdict({ ...v0, down: 1 }), { level: 'bad', headline: '1 SNMP device not responding' });
+  assert.deepEqual(verdict({ ...v0, down: 2, bad: 3, warn: 8 }), { level: 'bad', headline: '2 SNMP devices not responding, 3 problems and 8 warnings' });
+  assert.equal(verdict({ ...v0, bad: 1 }).level, 'bad');
+  assert.equal(verdict({ ...v0, bad: 1 }).headline, '1 problem');
+});
+
+test('verdict: warnings, a quiet exporter or paused collection make it a warning, never a problem', () => {
+  assert.deepEqual(verdict({ ...v0, warn: 1 }), { level: 'warn', headline: '1 warning' });
+  assert.deepEqual(verdict({ ...v0, silentExporters: 2 }), { level: 'warn', headline: '2 flow exporters gone quiet' });
+  assert.deepEqual(verdict({ ...v0, collect: { flow: false, snmp: true } }), { level: 'warn', headline: 'Flow collection is paused' });
+  assert.deepEqual(verdict({ ...v0, collect: { flow: true, snmp: false } }), { level: 'warn', headline: 'SNMP polling is paused' });
+  assert.deepEqual(verdict({ ...v0, collect: { flow: false, snmp: false } }), { level: 'warn', headline: 'Data collection is paused' });
 });

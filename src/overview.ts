@@ -94,3 +94,34 @@ export function exporterSummary(list: ExporterState[], now: number): { total: nu
   const silent = list.filter(e => now - e.lastSeen > EXPORTER_STALE_MS).map(e => ({ ...e, silentMs: now - e.lastSeen })).sort((a, b) => b.silentMs - a.silentMs);
   return { total: list.length, active: list.length - silent.length, silent };
 }
+
+export interface VerdictInput {
+  /** SNMP devices that are not answering. */
+  down: number;
+  /** Notices about devices that are answering (not the "not responding" ones), by level. */
+  bad: number; warn: number;
+  /** Flow exporters that have gone quiet. */
+  silentExporters: number;
+  collect: { flow: boolean; snmp: boolean };
+}
+export interface Verdict { level: 'ok' | 'warn' | 'bad'; headline: string }
+
+const count = (n: number, one: string, many = one + 's'): string => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The one-line answer to "is the network OK?", worded so the first thing read says what is wrong.
+ * A device that is down or a problem is "bad"; warnings, a quiet exporter or paused collection are "warn".
+ */
+export function verdict(v: VerdictInput): Verdict {
+  const parts: string[] = [];
+  if (v.down) parts.push(`${count(v.down, 'SNMP device')} not responding`);
+  if (v.bad) parts.push(count(v.bad, 'problem'));
+  if (v.warn) parts.push(count(v.warn, 'warning'));
+  if (v.silentExporters) parts.push(`${count(v.silentExporters, 'flow exporter')} gone quiet`);
+  if (!v.collect.flow && !v.collect.snmp) parts.push('data collection is paused');
+  else if (!v.collect.flow) parts.push('flow collection is paused');
+  else if (!v.collect.snmp) parts.push('SNMP polling is paused');
+  if (!parts.length) return { level: 'ok', headline: 'Everything looks healthy' };
+  const text = parts.length === 1 ? parts[0]! : parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
+  return { level: v.down || v.bad ? 'bad' : 'warn', headline: text.charAt(0).toUpperCase() + text.slice(1) };
+}

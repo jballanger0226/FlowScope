@@ -232,8 +232,23 @@ button.tr { cursor: pointer; } button.tr:hover { background: var(--field); } but
 /* overview (home page) */
 .ovgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 16px; align-items: start; }
 .ovbox { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.ovhead { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-.ovsub { font-size: 12px; }
+.ovhead { display: flex; flex-direction: column; gap: 4px; }
+.ovdesc { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); max-width: 72ch; }
+.ovsec { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-top: 6px; }
+.ovsubhead { font-size: 12.5px; }
+.ovdev { font-size: 12px; color: var(--muted); }
+.ovcount { font-size: 18px; flex: none; }
+.ovbtn[disabled] { cursor: default; opacity: .75; }
+.ovbtn[disabled]:hover { background: var(--field); }
+.verdict { display: flex; align-items: center; gap: 12px; font-size: 26px; line-height: 1.25; }
+.verdict .dot { width: 14px; height: 14px; flex: none; }
+.verdict.bad { color: var(--bad-text, var(--bad)); } .verdict.warn { color: var(--warn); } .verdict.ok { color: var(--ok); }
+.ovtiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.ovtile { display: flex; flex-direction: column; gap: 3px; padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--line2); border-radius: 10px; min-width: 0; }
+.ovtile.ok { border-left-color: var(--ok); } .ovtile.warn { border-left-color: var(--warn); } .ovtile.bad { border-left-color: var(--bad); }
+.ovtlabel { font-size: 12px; color: var(--muted); font-weight: 500; }
+.ovtvalue { font-size: 20px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.ovtsub { font-size: 12.5px; color: var(--muted); }
 .ovfoot { margin-top: auto; }
 .ovlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .ovitem { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; min-width: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
