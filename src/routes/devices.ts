@@ -3,7 +3,9 @@ import { HttpError } from '../server/http.js';
 import { DeviceError } from '../snmp/devices.js';
 import { CredError, type CredInput } from '../snmp/creds.js';
 import { TargetPolicy } from '../snmp/allowed.js';
-import { int, str } from './util.js';
+import { attachment, int, str, stamp } from './util.js';
+import { runChecks, cleanOid } from '../snmp/diagnose.js';
+import { WalkJobs, WalkBusy, jobView, filterRows, exportRows, EXPORT_FORMATS, type ExportFormat } from '../snmp/walkjobs.js';
 
 /** Turns the service-level errors into HTTP errors with the right status. */
 async function guard<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -104,6 +106,78 @@ export function registerDevices(app: App): void {
       app.log.audit(who(c), `Read host tables from ${d.name}: ${r.macs} MAC addresses, ${r.arp} ARP entries, ${r.neighbors} neighbours`);
       c.json({ ...r, device: app.devices.list().find(x => x.id === id) });
     } catch (e) { throw new HttpError(502, (e as Error).message); } finally { cl.close(); }
+  });
+
+  /* ---- diagnostics: what the device publishes, and a read-only look at one OID ---- */
+  const busy = new Set<number>();   // one diagnostic at a time per device, so a click-happy user cannot hammer a switch
+  const withDevice = async <T>(c: { params: Record<string, string>; user(): { role: string } }, fn: (d: NonNullable<ReturnType<typeof app.devices.row>>, cl: ReturnType<typeof app.devices.open>) => Promise<T>): Promise<T> => {
+    const id = int(c.params.id, 0, 0, 1e9);
+    const d = app.devices.row(id);
+    if (!d) throw new HttpError(404, 'No such device');
+    checkTarget(c, d.ip);
+    if (busy.has(id)) throw new HttpError(429, 'A check or walk is already running on this device. Wait for it to finish.');
+    busy.add(id);
+    const cl = app.devices.open(d);
+    try { return await fn(d, cl); } finally { cl.close(); busy.delete(id); }
+  };
+
+  w.post('/api/devices/:id/check', 'snmp', async c => {
+    const r = await withDevice(c, async (d, cl) => {
+      try { await cl.get(['1.3.6.1.2.1.1.2.0']); } catch (e) { throw new HttpError(502, (e as Error).message); }
+      const checks = await runChecks(cl, { role: d.role ?? 'device', cisco: (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.') });
+      app.log.audit(who(c), `Checked what ${d.name} publishes over SNMP`);
+      return { device: d.name, checkedAt: Date.now(), checks };
+    });
+    c.json(r);
+  });
+
+  // A walk of the whole device (or any part of it) runs in the background and is read back a page at a time, because a switch has
+  // tens of thousands of rows. Reads only: GET and GETBULK with the device's own credential. The OID and device are recorded.
+  const walks = new WalkJobs();
+  const jobOf = (c: { params: Record<string, string>; user(): { role: string } }) => {
+    const id = int(c.params.id, 0, 0, 1e9), d = app.devices.row(id);
+    if (!d) throw new HttpError(404, 'No such device');
+    checkTarget(c, d.ip);
+    const j = walks.get(c.params.jid ?? '');
+    if (!j || j.devId !== id) throw new HttpError(404, 'That walk has expired. Start it again.');
+    return j;
+  };
+
+  w.post('/api/devices/:id/walks', 'snmp', async c => {
+    const b = await c.body<{ oid?: string }>(1000);
+    const text = str(b.oid, 300).trim();
+    const oid = text === '' ? '' : cleanOid(text);
+    if (oid === null) throw new HttpError(400, 'Enter a numeric OID such as 1.0.8802.1.1.2.1.4 (a leading dot is fine), or leave it blank to walk everything.');
+    const id = int(c.params.id, 0, 0, 1e9), d = app.devices.row(id);
+    if (!d) throw new HttpError(404, 'No such device');
+    checkTarget(c, d.ip);
+    if (busy.has(id)) throw new HttpError(429, 'A check is running on this device. Wait for it to finish.');
+    let j;
+    try { j = walks.start({ id, name: d.name, ip: d.ip }, app.devices.open(d), oid, who(c)); }
+    catch (e) { if (e instanceof WalkBusy) throw new HttpError(429, e.message); throw e; }
+    app.log.audit(who(c), `Started an SNMP walk of ${oid ? oid : 'the whole tree'} on ${d.name}`);
+    c.json({ job: jobView(j) }, 202);
+  });
+
+  // Status, plus one page of rows when asked: ?offset=0&limit=100&q=filter words. limit=0 returns the status alone.
+  w.get('/api/devices/:id/walks/:jid', 'snmp', c => {
+    const j = jobOf(c);
+    const limit = int(c.query.get('limit'), 100, 0, 500), offset = int(c.query.get('offset'), 0, 0, 1e9);
+    const q = str(c.query.get('q') ?? '', 200);
+    const matched = limit ? filterRows(j.rows, q) : j.rows;
+    c.json({ job: jobView(j), matched: matched.length, offset, rows: limit ? matched.slice(offset, offset + limit).map(r => ({ oid: r[0], type: r[1], text: r[2].length > 400 ? r[2].slice(0, 400) + '…' : r[2] })) : [] });
+  });
+  w.post('/api/devices/:id/walks/:jid/cancel', 'snmp', c => { const j = jobOf(c); walks.cancel(j.id); c.json({ job: jobView(j) }); });
+
+  w.get('/api/devices/:id/walks/:jid/export', 'snmp', c => {
+    const j = jobOf(c);
+    const fmt = (c.query.get('format') ?? 'txt') as ExportFormat;
+    if (!EXPORT_FORMATS.includes(fmt)) throw new HttpError(400, 'format must be one of ' + EXPORT_FORMATS.join(', '));
+    const q = str(c.query.get('q') ?? '', 200);
+    const rows = filterRows(j.rows, q);
+    const out = exportRows(j, rows, fmt, q);
+    app.log.audit(who(c), `Exported ${rows.length} rows of an SNMP walk of ${j.device} as ${fmt}`);
+    attachment(c, `snmpwalk-${j.device.replace(/[^\w.-]+/g, '_').slice(0, 60)}-${stamp()}.${out.ext}`, out.type, out.body);
   });
 
   w.del('/api/devices/:id', 'snmp', async c => {

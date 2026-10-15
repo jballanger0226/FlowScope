@@ -55,6 +55,13 @@ function convert(vb: any): VarBind {
 }
 const isMissing = (t: number) => t === snmp.ObjectType.NoSuchObject || t === snmp.ObjectType.NoSuchInstance || t === snmp.ObjectType.EndOfMibView;
 
+/** Orders two dotted OIDs arc by arc, so 1.3.6.1.2 comes before 1.3.6.1.10. */
+export function compareOid(a: string, b: string): number {
+  const x = a.split('.'), y = b.split('.');
+  for (let i = 0; i < Math.min(x.length, y.length); i++) { const d = Number(x[i]) - Number(y[i]); if (d) return d < 0 ? -1 : 1; }
+  return x.length === y.length ? 0 : x.length < y.length ? -1 : 1;
+}
+
 export class SnmpError extends Error {
   constructor(message: string, readonly kind: 'timeout' | 'auth' | 'error' = 'error') { super(message); }
 }
@@ -122,6 +129,34 @@ export class SnmpClient {
       };
       this.s.subtree(oid, maxRep, feed, (err: Error | null) => { if (err) reject(classify(err)); else { void truncated; resolve(out); } });
     });
+  }
+
+  /**
+   * Walks a subtree one GETBULK batch at a time (GETNEXT for SNMPv1) and hands each batch to `onRows`, so the caller can store, count or stop
+   * without the whole tree being held here. `onRows` returns true to stop. A leaf OID is delivered as itself. Resolves with why it ended:
+   * 'done' (end of the subtree), 'stopped' (the caller said so) or 'disorder' (the device went backwards, which would loop forever).
+   */
+  async walkEach(oid: string, onRows: (rows: VarBind[]) => boolean | void, maxRep = 20): Promise<'done' | 'stopped' | 'disorder'> {
+    const one = oid ? await this.get([oid]) : new Map<string, VarBind>();
+    const leaf = one.get(oid);
+    if (leaf) { onRows([leaf]); return 'done'; }
+    const prefix = oid ? oid + '.' : '';
+    let cur = oid || '1.0';   // an empty OID is the whole tree: start just before 1.0.8802 (LLDP), the lowest OID a device is likely to have
+    for (;;) {
+      const vbs = await new Promise<any[]>((resolve, reject) => {
+        const cb = (err: Error | null, v: any[]) => err ? reject(classify(err)) : resolve(v ?? []);
+        if (this.cred.version === 'v1') this.s.getNext([cur], cb); else this.s.getBulk([cur], 0, maxRep, cb);
+      });
+      const batch: VarBind[] = [];
+      let end = false;
+      for (const vb of vbs) {
+        if (snmp.isVarbindError(vb) || isMissing(vb.type) || !String(vb.oid).startsWith(prefix)) { end = true; break; }
+        if (compareOid(vb.oid, cur) <= 0) { if (batch.length) onRows(batch); return 'disorder'; }
+        batch.push(convert(vb)); cur = vb.oid;
+      }
+      if (batch.length && onRows(batch) === true) return 'stopped';
+      if (end || !batch.length) return 'done';
+    }
   }
 
   /** Walks a column and returns map of the index suffix to value. */
