@@ -9,11 +9,13 @@ import { registerDevices } from './devices.js';
 import { registerAdmin } from './admin.js';
 import { registerSaml } from './saml.js';
 import { registerSystem } from './system.js';
+import { registerOverview } from './overview.js';
 
 export function registerRoutes(app: App): void {
   registerAuth(app);
   registerSaml(app);
   registerSystem(app);
+  registerOverview(app);
   registerFlows(app);
   registerLinks(app);
   registerPortFlows(app);

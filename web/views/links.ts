@@ -68,11 +68,12 @@ interface ResHist { step: number; tier: 'raw' | 'h1'; points: ResPoint[]; restar
 const resHists = new Map<string, ResHist>();
 type DevTab = 'overview' | 'interfaces' | 'hardware' | 'network' | 'wifi';
 let devTab: DevTab = 'overview';
+const DEV_TABS: DevTab[] = ['overview', 'interfaces', 'hardware', 'network', 'wifi'];
 let resHistError = ''; let resHistLoading = false; let resRange = '6h'; let resOpen = true;
 const RES_RANGES: [string, string][] = [['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['3d', 'Last 3 days'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
 let series: SeriesRes | null = null; let seriesError = ''; let seriesLoading = false;
 let streams: StreamRow[] = []; let streamsTotal = 0; let streamsLoading = false;
-let pendingName: { dev: string; ifn: string } | null = null;
+let pendingName: { dev: string; ifn: string; tab?: DevTab; section?: 'traffic' | 'quality' } | null = null;
 let timer: number | undefined;
 
 const GRAPH_RANGES: [string, string][] = [['15m', 'Last 15 minutes'], ['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days']];
@@ -81,7 +82,8 @@ const THRESHOLDS: [string, string][] = [['0.5', '0.5%'], ['1', '1%'], ['2', '2%'
 export function enter(p: URLSearchParams): void {
   const d = p.get('dev'), i = p.get('if');
   if (d) {
-    pendingName = { dev: d, ifn: i ?? '' };
+    const t = p.get('tab'), sec = p.get('section');
+    pendingName = { dev: d, ifn: i ?? '', tab: DEV_TABS.includes(t as DevTab) ? (t as DevTab) : undefined, section: sec === 'traffic' || sec === 'quality' ? sec : undefined };
     if (data) resolvePending();
   }
   void load();
@@ -103,12 +105,13 @@ async function load(quiet = false): Promise<void> {
 
 function resolvePending(): void {
   if (!data || !pendingName) return;
-  const { dev, ifn } = pendingName; pendingName = null;
+  const { dev, ifn, tab, section } = pendingName; pendingName = null;
   const lc = dev.toLowerCase();
   const d = data.devices.find(x => x.name.toLowerCase() === lc || x.ip === dev || String(x.id) === dev) ?? data.devices.find(x => x.name.toLowerCase().includes(lc));
   if (!d) return;
   const itf = ifn ? d.interfaces.find(i => i.name.toLowerCase() === ifn.toLowerCase() || String(i.ifIndex) === ifn) : d.interfaces.find(i => i.flagged) ?? d.interfaces[0];
-  select_(d.id, itf?.ifIndex ?? d.interfaces[0]?.ifIndex ?? 0, ifn ? 'interfaces' : undefined);
+  if (section) ifTab = section;
+  select_(d.id, itf?.ifIndex ?? d.interfaces[0]?.ifIndex ?? 0, tab ?? (ifn ? 'interfaces' : undefined));
 }
 
 let prevDev = 0;
