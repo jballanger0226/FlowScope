@@ -2,6 +2,7 @@ import type { App } from '../app.js';
 import { registerAuth } from './auth.js';
 import { registerFlows } from './flows.js';
 import { registerLinks } from './links.js';
+import { registerPortFlows } from './portflows.js';
 import { registerReports } from './reports.js';
 import { registerStorage } from './storage.js';
 import { registerDevices } from './devices.js';
@@ -15,6 +16,7 @@ export function registerRoutes(app: App): void {
   registerSystem(app);
   registerFlows(app);
   registerLinks(app);
+  registerPortFlows(app);
   registerReports(app);
   registerStorage(app);
   registerDevices(app);

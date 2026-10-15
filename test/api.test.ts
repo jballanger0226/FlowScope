@@ -186,6 +186,27 @@ test('HTTP API: auth, roles, CSRF, flows, devices, storage, admin, AAA', { timeo
     assert.equal((await ro.get('/api/streams?range=1h&q=hop:rtr-api')).json.rows.length, 1);
     assert.equal((await ro.get('/api/streams?range=zz')).status, 400);
     assert.equal((await ro.get('/api/streams?range=1h&q=port:99')).json.rows.length, 0);
+    // flows by port: one port of one device, direction, top-N. The two records above are the two directions of ONE stream
+    // (a stream is listed once if any of its records crossed the port), entering port 1 one way and leaving it the other.
+    const ps = await ro.get('/api/ports/sources');
+    assert.equal(ps.status, 200, ps.text); assert.deepEqual(ps.json.counts, [25, 50, 100, 200, 500]);
+    assert.ok(ps.json.devices.some((d: any) => d.id === devId), 'the polled device is offered');
+    const pf = (q: string) => ro.get(`/api/ports/flows?range=1h&limit=25&${q}`);
+    const all = await pf(`dev=${devId}&if=0`);
+    assert.equal(all.status, 200, all.text); assert.equal(all.json.total, 1, 'all ports of the device'); assert.equal(all.json.rows[0].app, 'https');
+    assert.equal(all.json.device.name, 'rtr-api'); assert.equal(all.json.port, null);
+    assert.equal((await pf(`dev=${devId}&if=1`)).json.total, 1, 'port 1 is entered by one record and left by the other');
+    assert.equal((await pf(`dev=${devId}&if=1&dir=in`)).json.total, 1);
+    assert.equal((await pf(`dev=${devId}&if=1&dir=out`)).json.total, 1);
+    assert.equal((await pf(`dev=${devId}&if=2&dir=out`)).json.total, 1);
+    assert.equal((await pf(`dev=${devId}&if=9`)).json.total, 0, 'a port nothing crossed');
+    assert.equal((await pf(`dev=${devId}&if=1&sort=pkts`)).status, 200);
+    assert.equal((await pf(`exporter=127.0.0.1&if=2&dir=out`)).status, 400, 'a polled device is chosen by id, not by address');
+    assert.equal((await pf(`exporter=203.0.113.99&if=2`)).json.total, 0, 'an exporter that is not polled can be named by address');
+    assert.equal((await ro.get(`/api/ports/flows?range=1h&dev=${devId}&limit=77`)).status, 400, 'only 25, 50, 100, 200 or 500');
+    assert.equal((await pf('dev=99999')).status, 404);
+    assert.equal((await pf('if=1')).status, 400, 'a device or exporter is required');
+    assert.equal((await anon.get(`/api/ports/flows?dev=${devId}&limit=25`)).status, 401);
     // report + exports
     const rep = await ro.post('/api/reports', { range: '1h', dims: ['srcIp', 'app'], topN: 5 });
     assert.equal(rep.status, 200, rep.text); assert.equal(rep.json.tier, 'raw'); assert.ok(rep.json.totals.bytes > 0);

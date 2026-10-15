@@ -18,6 +18,8 @@ export type Cond =
   | { kind: 'mac'; text: string }
   | { kind: 'exporter'; ips: string[] }
   | { kind: 'outif'; ips: string[]; ifIndex: number }
+  /** Records an exporter (one of `ips`) saw entering and/or leaving one interface. An ifIndex of 0 means any interface of that exporter. Needs raw data. */
+  | { kind: 'ifport'; ips: string[]; ifIndex: number; dir: 'in' | 'out' | 'either' }
   | { kind: 'qos'; mode: 'changed' | 'unchanged' }
   | { kind: 'dscp'; values: number[] }
   /** Streams whose TTL ran out before reaching the destination (mode 'expired'), or the ones that did not (mode 'ok'). Needs raw data. */

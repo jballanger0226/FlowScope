@@ -236,6 +236,16 @@ export class SqliteOps {
       case 'mac': { const p = '%' + likeEsc(c.text.toLowerCase()) + '%'; args.push(p, p); return `(${t.srcMac} LIKE ? ESCAPE '\\' OR ${t.dstMac} LIKE ? ESCAPE '\\')`; }
       case 'exporter': if (!c.ips.length) return '0'; args.push(...c.ips); return `${t.exporter} IN (${c.ips.map(() => '?').join(',')})`;
       case 'outif': if (!t.outIf || !c.ips.length) return t.outIf ? '0' : '1'; args.push(...c.ips, c.ifIndex); return `(${t.exporter} IN (${c.ips.map(() => '?').join(',')}) AND ${t.outIf} = ?)`;
+      case 'ifport': {
+        if (!c.ips.length) return '0';
+        args.push(...c.ips);
+        const exp = `${t.exporter} IN (${c.ips.map(() => '?').join(',')})`;
+        if (!c.ifIndex) return exp;
+        if (!t.outIf) return exp;   // the rolled-up tiers keep no interfaces; the page only searches raw data
+        if (c.dir === 'in') { args.push(c.ifIndex); return `(${exp} AND ${t.inIf} = ?)`; }
+        if (c.dir === 'out') { args.push(c.ifIndex); return `(${exp} AND ${t.outIf} = ?)`; }
+        args.push(c.ifIndex, c.ifIndex); return `(${exp} AND (${t.inIf} = ? OR ${t.outIf} = ?))`;
+      }
       case 'qos': return '1';
       case 'ttl': {
         if (!t.rawTtl) throw new Error('The TTL filter needs flow records. Pick the raw data tier.');

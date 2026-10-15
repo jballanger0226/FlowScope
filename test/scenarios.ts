@@ -52,6 +52,30 @@ export function scenarios(label: string, mk: Mk): void {
     } finally { await t.done(); }
   });
 
+  test(label + ': streams through one port of one device, entering, leaving or either', async () => {
+    const t = await mk();
+    try {
+      await t.s.insertFlows([
+        rec({ srcIp: '10.1.0.1', inIf: 3, outIf: 7, bytes: 100 }),                                   // enters 3, leaves 7
+        rec({ srcIp: '10.1.0.2', inIf: 7, outIf: 3, bytes: 900 }),                                   // enters 7, leaves 3
+        rec({ srcIp: '10.1.0.3', inIf: 5, outIf: 0, bytes: 500 }),                                   // an input-only half record on 5
+        rec({ srcIp: '10.1.0.4', inIf: 0, outIf: 5, bytes: 300 }),                                   // an output-only half record on 5
+        rec({ srcIp: '10.1.0.5', exporter: '10.255.0.9', inIf: 3, outIf: 7, bytes: 700 })            // another device, same port numbers
+      ]);
+      const dev = ['10.255.0.1'];
+      const n = async (ifIndex: number, dir: 'in' | 'out' | 'either', ips = dev) => (await t.s.searchStreams(q([{ kind: 'ifport', ips, ifIndex, dir }], { sort: 'bytes' }))).rows.map(r => r.srcIp);
+      assert.deepEqual(await n(3, 'either'), ['10.1.0.2', '10.1.0.1']);   // biggest first; the other device is left out
+      assert.deepEqual(await n(3, 'in'), ['10.1.0.1']);
+      assert.deepEqual(await n(3, 'out'), ['10.1.0.2']);
+      assert.deepEqual(await n(5, 'either'), ['10.1.0.3', '10.1.0.4']);   // half records match on the side they report
+      assert.deepEqual(await n(5, 'in'), ['10.1.0.3']);
+      assert.deepEqual((await n(0, 'either')).sort(), ['10.1.0.1', '10.1.0.2', '10.1.0.3', '10.1.0.4']);   // 0 = every port of the device
+      assert.deepEqual(await n(3, 'either', ['10.255.0.9']), ['10.1.0.5']);
+      assert.deepEqual(await n(3, 'either', []), []);
+      assert.equal((await t.s.searchStreams(q([{ kind: 'ifport', ips: dev, ifIndex: 0, dir: 'either' }], { sort: 'bytes', limit: 2 }))).rows.length, 2);   // the top-N limit
+    } finally { await t.done(); }
+  });
+
   test(label + ': stream search tokens', async () => {
     const t = await mk();
     try {
