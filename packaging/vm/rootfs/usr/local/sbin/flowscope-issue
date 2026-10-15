@@ -1,0 +1,45 @@
+#!/bin/sh
+# Writes the notice shown above the console login prompt: where the web console is and, until they have been dealt with, the one-time root
+# password and the web admin password. Runs at every boot once the network has an address. The file is readable by root only, because
+# it can contain passwords; the login program (agetty) runs as root and still shows it.
+set -u
+ETC="${FLOWSCOPE_ETC:-/etc/flowscope}"
+DIR="${FLOWSCOPE_ISSUE_DIR:-/etc/issue.d}"
+OUT="$DIR/60-flowscope.issue"
+CREDS="${FLOWSCOPE_CREDS_FILE:-/root/flowscope-admin-password.txt}"
+WAIT="${FLOWSCOPE_ISSUE_WAIT:-90}"
+
+ip=""; i=0
+while [ "$i" -lt "$WAIT" ]; do
+  ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)"
+  [ -n "$ip" ] && break
+  sleep 2; i=$((i + 1))
+done
+[ -n "$ip" ] || ip="(no address yet: check the network adapter and DHCP)"
+
+umask 077
+mkdir -p "$DIR"
+tmp="$OUT.new"
+{
+  printf '\n  FlowScope appliance\n'
+  printf '    Web console:  https://%s/\n' "$ip"
+  if [ -f "$CREDS" ]; then
+    printf '    Sign in as:   admin   password: %s\n' "$(sed -n 's/^ *password: *//p' "$CREDS" | head -n1)"
+    printf '                  (Delete %s once you have saved it; this line goes away at the next boot.)\n' "$CREDS"
+  else
+    printf '    Sign in as:   admin\n'
+  fi
+  # the one-time root password, only while root has not yet chosen a new one
+  if [ -f "$ETC/.root-temp-pw" ]; then
+    if LC_ALL=C chage -l root 2>/dev/null | grep -qi 'password must be changed'; then
+      printf '    Console login: root   one-time password: %s   (you will be asked to change it)\n' "$(cat "$ETC/.root-temp-pw")"
+    else
+      rm -f "$ETC/.root-temp-pw"
+    fi
+  fi
+  printf '    Flow export:  send NetFlow v5/v9 or IPFIX to this address, UDP 2055 or 4739\n\n'
+} > "$tmp"
+mv -f "$tmp" "$OUT"
+# agetty reads the notice when it draws the prompt, which can be before the network was up: ask it to draw again
+if [ -z "${FLOWSCOPE_NO_RELOAD:-}" ]; then /sbin/agetty --reload >/dev/null 2>&1 || true; fi
+exit 0

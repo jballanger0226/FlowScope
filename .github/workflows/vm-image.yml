@@ -1,0 +1,121 @@
+name: VM appliance (VMware OVA, Nutanix qcow2)
+# Builds the FlowScope virtual machine appliance (docs/deployment.md): an .ova for VMware ESXi / vCenter and a .qcow2 for Nutanix AHV.
+#   push to main  -> workflow artifact, and the rolling pre-release "vm-latest"
+#   tag v*        -> a normal GitHub release with the images attached
+#   manual run    -> workflow artifact only
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "web/**"
+      - "tools/**"
+      - "package.json"
+      - "packaging/vm/**"
+      - "packaging/lxc-template/**"
+      - "packaging/proxmox/install.sh"
+      - "packaging/linux/**"
+      - ".github/workflows/vm-image.yml"
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "packaging/vm/**"
+      - ".github/workflows/vm-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  image:
+    # Two images: the default with ClickHouse, and one without it (embedded SQLite) for small sites.
+    strategy:
+      fail-fast: false
+      matrix:
+        storage: [clickhouse, sqlite]
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      STORAGE_BACKEND: ${{ matrix.storage }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the disk tools and QEMU
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-utils qemu-system-x86 ovmf gdisk dosfstools e2fsprogs cloud-image-utils genisoimage
+      - name: Build the images
+        run: sudo env "PATH=$PATH" GIT_SHA="$GITHUB_SHA" packaging/vm/build.sh
+      - name: Check the OVA (layout, manifest, disk)
+        run: |
+          set -euo pipefail
+          cd vm-out
+          ova="$(ls *.ova)"; mkdir -p x && tar -xf "$ova" -C x
+          # a VMware OVA is ovf, then mf, then the disk
+          [ "$(tar -tf "$ova" | sed -n 1p)" = "$(ls x/*.ovf | xargs -n1 basename)" ]
+          (cd x && while read -r line; do f="${line#SHA256(}"; f="${f%%)*}"; h="${line##*= }"; echo "$h  $f"; done < ./*.mf | sha256sum -c -)
+          qemu-img info x/*.vmdk | tee /dev/stderr | grep -q "file format: vmdk"
+          # the disk inside the OVA is the same disk as the qcow2: read both back as raw and compare
+          qemu-img convert -O raw x/*.vmdk x/from-ova.raw
+          qemu-img convert -O raw ./*.qcow2 x/from-qcow2.raw
+          cmp x/from-ova.raw x/from-qcow2.raw
+          rm -rf x
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flowscope-vm-${{ matrix.storage }}
+          path: vm-out/*
+          retention-days: 30
+
+      # Boots the qcow2 under QEMU, once with BIOS firmware and once with UEFI firmware (OVMF), on virtio hardware like AHV's and with an
+      # e1000 NIC, and checks that cloud-init, the first-boot service and FlowScope come up and the web console answers. The runner has KVM
+      # when it is available (fast); without it QEMU emulates the CPU, which works but is slow, so the wait is long.
+      # This proves the image boots and serves. It does not prove it on ESXi or AHV themselves.
+      - name: Smoke test (boot under QEMU, BIOS then UEFI)
+        run: |
+          set -euo pipefail
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; accel="-enable-kvm -cpu host"; wait_s=420; else accel="-cpu max"; wait_s=1500; fi
+          img="$(ls vm-out/*.qcow2)"
+          for fw in bios uefi; do
+            echo "::group::boot with $fw firmware"
+            cp "$img" "boot-$fw.qcow2"
+            fwargs=""
+            if [ "$fw" = uefi ]; then
+              cp /usr/share/OVMF/OVMF_VARS_4M.fd "vars-$fw.fd" 2>/dev/null || cp /usr/share/OVMF/OVMF_VARS.fd "vars-$fw.fd"
+              code=/usr/share/OVMF/OVMF_CODE_4M.fd; [ -f "$code" ] || code=/usr/share/OVMF/OVMF_CODE.fd
+              fwargs="-drive if=pflash,format=raw,readonly=on,file=$code -drive if=pflash,format=raw,file=vars-$fw.fd"
+            fi
+            # a cloud-init NoCloud seed disk puts a known SSH key and host name in, as AHV's or vCenter's customisation would
+            mkdir -p "seed-$fw"; printf 'instance-id: ci-%s\nlocal-hostname: flowscope-ci\n' "$fw" > "seed-$fw/meta-data"; printf '#cloud-config\n{}\n' > "seed-$fw/user-data"
+            cloud-localds "seed-$fw.img" "seed-$fw/user-data" "seed-$fw/meta-data" 2>/dev/null || genisoimage -quiet -output "seed-$fw.img" -volid cidata -joliet -rock "seed-$fw/user-data" "seed-$fw/meta-data"
+            # shellcheck disable=SC2086
+            qemu-system-x86_64 $accel -m 4096 -smp 2 -display none -serial "file:console-$fw.log" -daemonize -pidfile "qemu-$fw.pid" $fwargs \
+              -drive "file=boot-$fw.qcow2,if=virtio,format=qcow2" -drive "file=seed-$fw.img,if=virtio,format=raw,readonly=on" \
+              -nic user,model=e1000,hostfwd=tcp::18443-:443
+            ok=0
+            for i in $(seq 1 $((wait_s / 5))); do
+              if curl -ksf -o /dev/null https://localhost:18443/; then ok=1; break; fi
+              sleep 5
+            done
+            if [ "$ok" != 1 ]; then echo "--- console ---"; tail -n 120 "console-$fw.log" || true; kill "$(cat qemu-$fw.pid)" || true; exit 1; fi
+            echo "web console answers with $fw firmware"
+            grep -q "FlowScope appliance" "console-$fw.log" && echo "console shows the FlowScope login notice" || echo "note: login notice not found in the serial log (it is drawn on the VGA console and serial login)"
+            kill "$(cat qemu-$fw.pid)"; sleep 3
+            echo "::endgroup::"
+          done
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "FlowScope $GITHUB_REF_NAME" --generate-notes || gh release view "$GITHUB_REF_NAME" >/dev/null
+            gh release upload "$GITHUB_REF_NAME" vm-out/* --clobber
+          else
+            gh release view vm-latest >/dev/null 2>&1 || gh release create vm-latest --target "$GITHUB_SHA" --prerelease \
+              --title "VM appliance (latest main)" --notes "Rolling build of the VM appliance from the main branch." || gh release view vm-latest >/dev/null
+            gh release upload vm-latest vm-out/* --clobber
+            gh release edit vm-latest --notes "Rolling build of the VM appliance from the main branch (commit ${GITHUB_SHA::7}). flowscope-vm_*.ova is for VMware ESXi / vCenter and flowscope-vm_*.qcow2 for Nutanix AHV; both include ClickHouse (the default). flowscope-vm-sqlite_* has none and stores flow records in the embedded SQLite file. See docs/deployment.md."
+          fi

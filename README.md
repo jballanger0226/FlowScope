@@ -87,6 +87,14 @@ Everything can be done in the Proxmox web interface, without a shell:
 3. **Create CT**, choose that template (Debian 12, 2 cores, 4 GiB, 32 GiB disk is a good start; the template includes ClickHouse, which stores the flow records), start it, open **Console**, log in as `root`, and read the `admin` password from `/root/flowscope-admin-password.txt`.
 4. Open `https://<container address>/`. Nothing needs to be started by hand. If the page does not load, run `flowscope-ctl doctor` in the console and see the troubleshooting part of the guide below (the container's **Nesting** option should be ticked).
 
+### VMware ESXi, Nutanix AHV and Kubernetes
+
+* **VMware ESXi / vSphere:** deploy the ready-made `flowscope-vm_<version>_amd64.ova` (Debian 12, FlowScope and ClickHouse, VMware Tools, cloud-init) with **Deploy OVF Template**.
+* **Nutanix AHV:** upload `flowscope-vm_<version>_amd64.qcow2` in Prism (Image Configuration) and create a VM from it. The same image runs on KVM and OpenStack.
+* **Kubernetes** (VMware Tanzu, Nutanix Kubernetes Platform, any cluster): `kubectl apply -k packaging/kubernetes`, or `packaging/kubernetes/clickhouse` for ClickHouse storage.
+
+Both images are built by `.github/workflows/vm-image.yml` (releases page; `flowscope-vm-sqlite_*` leaves out ClickHouse). Steps and cluster notes, including why exporters need `externalTrafficPolicy: Local`: **[docs/deployment.md](docs/deployment.md)**.
+
 A walkthrough of each wizard tab, updating, backups and troubleshooting: **[docs/deployment.md](docs/deployment.md)**. The same document covers the command-line alternative (`packaging/proxmox/flowscope-lxc.sh`, which creates the container for you) and running the Docker image directly as an OCI application container on Proxmox VE 9.1 and newer.
 
 ### As a service
@@ -94,6 +102,9 @@ A walkthrough of each wizard tab, updating, backups and troubleshooting: **[docs
 | OS | How |
 | --- | --- |
 | Linux | `sudo packaging/linux/install.sh` (systemd unit, dedicated user, settings in `/etc/flowscope/flowscope.env`, data in `/var/lib/flowscope`; on Debian or Ubuntu it also installs ClickHouse, listening on 127.0.0.1 only; `sudo packaging/linux/install.sh --sqlite` skips ClickHouse entirely and uses SQLite) |
+| VMware ESXi / vSphere | the OVA (Deploy OVF Template), see [docs/deployment.md](docs/deployment.md) |
+| Nutanix AHV | the qcow2 image (Prism image service), see [docs/deployment.md](docs/deployment.md) |
+| Kubernetes | `kubectl apply -k packaging/kubernetes` |
 | Proxmox VE | CT template via the web interface (see above), or `packaging/proxmox/flowscope-lxc.sh` on the host; `packaging/proxmox/install.sh` is the installer both use. Without ClickHouse: the `debian-12-flowscope-sqlite_<version>_amd64.tar.zst` template, or `flowscope-lxc.sh --sqlite` |
 | macOS | `sudo packaging/macos/install.sh` (launchd daemon, data in `/Library/Application Support/FlowScope`, log `/var/log/flowscope.log`) |
 | Windows | elevated PowerShell: `.\packaging\windows\install.ps1` (scheduled task at boot as SYSTEM, firewall rules, settings in `%ProgramData%\FlowScope\flowscope.env`) |

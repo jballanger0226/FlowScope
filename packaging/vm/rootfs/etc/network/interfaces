@@ -1,0 +1,7 @@
+# Loopback only. cloud-init writes the settings of the real adapter to /etc/network/interfaces.d/ at boot: what the platform gave it,
+# or DHCP on the first adapter when it gave nothing. Edit /etc/network/interfaces.d/50-cloud-init (and set
+# "network: {config: disabled}" in /etc/cloud/cloud.cfg.d/) to keep a static address of your own.
+source /etc/network/interfaces.d/*
+
+auto lo
+iface lo inet loopback
