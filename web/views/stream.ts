@@ -4,6 +4,7 @@ import { go } from '../state.js';
 import { btn, chip, note, seg, spinner, status as statusEl } from '../components.js';
 import { neighborLines, portLink, type Neighbor, type PortSource } from '../neighbors.js';
 import { bytes, clock, dur, ms, num, stamp, svcLabel } from '../util.js';
+import { hideTip, showTip } from '../tooltip.js';
 
 /** The "Following stream" panel: the path a stream took hop by hop, QoS and TTL findings, layers and activity. Shared by Flow explorer and Flows by port. */
 
@@ -222,7 +223,33 @@ function layers(d: Detail, r: { flags: number } | undefined, first: Hop | undefi
 function activity(d: Detail, f: Follower): VNode {
   const a = d.activity;
   const max = Math.max(1, ...a.fwd, ...a.rev);
-  const bars = (arr: number[], cls: string) => h('div', { class: 'act ' + cls, 'aria-hidden': 'true' }, arr.map((v, i) => h('span', { key: i, style: `height:${Math.max(1, (v / max) * 100)}%`, title: bytes(v) })));
+  const n = Math.max(1, a.fwd.length);
+  const slot = (a.t1 - a.t0) / n;
+  const sums = { '': d.totals.fwdBytes, rev: d.totals.revBytes };
+  const bars = (arr: number[], cls: '' | 'rev') => h('div', { class: 'act ' + cls, 'aria-hidden': 'true', onpointerleave: hideTip, onpointercancel: hideTip },
+    arr.map((v, i) => h('span', {
+      key: i, class: 'cell',
+      // The cell spans the full height so even a near-empty interval is easy to point at; the bar inside is the visible part.
+      onpointermove: (e: PointerEvent) => hoverBar(e, i),
+      onpointerdown: (e: PointerEvent) => hoverBar(e, i)
+    }, h('i', { style: `height:${Math.max(1, (v / max) * 100)}%` }))));
+  const hoverBar = (e: PointerEvent, i: number) => {
+    const el = e.currentTarget as HTMLElement;
+    const rev = !!el.parentElement?.classList.contains('rev');
+    const v = (rev ? a.rev : a.fwd)[i] ?? 0;
+    const total = sums[rev ? 'rev' : ''];
+    const s0 = a.t0 + i * slot, s1 = i === n - 1 ? a.t1 : s0 + slot;
+    showTip({
+      title: `${clock(s0)} → ${clock(s1)}`,
+      rows: [
+        { color: rev ? 'var(--warn)' : 'var(--accent)', label: rev ? 'Responder → initiator' : 'Initiator → responder', value: bytes(v) },
+        ...(v >= 1024 ? [{ label: 'Exact', value: `${num(v)} bytes` }] : []),
+        ...(total > 0 ? [{ label: 'Share of this direction', value: (v / total * 100 < 10 ? (v / total * 100).toFixed(1) : (v / total * 100).toFixed(0)) + '%' }] : []),
+        ...(slot > 0 ? [{ label: 'Average rate', value: bytes(v / (Math.max(1, s1 - s0) / 1000)) + '/s' }] : [])
+      ],
+      note: `Interval ${i + 1} of ${n} · ${dur(s1 - s0)} each`
+    }, e.clientX, e.clientY);
+  };
   return h('div', { class: 'layer' },
     h('div', { class: 'row', style: 'justify-content:space-between' }, h('b', null, 'Stream activity'), h('span', { class: 'muted mono', style: 'font-size:12px' }, `${clock(a.t0)} → ${clock(a.t1)}`)),
     h('div', { class: 'col', style: 'gap:6px;margin:10px 0' }, bars(a.fwd, ''), bars(a.rev, 'rev')),

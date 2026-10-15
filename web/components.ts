@@ -1,6 +1,7 @@
 import { h, type Child, type VNode } from './vdom.js';
 import { redraw } from './state.js';
-import { MAX_RANGE_DAYS, UNITS } from './util.js';
+import { MAX_RANGE_DAYS, UNITS, stamp } from './util.js';
+import { hideTip, showTip, type TipRow } from './tooltip.js';
 
 export type Kind = 'default' | 'primary' | 'ghost' | 'danger' | 'warn';
 const cls = (...a: (string | false | null | undefined)[]) => a.filter(Boolean).join(' ');
@@ -110,7 +111,7 @@ export interface Series { name: string; color: string; points: { t: number; v: n
 export const PALETTE = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)', 'var(--s6)', 'var(--s7)', 'var(--s8)'];
 
 /** A line chart drawn with SVG. Shaded bands mark time spans (events). */
-export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; fmtT: (t: number) => string; wide?: boolean }): VNode {
+export function lineChart(o: { title: string; unit: (v: number) => string; series: Series[]; from: number; to: number; yMax?: number; threshold?: number; bands?: { a: number; b: number }[]; aria: string; fmtT: (t: number) => string; /** Precise value text for the hover readout (defaults to unit) */ fmtV?: (v: number) => string; /** Full timestamp for the hover readout */ fmtFull?: (t: number) => string; wide?: boolean }): VNode {
   const W = o.wide ? 1100 : 520, H = 190, L = 64, R = 10, T = 8, B = 22;
   const all = o.series.flatMap(s => s.points.map(p => p.v));
   const maxV = o.yMax ?? Math.max(o.threshold ?? 0, ...all, 1e-9) * 1.1;
@@ -123,7 +124,82 @@ export function lineChart(o: { title: string; unit: (v: number) => string; serie
     h('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': o.aria, class: 'chartsvg', style: `aspect-ratio:${W}/${H}` },
       grid.map((g, i) => h('g', { key: 'g' + i }, h('line', { x1: L, x2: W - R, y1: y(g), y2: y(g), class: 'gridline' }), h('text', { x: L - 6, y: y(g) + 4, class: 'axis', 'text-anchor': 'end' }, o.unit(g)))),
       (o.bands ?? []).map((b, i) => h('rect', { key: 'b' + i, x: x(Math.max(o.from, b.a)), y: T, width: Math.max(2, x(Math.min(o.to, b.b)) - x(Math.max(o.from, b.a))), height: H - T - B, class: 'band' })),
-      o.threshold !== undefined ? h('line', { x1: L, x2: W - R, y1: y(o.threshold), y2: y(o.threshold), class: 'thr' }) : null,
+      o.threshold !== undefined ? h('line', { key: 'thr', x1: L, x2: W - R, y1: y(o.threshold), y2: y(o.threshold), class: 'thr' }) : null,
       o.series.map((s, i) => s.points.length ? h('polyline', { key: 's' + i, fill: 'none', style: `stroke:${s.color}`, 'stroke-width': 1.8, 'stroke-linejoin': 'round', points: s.points.map(p => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ') }) : null),
-      xt.map((t, i) => h('text', { key: 'x' + i, x: x(t), y: H - 6, class: 'axis', 'text-anchor': i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle' }, o.fmtT(t)))));
+      xt.map((t, i) => h('text', { key: 'x' + i, x: x(t), y: H - 6, class: 'axis', 'text-anchor': i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle' }, o.fmtT(t))),
+      // Hover tracking: a guide line and one dot per series that follow the pointer. They start hidden and are moved directly, not through a redraw.
+      h('line', { key: 'hl', class: 'hoverline', y1: T, y2: H - B, x1: L, x2: L, visibility: 'hidden' }),
+      o.series.map((s, i) => h('circle', { key: 'd' + i, class: 'hoverdot', r: 4, cx: L, cy: T, visibility: 'hidden', style: `stroke:${s.color};fill:var(--panel)` })),
+      h('rect', {
+        key: 'hz', class: 'hoverzone', x: L, y: T, width: W - L - R, height: H - T - B, fill: 'transparent',
+        onpointermove: (e: PointerEvent) => hoverChart(e, o, { W, L, R, x, y }),
+        onpointerdown: (e: PointerEvent) => hoverChart(e, o, { W, L, R, x, y }),
+        onpointerleave: (e: PointerEvent) => hoverOff(e),
+        onpointercancel: (e: PointerEvent) => hoverOff(e)
+      })));
+}
+
+type ChartOpts = Parameters<typeof lineChart>[0];
+
+/** Index of the point nearest to time t in a time-ordered list. */
+function nearest(pts: { t: number }[], t: number): number {
+  let lo = 0, hi = pts.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (pts[m].t < t) lo = m + 1; else hi = m; }
+  return lo > 0 && Math.abs(pts[lo - 1].t - t) <= Math.abs(pts[lo].t - t) ? lo - 1 : lo;
+}
+
+/** The usual time between samples, so a point far from the pointer (a gap in the data) is not reported as if it were here. */
+function typicalStep(pts: { t: number }[]): number {
+  if (pts.length < 2) return Infinity;
+  const d: number[] = [];
+  for (let i = 1; i < pts.length; i++) d.push(pts[i].t - pts[i - 1].t);
+  d.sort((a, b) => a - b);
+  return Math.max(1, d[d.length >> 1]);
+}
+
+function hoverChart(e: PointerEvent, o: ChartOpts, g: { W: number; L: number; R: number; x: (t: number) => number; y: (v: number) => number }): void {
+  const zone = e.currentTarget as SVGElement;
+  const svg = zone.ownerSVGElement;
+  if (!svg) return;
+  const box = svg.getBoundingClientRect();
+  if (!box.width) return;
+  const vx = (e.clientX - box.left) * (g.W / box.width);
+  const tCursor = o.from + ((vx - g.L) / Math.max(1, g.W - g.L - g.R)) * (o.to - o.from);
+  // Snap to the sample closest to the pointer on any series, so the guide sits on real data.
+  let snapT: number | null = null, best = Infinity;
+  for (const s of o.series) {
+    if (!s.points.length) continue;
+    const p = s.points[nearest(s.points, tCursor)];
+    const dist = Math.abs(p.t - tCursor);
+    if (dist < best) { best = dist; snapT = p.t; }
+  }
+  const line = svg.querySelector<SVGLineElement>('.hoverline');
+  const dots = svg.querySelectorAll<SVGCircleElement>('.hoverdot');
+  if (snapT === null) { hoverOff(e); return; }
+  const rows: TipRow[] = [];
+  let any = false;
+  o.series.forEach((s, i) => {
+    const dot = dots[i];
+    const show = (on: boolean) => { if (dot) dot.setAttribute('visibility', on ? 'visible' : 'hidden'); };
+    if (!s.points.length) { show(false); return; }
+    const p = s.points[nearest(s.points, snapT!)];
+    if (Math.abs(p.t - snapT!) > typicalStep(s.points) * 1.5) { show(false); return; }
+    any = true;
+    rows.push({ color: s.color, label: s.name, value: (o.fmtV ?? o.unit)(p.v) });
+    if (dot) { dot.setAttribute('cx', g.x(p.t).toFixed(1)); dot.setAttribute('cy', g.y(p.v).toFixed(1)); }
+    show(true);
+  });
+  if (!any) { hoverOff(e); return; }
+  if (line) { const lx = g.x(snapT).toFixed(1); line.setAttribute('x1', lx); line.setAttribute('x2', lx); line.setAttribute('visibility', 'visible'); }
+  const inBand = (o.bands ?? []).some(b => snapT! >= b.a && snapT! <= b.b);
+  showTip({ title: (o.fmtFull ?? stamp)(snapT), rows, note: inBand ? 'Inside a shaded drop period' : undefined }, e.clientX, e.clientY);
+}
+
+function hoverOff(e: PointerEvent): void {
+  const svg = (e.currentTarget as SVGElement).ownerSVGElement;
+  if (svg) {
+    svg.querySelector('.hoverline')?.setAttribute('visibility', 'hidden');
+    svg.querySelectorAll('.hoverdot').forEach(d => d.setAttribute('visibility', 'hidden'));
+  }
+  hideTip();
 }
