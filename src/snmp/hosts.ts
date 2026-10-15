@@ -3,6 +3,7 @@ import type { AppLog } from '../logger.js';
 import type { DeviceRow, DeviceService } from './devices.js';
 import type { SnmpClient } from './client.js';
 import { readArp, readFdb, readNeighbors, readPortVlans, type Neighbor } from './ports.js';
+import { readWlan, type WlanData } from './wlan.js';
 
 /*
  * Host tracking: which switch port a host is plugged into.
@@ -30,7 +31,9 @@ export interface HostLocation {
   others: Attachment[];
   note: string;
 }
-export interface PortHost { mac: string; vlan: number; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean }
+/** What an access point knows about a wireless client. */
+export interface WifiInfo { name: string; os: string; ssid: string; ap: string; radio: number | null; band: string; channel: string; snr: number; txRate: number; rxRate: number; txBytes: number; rxBytes: number; uptimeSec: number; readAt: number }
+export interface PortHost { mac: string; vlan: number; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean; wifi: WifiInfo | null }
 
 /** A port that has learned more than this many addresses is treated as leading to another switch when nothing else says otherwise. */
 const UPLINK_MAC_COUNT = 30;
@@ -46,7 +49,7 @@ export class HostTracker {
   private activeSince(now = Date.now()): number { return now - Math.max(120, this.opts().intervalSec) * 3 * 1000; }
 
   /** Reads one device and stores what it knows. Returns counts for the log and the device page. */
-  async refresh(d: DeviceRow, c: SnmpClient): Promise<{ macs: number; arp: number; neighbors: number; note: string }> {
+  async refresh(d: DeviceRow, c: SnmpClient): Promise<{ macs: number; arp: number; neighbors: number; wifiClients: number; note: string }> {
     const now = Date.now();
     const ifs = this.devs.interfaces(d.id).map(i => ({ index: i.ifIndex, name: i.name, descr: i.descr }));
     const ips = (this.db.prepare('SELECT if_index AS ifIndex FROM device_ips WHERE dev_id = ?').all(d.id) as unknown as { ifIndex: number }[]);
@@ -74,7 +77,14 @@ export class HostTracker {
     catch (e) { fdb = { entries: [], method: 'none', vlansTried: 0, vlansFailed: 0 }; notes.push(`MAC table not read: ${(e as Error).message}`); }
     if (fdb.vlansFailed) notes.push(`${fdb.vlansFailed} of ${fdb.vlansTried + fdb.vlansFailed} VLANs could not be read through the VLAN community${fdb.vlansTried === 0 ? ' (the device does not accept VLAN-indexed access; for SNMPv3 the context vlan-N must be allowed)' : ''}`);
 
+    // Aruba Instant APs publish their radios, SSIDs and clients (with name, IP address and signal) in a table of their own
+    let wlan: WlanData | null = null;
+    if ((d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.14823.')) {
+      try { wlan = await readWlan(c, ifs); } catch (e) { notes.push(`Wi-Fi tables not read: ${(e as Error).message}`); }
+    }
+
     this.cdb.tx(() => {
+      if (wlan) this.storeWlan(d.id, wlan, now);
       const up = this.db.prepare(`INSERT INTO fdb(dev_id, mac, vlan, if_index, first_seen, last_seen, since) VALUES (?,?,?,?,?,?,?)
         ON CONFLICT(dev_id, mac, vlan) DO UPDATE SET last_seen = excluded.last_seen, since = CASE WHEN fdb.if_index = excluded.if_index THEN fdb.since ELSE excluded.since END, if_index = excluded.if_index`);
       for (const e of fdb.entries) up.run(d.id, e.mac, e.vlan, e.ifIndex, now, now, now);
@@ -84,10 +94,45 @@ export class HostTracker {
       this.db.prepare('DELETE FROM neighbors WHERE dev_id = ?').run(d.id);
       const un = this.db.prepare('INSERT OR REPLACE INTO neighbors(dev_id, if_index, proto, rem_key, rem_name, rem_port, rem_ip, kind, caps, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
       for (const n of nbs) un.run(d.id, n.ifIndex, n.proto, n.key, n.name, n.port, n.ip, n.kind, n.caps.join(','), now);
-      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries`, `${nbs.length} neighbours`, ...notes];
+      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries`, `${nbs.length} neighbours`, ...(wlan ? [`${wlan.clients.length} wireless clients`] : []), ...notes];
       this.db.prepare('UPDATE devices SET hosts_at = ?, hosts_note = ? WHERE id = ?').run(now, parts.join('; '), d.id);
     });
-    return { macs: fdb.entries.length, arp: arpRows, neighbors: nbs.length, note: notes.join('; ') };
+    return { macs: fdb.entries.length, arp: arpRows, neighbors: nbs.length, wifiClients: wlan?.clients.length ?? 0, note: notes.join('; ') };
+  }
+
+  /** Replaces what is stored for one access point with the latest read. */
+  private storeWlan(devId: number, w: WlanData, now: number): void {
+    for (const t of ['wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(devId);
+    const ia = this.db.prepare('INSERT INTO wlan_ap(dev_id, mac, name, ip, serial, model, cpu_pct, mem_free, mem_total, uptime_sec, role, read_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const a of w.aps) ia.run(devId, a.mac, a.name, a.ip, a.serial, a.model, a.cpuPct, a.memFree, a.memTotal, a.uptimeSec, a.role, now);
+    const ir = this.db.prepare('INSERT OR REPLACE INTO wlan_radio(dev_id, ap_mac, idx, mac, channel, band, tx_power, noise_floor, util4, util64, clients, mode, up) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const r of w.radios) ir.run(devId, r.apMac, r.idx, r.mac, r.channel, r.band, r.txPower, r.noiseFloor, r.util4, r.util64, r.clients, r.mode, r.up ? 1 : 0);
+    const is = this.db.prepare('INSERT OR REPLACE INTO wlan_ssid(dev_id, ap_mac, bssid, name, radio, ssid_id, clients, if_name) VALUES (?,?,?,?,?,?,?,?)');
+    for (const s of w.ssids) is.run(devId, s.apMac, s.bssid, s.name, s.radio, s.ssidId, s.clients, s.ifName);
+    const ic = this.db.prepare('INSERT OR REPLACE INTO wlan_client(dev_id, mac, ap_mac, ap_name, bssid, ssid, radio, ip, name, os, snr, tx_rate, rx_rate, tx_bytes, rx_bytes, uptime_sec, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    for (const c of w.clients) ic.run(devId, c.mac, c.apMac, c.apName, c.bssid, c.ssid, c.radio, c.ip, c.name, c.os, c.snr, c.txRate, c.rxRate, c.txBytes, c.rxBytes, c.uptimeSec, now);
+    // a device with these tables is an access point, whatever its description says
+    this.db.prepare("UPDATE devices SET role = 'ap' WHERE id = ?").run(devId);
+  }
+
+  /** The Wi-Fi state last read from one access point, or null when it has none. */
+  wlanOf(devId: number): { readAt: number; aps: unknown[]; radios: unknown[]; ssids: unknown[]; clients: unknown[] } | null {
+    const aps = this.db.prepare('SELECT mac, name, ip, serial, model, cpu_pct AS cpuPct, mem_free AS memFree, mem_total AS memTotal, uptime_sec AS uptimeSec, role, read_at AS readAt FROM wlan_ap WHERE dev_id = ? ORDER BY name').all(devId) as unknown as { readAt: number }[];
+    if (!aps.length) return null;
+    const radios = this.db.prepare('SELECT ap_mac AS apMac, idx, mac, channel, band, tx_power AS txPower, noise_floor AS noiseFloor, util4, util64, clients, mode, up FROM wlan_radio WHERE dev_id = ? ORDER BY ap_mac, idx').all(devId) as unknown as { up: number }[];
+    const ssids = this.db.prepare('SELECT ap_mac AS apMac, bssid, name, radio, ssid_id AS ssidId, clients, if_name AS ifName FROM wlan_ssid WHERE dev_id = ? ORDER BY name, radio').all(devId);
+    const clients = this.db.prepare('SELECT mac, ap_mac AS apMac, ap_name AS apName, bssid, ssid, radio, ip, name, os, snr, tx_rate AS txRate, rx_rate AS rxRate, tx_bytes AS txBytes, rx_bytes AS rxBytes, uptime_sec AS uptimeSec FROM wlan_client WHERE dev_id = ? ORDER BY name COLLATE NOCASE, mac').all(devId);
+    return { readAt: aps[0].readAt, aps, radios: radios.map(r => ({ ...r, up: r.up === 1 })), ssids, clients };
+  }
+
+  /** True for devices that have Wi-Fi data, so the screens know to ask for it. */
+  hasWlan(devId: number): boolean { return !!this.db.prepare('SELECT 1 FROM wlan_ap WHERE dev_id = ? LIMIT 1').get(devId); }
+
+  /** What any access point knows about a MAC address, or null. */
+  wifiFor(mac: string): WifiInfo | null {
+    const r = this.db.prepare(`SELECT c.name, c.os, c.ssid, c.ap_name AS ap, c.radio, c.snr, c.tx_rate AS txRate, c.rx_rate AS rxRate, c.tx_bytes AS txBytes, c.rx_bytes AS rxBytes, c.uptime_sec AS uptimeSec, c.last_seen AS readAt, c.ip,
+        r.channel, r.band FROM wlan_client c LEFT JOIN wlan_radio r ON r.dev_id = c.dev_id AND r.ap_mac = c.ap_mac AND r.idx = c.radio WHERE c.mac = ? ORDER BY c.last_seen DESC LIMIT 1`).get(mac) as unknown as (Omit<WifiInfo, 'channel' | 'band'> & { channel: string | null; band: string | null; ip: string }) | undefined;
+    return r ? { name: r.name, os: r.os, ssid: r.ssid, ap: r.ap, radio: r.radio, band: r.band ?? '', channel: r.channel ?? '', snr: r.snr, txRate: r.txRate, rxRate: r.rxRate, txBytes: r.txBytes, rxBytes: r.rxBytes, uptimeSec: r.uptimeSec, readAt: r.readAt } : null;
   }
 
   /** Records why the last host-table read failed, so it shows on the device page. */
@@ -100,6 +145,7 @@ export class HostTracker {
     const lim = now - this.opts().keepDays * 86_400_000;
     this.db.prepare('DELETE FROM fdb WHERE last_seen < ?').run(lim);
     this.db.prepare('DELETE FROM arp WHERE last_seen < ?').run(lim);
+    this.db.prepare('DELETE FROM wlan_client WHERE last_seen < ?').run(lim);
   }
 
   /* ---------------------------------------------------------------- queries */
@@ -129,7 +175,13 @@ export class HostTracker {
     const since = this.activeSince();
     const rows = this.db.prepare('SELECT mac, vlan, first_seen AS firstSeen, last_seen AS lastSeen, since FROM fdb WHERE dev_id = ? AND if_index = ? ORDER BY last_seen DESC, mac LIMIT ?').all(devId, ifIndex, limit) as unknown as { mac: string; vlan: number; firstSeen: number; lastSeen: number; since: number }[];
     const arp = this.db.prepare('SELECT ip FROM arp WHERE mac = ? ORDER BY last_seen DESC LIMIT 4');
-    return rows.map(r => ({ ...r, ips: [...new Set((arp.all(r.mac) as unknown as { ip: string }[]).map(x => x.ip))], active: r.lastSeen >= since }));
+    const wip = this.db.prepare('SELECT ip FROM wlan_client WHERE mac = ? AND ip != \'\' ORDER BY last_seen DESC LIMIT 1');
+    return rows.map(r => {
+      const ips = [...new Set((arp.all(r.mac) as unknown as { ip: string }[]).map(x => x.ip))];
+      // an access point knows its clients' addresses even when no polled router has them in its ARP table
+      if (!ips.length) { const w = wip.get(r.mac) as { ip: string } | undefined; if (w) ips.push(w.ip); }
+      return { ...r, ips, active: r.lastSeen >= since, wifi: this.wifiFor(r.mac) };
+    });
   }
 
   /** MAC addresses for an IP address, newest first, from the ARP tables of every polled router or Layer 3 switch. */

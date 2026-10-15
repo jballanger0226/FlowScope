@@ -29,8 +29,10 @@ export interface InterfaceView {
   classes: { cls: string; queue: string | null; dscps: number[]; bw: string | null }[];
 }
 
-export function guessRole(descr: string, name: string): string {
+export function guessRole(descr: string, name: string, objectId = ''): string {
   const t = (descr + ' ' + name).toLowerCase();
+  // wireless access points, before the switch test: an Aruba AP says "ArubaOS (MODEL: 535)", a controller or switch has a longer model name
+  if (/^1\.3\.6\.1\.4\.1\.14823\.1\.2\./.test(objectId) || /arubaos \(model: \d{3}[a-z]{0,2}\)|access point|wireless ap\b|aironet|\bunifi\b.*\bap\b|(^|[-_ ])(ap|iap|wap)([-_ ]|\d|$)/.test(t)) return 'ap';
   if (/firewall|\basa\b|fortigate|pan-os|palo alto|checkpoint|sonicwall|srx/.test(t) || /(^|[-_])(fw|firewall)([-_]|\d|$)/.test(name.toLowerCase())) return 'firewall';
   if (/switch|catalyst|nexus|\bex\d|aruba|procurve|ruckus|(^|[-_])(sw|sw\d|access|dist)([-_]|\d|$)/.test(t)) return 'switch';
   if (/router|\bios\b|ios-xe|junos|mx\d|asr|isr|vyos|mikrotik|(^|[-_])(rtr|gw|edge|core)([-_]|\d|$)/.test(t)) return 'router';
@@ -155,7 +157,7 @@ export class DeviceService {
         else if (ex.source === 'snmp') db.prepare('UPDATE vlans SET name = ? WHERE id = ?').run(v.name, v.id);
       }
       db.prepare('UPDATE devices SET sys_name=?, sys_descr=?, sys_object_id=?, role=?, profile=?, qos_note=? WHERE id=?')
-        .run(p.info.sysName, p.info.sysDescr, p.info.sysObjectId, guessRole(p.info.sysDescr, p.info.sysName), p.profile, p.qosNote, id);
+        .run(p.info.sysName, p.info.sysDescr, p.info.sysObjectId, guessRole(p.info.sysDescr, p.info.sysName, p.info.sysObjectId), p.profile, p.qosNote, id);
     });
     this.invalidate();
   }
@@ -237,7 +239,7 @@ export class DeviceService {
     const d = this.row(id);
     if (!d) throw new DeviceError('No such device', 404);
     this.cdb.tx(() => {
-      for (const t of ['interfaces', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
+      for (const t of ['interfaces', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
       this.cdb.db.prepare('UPDATE exporters SET device_id = NULL WHERE device_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM devices WHERE id = ?').run(id);
     });

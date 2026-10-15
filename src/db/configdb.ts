@@ -157,6 +157,29 @@ const MIGRATIONS: string[] = [
     seen_at INTEGER NOT NULL,
     PRIMARY KEY (dev_id, if_index, proto, rem_key)
   );
+  `,
+  `
+  -- Wi-Fi state read from access points (Aruba Instant): the AP, its radios, its SSIDs and the clients. Each read replaces the last one for that device.
+  CREATE TABLE wlan_ap (
+    dev_id INTEGER NOT NULL, mac TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '', serial TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+    cpu_pct INTEGER NOT NULL DEFAULT 0, mem_free INTEGER NOT NULL DEFAULT 0, mem_total INTEGER NOT NULL DEFAULT 0, uptime_sec INTEGER NOT NULL DEFAULT 0, role TEXT NOT NULL DEFAULT '',
+    read_at INTEGER NOT NULL, PRIMARY KEY (dev_id, mac)
+  );
+  CREATE TABLE wlan_radio (
+    dev_id INTEGER NOT NULL, ap_mac TEXT NOT NULL, idx INTEGER NOT NULL, mac TEXT NOT NULL DEFAULT '', channel TEXT NOT NULL DEFAULT '', band TEXT NOT NULL DEFAULT '',
+    tx_power INTEGER NOT NULL DEFAULT 0, noise_floor INTEGER NOT NULL DEFAULT 0, util4 INTEGER NOT NULL DEFAULT 0, util64 INTEGER NOT NULL DEFAULT 0, clients INTEGER NOT NULL DEFAULT 0,
+    mode TEXT NOT NULL DEFAULT '', up INTEGER NOT NULL DEFAULT 1, PRIMARY KEY (dev_id, ap_mac, idx)
+  );
+  CREATE TABLE wlan_ssid (
+    dev_id INTEGER NOT NULL, ap_mac TEXT NOT NULL, bssid TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', radio INTEGER, ssid_id INTEGER, clients INTEGER NOT NULL DEFAULT 0,
+    if_name TEXT, PRIMARY KEY (dev_id, ap_mac, bssid)
+  );
+  CREATE TABLE wlan_client (
+    dev_id INTEGER NOT NULL, mac TEXT NOT NULL, ap_mac TEXT NOT NULL DEFAULT '', ap_name TEXT NOT NULL DEFAULT '', bssid TEXT NOT NULL DEFAULT '', ssid TEXT NOT NULL DEFAULT '', radio INTEGER,
+    ip TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '', snr INTEGER NOT NULL DEFAULT 0, tx_rate INTEGER NOT NULL DEFAULT 0, rx_rate INTEGER NOT NULL DEFAULT 0,
+    tx_bytes INTEGER NOT NULL DEFAULT 0, rx_bytes INTEGER NOT NULL DEFAULT 0, uptime_sec INTEGER NOT NULL DEFAULT 0, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, mac)
+  );
+  CREATE INDEX wlan_client_mac ON wlan_client(mac);
   `
 ];
 
