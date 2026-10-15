@@ -134,19 +134,32 @@ test('HTTP API: auth, roles, CSRF, flows, devices, storage, admin, AAA', { timeo
 
     // ---- diagnostics: read-only checks and a bounded OID walk
     assert.equal((await ro.post(`/api/devices/${devId}/check`, {})).status, 403);
-    assert.equal((await ro.post(`/api/devices/${devId}/walk`, { oid: '1.3.6.1.2.1.1' })).status, 403);
-    assert.equal((await sn.post(`/api/devices/${devId}/walk`, { oid: 'sysDescr' })).status, 400);
-    assert.equal((await sn.post(`/api/devices/${devId}/walk`, { oid: '1.3.6.1.2.1.1;x' })).status, 400);
-    assert.equal((await sn.post('/api/devices/99999/walk', { oid: '1.3.6.1.2.1.1' })).status, 404);
+    assert.equal((await ro.post(`/api/devices/${devId}/walks`, { oid: '1.3.6.1.2.1.1' })).status, 403);
+    assert.equal((await sn.post(`/api/devices/${devId}/walks`, { oid: 'sysDescr' })).status, 400);
+    assert.equal((await sn.post(`/api/devices/${devId}/walks`, { oid: '1.3.6.1.2.1.1;x' })).status, 400);
+    assert.equal((await sn.post('/api/devices/99999/walks', { oid: '1.3.6.1.2.1.1' })).status, 404);
+    assert.equal((await sn.get(`/api/devices/${devId}/walks/nope`)).status, 404);
     const chk = await sn.post(`/api/devices/${devId}/check`, {});
     assert.equal(chk.status, 200, chk.text);
     const cks = Object.fromEntries((chk.json.checks as { id: string; state: string }[]).map(k => [k.id, k.state]));
     assert.equal(cks.interfaces, 'ok');
     assert.equal(cks.lldp, 'fail');   // the simulated device publishes no LLDP-MIB
-    const walk = await sn.post(`/api/devices/${devId}/walk`, { oid: '.1.3.6.1.2.1.1', max: 3 });
-    assert.equal(walk.status, 200, walk.text);
-    assert.equal(walk.json.rows.length, 3); assert.equal(walk.json.more, true);
-    assert.ok(walk.json.rows.every((r: { oid: string }) => r.oid.startsWith('1.3.6.1.2.1.1.')));
+    const wk = await sn.post(`/api/devices/${devId}/walks`, { oid: '' });   // a blank OID walks the whole tree
+    assert.equal(wk.status, 202, wk.text);
+    const jid = wk.json.job.id as string;
+    let ws = await sn.get(`/api/devices/${devId}/walks/${jid}?limit=5`);
+    for (let i = 0; i < 100 && ws.json.job.state === 'running'; i++) { await new Promise(r => setTimeout(r, 100)); ws = await sn.get(`/api/devices/${devId}/walks/${jid}?limit=5`); }
+    assert.equal(ws.json.job.state, 'done', ws.text);
+    assert.ok(ws.json.job.rows > 20, 'a whole-tree walk of the simulated device returns many rows');
+    assert.equal(ws.json.rows.length, 5); assert.equal(ws.json.matched, ws.json.job.rows);
+    const sys = await sn.get(`/api/devices/${devId}/walks/${jid}?limit=100&q=1.3.6.1.2.1.1.5.0`);
+    assert.equal(sys.json.matched, 1);
+    for (const fmt of ['txt', 'json', 'csv', 'xml']) {
+      const ex = await sn.get(`/api/devices/${devId}/walks/${jid}/export?format=${fmt}`);
+      assert.equal(ex.status, 200, fmt); assert.match(ex.headers.get('content-disposition') ?? '', new RegExp(`\\.${fmt}"`)); assert.ok(ex.text.includes('1.3.6.1.2.1.1.5.0'), fmt);
+    }
+    assert.equal((await sn.get(`/api/devices/${devId}/walks/${jid}/export?format=exe`)).status, 400);
+    assert.equal((await ro.get(`/api/devices/${devId}/walks/${jid}`)).status, 403);
     assert.equal((await admin.get('/api/meta')).json.vlans.some((v: any) => v.id === 140), true);
     // discovery
     const dj = await sn.post('/api/discovery', { spec: '127.0.0.1' });

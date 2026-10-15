@@ -1,8 +1,8 @@
 import { h, type VNode } from '../vdom.js';
-import { get, post, del } from '../api.js';
+import { get, post, del, qs } from '../api.js';
 import { session, redraw, go } from '../state.js';
 import { btn, chip, empty, field, heading, msg, note, seg, select, spinner, status as statusEl, textInput, toggle, kv } from '../components.js';
-import { ago, num, stamp } from '../util.js';
+import { ago, debounce, dur, num, stamp } from '../util.js';
 
 interface Dev {
   id: number; name: string; ip: string; port: number; credId: number; credName: string; intervalSec: number; polling: boolean; source: string; addedAt: number;
@@ -22,9 +22,11 @@ let nName = '', nIp = '', nCred = '', nSec = '60'; let addBusy = false; let addM
 let mQ = ''; let sel = 0; let confirmRemove = false; let mMsg = ''; let mBusy = false;
 // diagnostics
 interface Check { id: string; title: string; state: 'ok' | 'warn' | 'fail' | 'na'; count: number; detail: string; hint?: string }
-interface WalkRow { oid: string; type: string; text: string }
 let diagFor = 0; let chk: { checkedAt: number; checks: Check[] } | null = null; let chkBusy = false; let chkErr = '';
-let wOid = '1.0.8802.1.1.2.1.4'; let wRes: { oid: string; more: boolean; rows: WalkRow[] } | null = null; let wBusy = false; let wErr = ''; let wOpen = false;
+interface WalkRow { oid: string; type: string; text: string }
+interface WalkJob { id: string; device: string; startOid: string; state: 'running' | 'done' | 'cancelled' | 'error'; error: string | null; truncated: boolean; rows: number; startedAt: number; finishedAt: number | null; maxRows: number }
+const PAGE = 100;
+let wOid = ''; let wJob: WalkJob | null = null; let wRows: WalkRow[] = []; let wMatched = 0; let wOff = 0; let wQ = ''; let wBusy = false; let wErr = ''; let wOpen = false; let wTimer: number | undefined;
 // scan
 let dRange = '', dCred = '', dSec = '60', dTryOthers = false; let job: Job | null = null; let dMsg = ''; let picked = new Set<string>(); let scanTimer: number | undefined; let addFoundBusy = false;
 
@@ -129,13 +131,13 @@ function modeManage(): VNode {
 
 /* ------------------------------------------------------------------ diagnostics */
 
-const WALK_PRESETS: [string, string][] = [['1.0.8802.1.1.2.1.4', 'LLDP neighbours (LLDP-MIB lldpRemTable)'], ['1.0.8802.1.1.2.1.3', 'LLDP local system and ports'], ['1.3.6.1.4.1.9.9.23.1.2.1', 'CDP neighbours (Cisco)'],
+const WALK_PRESETS: [string, string][] = [['*', 'Everything (full walk)'], ['1.0.8802.1.1.2.1.4', 'LLDP neighbours (LLDP-MIB lldpRemTable)'], ['1.0.8802.1.1.2.1.3', 'LLDP local system and ports'], ['1.3.6.1.4.1.9.9.23.1.2.1', 'CDP neighbours (Cisco)'],
   ['1.3.6.1.2.1.1', 'System (name, description, uptime)'], ['1.3.6.1.2.1.31.1.1.1.1', 'Interface names (ifName)'], ['1.3.6.1.2.1.4.35.1.4', 'ARP / neighbour cache (MAC addresses)']];
 const CHK_LABEL: Record<Check['state'], [string, 'ok' | 'warn' | 'bad' | 'default']> = { ok: ['Published', 'ok'], warn: ['Check', 'warn'], fail: ['Missing', 'bad'], na: ['Not applicable', 'default'] };
 
 function syncDiag(d: Dev): void {
   if (diagFor === d.id) return;
-  diagFor = d.id; chk = null; chkErr = ''; wRes = null; wErr = '';
+  diagFor = d.id; chk = null; chkErr = ''; wJob = null; wRows = []; wMatched = 0; wOff = 0; wQ = ''; wErr = ''; window.clearTimeout(wTimer);
 }
 async function runCheck(d: Dev): Promise<void> {
   chkBusy = true; chkErr = ''; redraw();
@@ -143,11 +145,60 @@ async function runCheck(d: Dev): Promise<void> {
   catch (e) { if (diagFor === d.id) { chk = null; chkErr = (e as Error).message; } }
   chkBusy = false; redraw();
 }
-async function runWalk(d: Dev): Promise<void> {
-  wBusy = true; wErr = ''; redraw();
-  try { const r = await post<{ oid: string; more: boolean; rows: WalkRow[] }>(`/api/devices/${d.id}/walk`, { oid: wOid.trim(), max: 200 }); if (diagFor === d.id) wRes = r; }
-  catch (e) { if (diagFor === d.id) { wRes = null; wErr = (e as Error).message; } }
-  wBusy = false; redraw();
+/** Reads the walk's status and the current page. The page is cheap: the server filters and slices, the browser only ever holds PAGE rows. */
+async function pollWalk(d: Dev): Promise<void> {
+  if (!wJob || diagFor !== d.id) return;
+  try {
+    const r = await get<{ job: WalkJob; matched: number; rows: WalkRow[] }>(`/api/devices/${d.id}/walks/${wJob.id}` + qs({ offset: wOff, limit: PAGE, q: wQ.trim() }));
+    if (diagFor !== d.id || !wJob || wJob.id !== r.job.id) return;
+    wJob = r.job; wRows = r.rows; wMatched = r.matched; wErr = '';
+  } catch (e) { wErr = (e as Error).message; if (wJob?.state === 'running') wJob = { ...wJob, state: 'error' }; }
+  redraw();
+  window.clearTimeout(wTimer);
+  if (wJob?.state === 'running' && diagFor === d.id && location.hash.startsWith('#/devices')) wTimer = window.setTimeout(() => void pollWalk(d), 900);
+}
+async function startWalk(d: Dev): Promise<void> {
+  wBusy = true; wErr = ''; wJob = null; wRows = []; wMatched = 0; wOff = 0; redraw();
+  try { const r = await post<{ job: WalkJob }>(`/api/devices/${d.id}/walks`, { oid: wOid.trim() }); wJob = r.job; wBusy = false; await pollWalk(d); }
+  catch (e) { wErr = (e as Error).message; wBusy = false; redraw(); }
+}
+async function cancelWalk(d: Dev): Promise<void> { if (!wJob) return; try { await post(`/api/devices/${d.id}/walks/${wJob.id}/cancel`, {}); } catch { /* the poll shows the state */ } await pollWalk(d); }
+const filterWalk = debounce((d: Dev) => { wOff = 0; void pollWalk(d); }, 350);
+function pageWalk(d: Dev, off: number): void { wOff = Math.max(0, off); void pollWalk(d); }
+const walkExport = (d: Dev, fmt: string): string => wJob ? `/api/devices/${d.id}/walks/${wJob.id}/export` + qs({ format: fmt, q: wQ.trim() }) : '';
+
+function walkPanel(d: Dev): VNode {
+  const running = wJob?.state === 'running';
+  const from = wJob ? (wJob.startOid ? '.' + wJob.startOid : 'the whole tree') : '';
+  const cols = 'minmax(240px,2fr) 110px minmax(200px,3fr)';
+  const first = wMatched ? wOff + 1 : 0, last = Math.min(wOff + PAGE, wMatched);
+  const stateText = !wJob ? '' : running ? `Walking ${from}… ${num(wJob.rows)} rows so far (${dur(Date.now() - wJob.startedAt)})`
+    : wJob.state === 'cancelled' ? `Cancelled. ${num(wJob.rows)} rows were read from ${from}.`
+    : wJob.state === 'error' ? `Stopped by an error. ${num(wJob.rows)} rows were read from ${from}.`
+    : `Finished: ${num(wJob.rows)} row${wJob.rows === 1 ? '' : 's'} under ${from}.`;
+  return h('div', { class: 'col', style: 'gap:10px' },
+    h('div', { class: 'row', style: 'align-items:end' },
+      field('Starting OID (blank walks everything)', textInput(wOid, v => { wOid = v; }, { placeholder: 'blank = everything', aria: 'OID to walk', mono: true, width: '300px', onenter: () => { if (!running && !wBusy) void startWalk(d); } })),
+      field('Common starting points', select('', [['', 'Pick one…'], ...WALK_PRESETS], v => { if (v) { wOid = v === '*' ? '' : v; redraw(); } }, { aria: 'Common OIDs' })),
+      running ? btn('Cancel walk', { kind: 'danger', onclick: () => void cancelWalk(d) }) : btn(wBusy ? 'Starting…' : wOid.trim() ? 'Walk' : 'Walk everything', { kind: 'primary', disabled: wBusy, onclick: () => void startWalk(d) })),
+    !wOid.trim() && !wJob ? h('span', { class: 'dim', style: 'font-size:12px' }, 'A full walk reads every value the device will give this credential. A large switch can take a few minutes and return tens of thousands of rows; it runs in the background and you can filter and export it when it finishes.') : null,
+    wErr ? note(wErr, 'bad', true) : null,
+    wJob ? h('div', { class: 'col', style: 'gap:8px' },
+      h('span', { class: running ? 'muted' : wJob.state === 'done' ? 'muted' : 'warn-text', style: 'font-size:12.5px', role: 'status', 'aria-live': 'polite' }, stateText),
+      wJob.error ? note(wJob.error, 'warn') : null,
+      wJob.truncated && !wJob.error ? note(`Only the first ${num(wJob.maxRows)} rows are kept. Walk a narrower OID to see the rest.`, 'warn') : null,
+      wJob.rows ? h('div', { class: 'row', style: 'gap:10px;align-items:center' },
+        h('div', { style: 'flex:1 1 260px;max-width:420px' }, textInput(wQ, v => { wQ = v; filterWalk(d); }, { placeholder: 'Filter rows: every word must match the OID, type or value', aria: 'Filter walk rows', width: '100%' })),
+        wQ.trim() ? btn('Clear', { kind: 'ghost', small: true, onclick: () => { wQ = ''; wOff = 0; void pollWalk(d); } }) : null,
+        h('span', { class: 'muted', style: 'font-size:12.5px' }, wMatched ? `Rows ${num(first)}–${num(last)} of ${num(wMatched)}${wQ.trim() ? ' matching' : ''}` : wQ.trim() ? 'No row matches.' : ''),
+        btn('‹ Previous', { small: true, kind: 'ghost', disabled: wOff <= 0, onclick: () => pageWalk(d, wOff - PAGE) }),
+        btn('Next ›', { small: true, kind: 'ghost', disabled: wOff + PAGE >= wMatched, onclick: () => pageWalk(d, wOff + PAGE) })) : null,
+      wRows.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:700px` },
+        h('div', { class: 'tr head' }, ...['OID', 'Type', 'Value'].map(t => h('span', null, t))),
+        h('div', { class: 'scroll', style: 'max-height:420px' }, wRows.map((r, i) => h('div', { key: wOff + i, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px;word-break:break-all' }, r.oid), h('span', { class: 'dim', style: 'font-size:12px' }, r.type), h('span', { class: 'mono', style: 'font-size:12px;word-break:break-all' }, r.text)))))) : !running && !wJob.rows ? h('span', { class: 'dim', style: 'font-size:12.5px' }, `Nothing under ${from}. The device does not publish it, or this credential may not read it.`) : null,
+      wJob.rows && wMatched ? h('div', { class: 'row', style: 'gap:8px;align-items:center' },
+        h('span', { class: 'muted', style: 'font-size:12.5px' }, `Export ${wQ.trim() ? num(wMatched) + ' matching' : 'all ' + num(wMatched)} rows as`),
+        ...[['txt', 'Text'], ['json', 'JSON'], ['csv', 'CSV'], ['xml', 'XML']].map(([f, label]) => h('a', { key: f, class: 'btn small', href: walkExport(d, f), download: '' }, label))) : null) : null);
 }
 
 function diagnostics(d: Dev): VNode {
@@ -168,17 +219,7 @@ function diagnostics(d: Dev): VNode {
         h('div', null, chk.checks.map(k => h('div', { key: k.id, class: 'tr tall', style: 'align-items:start' },
           h('span', { style: 'font-weight:600' }, k.title), h('span', null, chip(CHK_LABEL[k.state][0], CHK_LABEL[k.state][1])),
           h('span', { class: 'col', style: 'gap:4px' }, h('span', null, k.detail), k.hint ? h('span', { class: 'dim', style: 'font-size:12px' }, k.hint) : null))))))) : null,
-    wOpen ? h('div', { class: 'col', style: 'gap:10px' },
-      h('div', { class: 'row', style: 'align-items:end' },
-        field('Starting OID', textInput(wOid, v => { wOid = v; }, { placeholder: '1.0.8802.1.1.2.1.4', aria: 'OID to walk', mono: true, width: '280px', onenter: () => void runWalk(d) })),
-        field('Common starting points', select('', [['', 'Pick one…'], ...WALK_PRESETS], v => { if (v) { wOid = v; redraw(); } }, { aria: 'Common OIDs' })),
-        btn(wBusy ? 'Walking…' : 'Walk', { kind: 'primary', disabled: wBusy || !wOid.trim(), onclick: () => void runWalk(d) })),
-      wErr ? note(wErr, 'bad', true) : null,
-      wRes ? h('div', { class: 'col', style: 'gap:6px' },
-        h('span', { class: 'muted', style: 'font-size:12.5px', role: 'status' }, wRes.rows.length ? `${num(wRes.rows.length)} row${wRes.rows.length === 1 ? '' : 's'} under ${wRes.oid}${wRes.more ? '. Showing the first rows only; walk a narrower OID to see the rest.' : '.'}` : `Nothing under ${wRes.oid}. The device does not publish it, or this credential may not read it.`),
-        wRes.rows.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(240px,2fr) 110px minmax(200px,3fr);--w:700px' },
-          h('div', { class: 'tr head' }, ...['OID', 'Type', 'Value'].map(t => h('span', null, t))),
-          h('div', { class: 'scroll', style: 'max-height:320px' }, wRes.rows.map((r, i) => h('div', { key: i, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px;word-break:break-all' }, r.oid), h('span', { class: 'dim', style: 'font-size:12px' }, r.type), h('span', { class: 'mono', style: 'font-size:12px;word-break:break-all' }, r.text)))))) : null) : null) : null);
+    wOpen ? walkPanel(d) : null);
 }
 
 /* ------------------------------------------------------------------ discovery */
