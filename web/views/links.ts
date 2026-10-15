@@ -4,7 +4,7 @@ import { redraw, go } from '../state.js';
 import { bar, btn, chip, empty, heading, lineChart, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
 import { ago, bps, bytes, clock, dayClock, dur, num, pct, debounce } from '../util.js';
 import { post } from '../api.js';
-import { neighborLines, type Neighbor } from '../neighbors.js';
+import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
 interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
 interface Iface {
@@ -21,6 +21,8 @@ interface SeriesRes {
   step: number; tier: string;
 }
 interface PortHost { mac: string; vlan: number; vlanName: string; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean }
+interface NbPort { ifIndex: number; ifName: string; neighbors: Neighbor[] }
+interface NbRes { ports: NbPort[]; readAt: number | null; note: string; tracking: boolean }
 interface HostsRes { hosts: PortHost[]; neighbors: Neighbor[]; readAt: number | null; note: string; tracking: boolean }
 interface Attach { devId: number; dev: string; ifIndex: number; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; lastSeen: number; active: boolean; mac: string; confidence?: 'high' | 'medium' | 'low' }
 interface Located { query: string; ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
@@ -32,6 +34,7 @@ let ifSearch = '';
 let hostsRes: HostsRes | null = null; let hostsLoading = false; let hostsError = '';
 let findQ = ''; let found: Located | null = null; let findError = ''; let finding = false;
 let readingHosts = false; let readMsg = '';
+let nbRes: NbRes | null = null; let nbError = ''; let nbLoading = false;
 let devId = 0; let ifIndex = 0;
 let graphRange = '6h';
 let dropThr = 1;
@@ -77,9 +80,12 @@ function resolvePending(): void {
   select_(d.id, itf?.ifIndex ?? d.interfaces[0]?.ifIndex ?? 0);
 }
 
+let prevDev = 0;
 function select_(d: number, i: number): void {
   if (d !== devId) ifSearch = '';
   devId = d; ifIndex = i; series = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
+  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); }
+  prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
 }
@@ -105,6 +111,17 @@ async function loadStreams(): Promise<void> {
   streamsLoading = false; redraw();
 }
 
+let nseq = 0;
+async function loadNeighbors(): Promise<void> {
+  if (!devId) return;
+  const my = ++nseq, d = devId; nbLoading = true; nbError = ''; redraw();
+  try {
+    const r = await get<NbRes>('/api/links/neighbors' + qs({ dev: d }));
+    if (my === nseq) nbRes = r;
+  } catch (e) { if (my === nseq) { nbRes = null; nbError = (e as Error).message; } }
+  if (my === nseq) { nbLoading = false; redraw(); }
+}
+
 let hseq = 0;
 async function loadHosts(): Promise<void> {
   if (!devId || !ifIndex) return;
@@ -121,7 +138,7 @@ async function readHostsNow(): Promise<void> {
   try {
     const r = await post<{ macs: number; arp: number; neighbors: number; note: string }>(`/api/devices/${devId}/read-hosts`, {});
     readMsg = `Read ${num(r.macs)} MAC addresses, ${num(r.arp)} ARP entries and ${num(r.neighbors)} neighbours.${r.note ? ' ' + r.note : ''}`;
-    await load(true); await loadHosts();
+    await load(true); await loadHosts(); await loadNeighbors();
   } catch (e) { readMsg = (e as Error).message; }
   readingHosts = false; redraw();
 }
@@ -210,7 +227,8 @@ function termMatches(i: Iface, raw: string): boolean {
   }
   const vtext = `${vlanLabel(i.vlan, i.vlanName)} ${vlanLabel(i.voiceVlan, i.voiceVlanName)} ${i.vlanName} ${i.voiceVlanName}`.toLowerCase();
   if (vlanOnly) return vtext.includes(t) || (t === 'trunk' && i.portMode === 'trunk');
-  return `${i.name} ${i.alias} ${vtext} ${i.portMode} ${i.policy ?? ''} ${i.policyIn ?? ''}`.toLowerCase().includes(t);
+  const nb = (nbRes?.ports.find(p => p.ifIndex === i.ifIndex)?.neighbors ?? []).map(n => `${n.name} ${n.port} ${n.ip}`).join(' ');
+  return `${i.name} ${i.alias} ${vtext} ${i.portMode} ${i.policy ?? ''} ${i.policyIn ?? ''} ${nb}`.toLowerCase().includes(t);
 }
 function filterIfaces(list: Iface[]): Iface[] {
   const terms = ifSearch.trim().split(/\s+/).filter(Boolean);
@@ -223,19 +241,21 @@ function policyCell(i: Iface): VNode {
 }
 
 function ifTable(dev: Dev): VNode {
-  const cols = 'minmax(88px,0.8fr) minmax(120px,1fr) minmax(140px,1.1fr) 52px 58px 118px 118px 64px minmax(84px,0.8fr)';
+  const cols = 'minmax(88px,0.8fr) minmax(120px,1fr) minmax(130px,1fr) minmax(140px,1.1fr) 52px 58px 118px 118px 64px minmax(84px,0.8fr)';
+  const nbOf = (ix: number): Neighbor[] => nbRes?.ports.find(p => p.ifIndex === ix)?.neighbors ?? [];
   const rows = filterIfaces(dev.interfaces);
   return h('div', { class: 'col', style: 'gap:8px' },
     h('div', { class: 'row', style: 'gap:10px' },
-      h('div', { style: 'flex:1 1 320px;max-width:460px' }, textInput(ifSearch, v => { ifSearch = v; }, { placeholder: 'Search interface, description or VLAN', aria: 'Search interfaces', width: '100%' })),
+      h('div', { style: 'flex:1 1 320px;max-width:460px' }, textInput(ifSearch, v => { ifSearch = v; }, { placeholder: 'Search interface, description, neighbour or VLAN', aria: 'Search interfaces', width: '100%' })),
       ifSearch.trim() ? btn('Clear', { kind: 'ghost', small: true, onclick: () => { ifSearch = ''; redraw(); } }) : null,
       h('span', { class: 'muted', role: 'status', 'aria-live': 'polite' }, ifSearch.trim() ? `${rows.length} of ${dev.interfaces.length} interfaces` : `${dev.interfaces.length} interfaces`),
       h('span', { class: 'dim', style: 'font-size:12px' }, 'Words must all match. A number is a VLAN id; vlan:20 matches only VLANs.')),
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1000px` },
-      h('div', { class: 'tr head' }, ...['Interface', 'Description', 'VLAN', 'Speed', 'State', 'In', 'Out', 'Discards', 'Service policy'].map(t => h('span', null, t))),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1150px` },
+      h('div', { class: 'tr head' }, ...['Interface', 'Description', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', 'In', 'Out', 'Discards', 'Service policy'].map(t => h('span', null, t))),
       h('div', { class: 'scroll' }, rows.map(i => h('button', { key: i.ifIndex, type: 'button', class: 'tr', 'aria-pressed': i.ifIndex === ifIndex, onclick: () => select_(dev.id, i.ifIndex) },
         h('span', { style: 'font-weight:600' }, i.name, i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
         h('span', { class: 'muted' }, i.alias || '—'),
+        nbCell(nbOf(i.ifIndex)),
         vlanCell(i),
         h('span', { class: 'mono', style: 'font-size:12px' }, i.speedMbps ? (i.speedMbps >= 1000 ? i.speedMbps / 1000 + ' G' : i.speedMbps + ' M') : '—'),
         h('span', null, i.oper === 'up' ? statusEl('ok', 'up') : statusEl(i.oper === 'down' ? 'bad' : 'off', i.oper)),
@@ -243,6 +263,39 @@ function ifTable(dev: Dev): VNode {
         h('span', { class: 'mono', style: 'font-size:12px' }, num(i.disc + i.err)),
         policyCell(i))),
         !dev.interfaces.length ? empty('This device has not reported any interfaces yet.') : !rows.length ? empty('No interface matches that search.') : null))));
+}
+const shortName = (n: Neighbor): string => (n.name ? n.name.split('.')[0] || n.name : n.ip) || 'unnamed';
+
+/** Who is cabled to a port, as plain text (the row is a button, so the links are in the neighbours table below). */
+function nbCell(ns: Neighbor[]): VNode {
+  if (!ns.length) return h('span', { class: 'dim' }, '—');
+  const first = ns[0];
+  return h('span', { title: ns.map(n => `${n.protos.map(p => p.toUpperCase()).join('·')}: ${n.name || n.ip}${n.port ? ' ' + n.port : ''}`).join('\n') },
+    h('div', { style: 'font-weight:500' }, shortName(first), ns.length > 1 ? h('span', { class: 'dim' }, ` +${ns.length - 1}`) : null),
+    first.port ? h('div', { class: 'dim mono', style: 'font-size:11.5px' }, first.port) : null);
+}
+
+/** Every CDP / LLDP neighbour of the device by port; a neighbour that is a polled device opens in this page. */
+function neighborsPanel(dev: Dev): VNode {
+  const ports = nbRes?.ports ?? [];
+  const cols = 'minmax(90px,0.8fr) minmax(170px,1.4fr) minmax(130px,1fr) minmax(130px,1fr) 90px minmax(150px,0.9fr)';
+  return h('div', { class: 'col', style: 'gap:8px' },
+    h('div', { class: 'row', style: 'justify-content:space-between' },
+      h('div', { class: 'col', style: 'gap:2px' }, h('b', null, 'Neighbours (CDP and LLDP)'),
+        h('span', { class: 'muted', style: 'font-size:12px' }, dev.hostsAt ? `What ${dev.name} reports is at the other end of each port, last read ${ago(dev.hostsAt)}. A neighbour that is also an SNMP device here can be opened.` : 'Not read yet from this device.')),
+      btn(readingHosts ? 'Reading…' : 'Read tables now', { small: true, kind: 'ghost', disabled: readingHosts, title: 'Ask the device for its MAC, ARP and neighbour tables right now', onclick: () => void readHostsNow() })),
+    nbError ? note(nbError, 'bad', true) : null,
+    nbLoading && !nbRes ? spinner('Loading neighbours…') : null,
+    nbRes && !ports.length && !nbLoading ? h('span', { class: 'dim', style: 'font-size:12.5px' }, nbRes.note || 'This device reports no CDP or LLDP neighbours. Check that CDP or LLDP is turned on, on the device and on the port.') : null,
+    ports.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:880px` },
+      h('div', { class: 'tr head' }, ...['Port', 'Neighbour', 'Its port', 'Type', 'Protocol', ''].map(t => h('span', null, t))),
+      h('div', { class: 'scroll', style: 'max-height:320px' }, ports.flatMap(p => p.neighbors.map((n, k) => h('div', { key: p.ifIndex + '/' + k, class: 'tr' },
+        k === 0 ? h('button', { type: 'button', class: 'lnk', title: `Show ${p.ifName}`, onclick: () => select_(dev.id, p.ifIndex) }, p.ifName) : h('span', null),
+        h('span', null, n.name || n.ip || 'unnamed', n.ip && n.name ? h('span', { class: 'dim mono', style: 'font-size:11.5px' }, ' ' + n.ip) : null),
+        h('span', { class: 'mono', style: 'font-size:12px' }, n.port || '—'),
+        h('span', { style: 'font-size:12px' }, KIND_TEXT[n.kind] ?? n.kind),
+        h('span', { class: 'mono', style: 'font-size:12px' }, n.protos.map(x => x.toUpperCase()).join(' · ')),
+        n.device ? btn(`Open ${n.device.name.split('.')[0]}`, { small: true, kind: 'ghost', title: `Open ${n.device.name}${n.devicePort ? ' at ' + n.devicePort.name : ''}`, onclick: () => openPort(n.device!.name, n.devicePort?.name) }) : h('span', { class: 'dim', style: 'font-size:12px' }, 'not an SNMP device'))))))) : null);
 }
 function utilCell(u: number | null, b: number | null): VNode {
   return h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, u === null ? h('span', { class: 'dim' }, 'no data') : [bar(u), h('span', { class: 'mono', style: 'font-size:12px' }, pct(u, 0) + ' ', h('span', { class: 'dim' }, bps(b)))]);
@@ -387,7 +440,8 @@ export function render(): VNode {
           h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, dev.name), h('span', { class: 'muted' }, `${dev.role} · ${dev.ip} · ${dev.profile || 'generic'} · last answered ${ago(dev.lastOk)}`)),
           btn('Edit in SNMP devices', { kind: 'ghost', small: true, onclick: () => go('devices', { id: dev.id }) })),
         dev.status !== 'ok' && dev.lastError ? note(`The last poll failed: ${dev.lastError}`, 'warn') : null,
-        ifTable(dev)) : null,
+        ifTable(dev),
+        neighborsPanel(dev)) : null,
       dev && itf ? h('section', { 'aria-label': 'Selected interface', class: 'panel col', style: 'gap:16px' },
         h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, `${itf.name}${itf.alias ? ' · ' + itf.alias : ''}`),
           h('span', { class: 'muted' }, [itf.speedMbps ? (itf.speedMbps >= 1000 ? itf.speedMbps / 1000 + ' Gbps' : itf.speedMbps + ' Mbps') : 'speed unknown',
