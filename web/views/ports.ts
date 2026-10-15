@@ -1,8 +1,8 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw } from '../state.js';
-import { btn, chip, empty, field, heading, note, seg, select, spinner, textInput } from '../components.js';
-import { bytes, dayClock, debounce, num, RANGES, svcLabel } from '../util.js';
+import { btn, chip, empty, field, heading, note, rangePicker, seg, select, spinner, textInput } from '../components.js';
+import { bytes, dayClock, debounce, detailRange, isRange, num, RANGES, svcLabel } from '../util.js';
 import { Follower } from './stream.js';
 
 /** Flows by port: pick a network device and one of its ports, say how many of the biggest flows to list, and open any of them in the Flow explorer. */
@@ -30,7 +30,7 @@ let devQuery = '';              // text typed into the device finder
 let finding = false;             // the finder is open even though a device is chosen ("Change device")
 let dir = 'either', sort = 'bytes', range = '1h', count = 50;
 /** The followed stream shown under the table. The detail is looked up over at least 24 hours so a flow found a while ago still opens. */
-const follow = new Follower(() => (range === '15m' || range === '1h' || range === '6h' ? '24h' : range), onFollowChange, id => pick(id));
+const follow = new Follower(() => detailRange(range), onFollowChange, id => pick(id));
 let scrollToFollow = false;
 function onFollowChange(): void {
   redraw();
@@ -49,7 +49,7 @@ export function enter(p: URLSearchParams): void {
   const d = p.get('dir'), s = p.get('sort'), r = p.get('range'), n = Number(p.get('n'));
   if (d && DIRS.some(x => x[0] === d)) dir = d;
   if (s && SORTS.some(x => x[0] === s)) sort = s;
-  if (r && RANGES.some(x => x[0] === r)) range = r;
+  if (r && isRange(r)) range = r;
   if (n && (src?.counts ?? [25, 50, 100, 200, 500]).includes(n)) count = n;
   void loadSources().then(() => { if (who) void load(); });
 }
@@ -160,7 +160,7 @@ function picker(): VNode {
         : who.startsWith('e:') ? field('Interface number (ifIndex)', textInput(port === '0' ? '' : port, v => { port = /^\d+$/.test(v.trim()) ? v.trim() : '0'; changed(true); }, { placeholder: 'blank = all ports', aria: 'Interface number', width: '190px', mono: true }), 'This device is not polled over SNMP, so its ports have numbers only.') : null),
     h('div', { class: 'row', style: 'align-items:end;gap:14px' },
       field('Direction', select(dir, DIRS, v => { dir = v; changed(); }, { aria: 'Direction', width: '190px' })),
-      field('Time range', select(range, RANGES, v => { range = v; changed(); }, { aria: 'Time range', width: '176px' })),
+      field('Time range', rangePicker('ports', range, RANGES, v => { range = v; changed(); }, { aria: 'Time range' })),
       field('Rank by', select(sort, SORTS, v => { sort = v; changed(); }, { aria: 'Rank flows by', width: '160px' })),
       h('div', { class: 'field' }, h('span', { class: 'flabel' }, 'Show the top'),
         seg('How many flows', (src?.counts ?? [25, 50, 100, 200, 500]).map(n => ({ id: String(n), label: String(n), on: count === n })), id => { count = Number(id); changed(); }))));

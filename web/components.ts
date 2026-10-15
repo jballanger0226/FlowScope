@@ -1,5 +1,6 @@
 import { h, type Child, type VNode } from './vdom.js';
 import { redraw } from './state.js';
+import { MAX_RANGE_DAYS, UNITS } from './util.js';
 
 export type Kind = 'default' | 'primary' | 'ghost' | 'danger' | 'warn';
 const cls = (...a: (string | false | null | undefined)[]) => a.filter(Boolean).join(' ');
@@ -38,6 +39,36 @@ export function select(value: string, options: [string, string][], onchange: (v:
   return h('select', { class: 'input', value, 'aria-label': o.aria, disabled: o.disabled, style: o.width ? `width:${o.width}` : undefined, onchange: (e: Event) => { onchange((e.target as HTMLSelectElement).value); redraw(); } },
     options.map(([v, l]) => h('option', { key: v, value: v }, l)));
 }
+/**
+ * A time range: the usual presets, or "Custom…" with a number and a unit (minutes, hours, days).
+ * `id` keeps the custom state of this picker apart from the pickers on other pages.
+ */
+const customOn = new Set<string>();
+const draft = new Map<string, { n: string; unit: string }>();
+export function rangePicker(id: string, value: string, presets: [string, string][], onchange: (v: string) => void, o: { aria?: string } = {}): VNode {
+  const m = /^(\d+)([mhd])$/.exec(value);
+  const isPreset = presets.some(p => p[0] === value);
+  const custom = customOn.has(id) || !isPreset;
+  const d = draft.get(id) ?? (m ? { n: m[1], unit: m[2] } : { n: '1', unit: 'h' });
+  const maxFor = (unit: string) => Math.floor(MAX_RANGE_DAYS * 86_400_000 / UNITS.find(u => u[0] === unit)![2]);
+  const invalid = () => { const n = Number(d.n); return !(d.n.trim() !== '' && Number.isInteger(n) && n >= 1 && n <= maxFor(d.unit)); };
+  const bad = invalid();
+  // the value is checked when it is applied, not when the page was last drawn; a repeat of the current value (change, then Enter) asks for nothing
+  const apply = () => { draft.set(id, d); if (!invalid() && d.n + d.unit !== value) onchange(d.n + d.unit); redraw(); };
+  return h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' },
+    select(custom ? 'custom' : value, [...presets, ['custom', 'Custom…']], v => {
+      if (v === 'custom') { customOn.add(id); draft.set(id, d); } else { customOn.delete(id); draft.delete(id); onchange(v); }
+    }, { aria: o.aria, width: '150px' }),
+    custom ? [
+      h('input', { class: 'input mono', type: 'number', min: 1, max: maxFor(d.unit), value: d.n, 'aria-label': (o.aria ?? 'Time range') + ': length', 'aria-invalid': bad ? 'true' : undefined, style: 'width:84px',
+        oninput: (e: Event) => { d.n = (e.target as HTMLInputElement).value; draft.set(id, d); redraw(); },
+        onchange: apply, onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter') apply(); } }),
+      select(d.unit, UNITS.map(u => [u[0], u[1]] as [string, string]), v => { d.unit = v; draft.set(id, d); apply(); }, { aria: (o.aria ?? 'Time range') + ': unit', width: '104px' }),
+      bad ? h('span', { class: 'muted', role: 'status', style: 'font-size:12px' }, `Enter a whole number from 1 to ${num2(maxFor(d.unit))} (the limit is ${MAX_RANGE_DAYS} days)`) : null
+    ] : null);
+}
+const num2 = (n: number) => n.toLocaleString('en-US');
+
 /** An on/off switch drawn as a button, with its state in words. */
 export function toggle(label: Child, on: boolean, onclick: () => void, o: { onText?: string; offText?: string; disabled?: boolean } = {}): VNode {
   return h('button', { type: 'button', class: 'toggle', 'aria-pressed': on, disabled: o.disabled, onclick }, h('span', null, label), h('span', { class: 'tstate' }, on ? o.onText ?? 'On' : o.offText ?? 'Off'));

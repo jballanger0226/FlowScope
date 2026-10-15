@@ -1,7 +1,7 @@
 import { h, type VNode } from '../vdom.js';
 import { post, downloadPost } from '../api.js';
 import { redraw } from '../state.js';
-import { bar, btn, chip, field, msg, note, select, seg, spinner } from '../components.js';
+import { bar, btn, chip, field, msg, note, rangePicker, select, seg, spinner } from '../components.js';
 import { bytes, num, pct, RANGES, stamp, debounce } from '../util.js';
 
 interface Res {
@@ -121,7 +121,7 @@ export function render(): VNode {
               h('input', { class: 'input mono' + (customBad() ? ' bad' : ''), type: 'number', inputmode: 'numeric', min: 0, max: 32, step: 1, value: customText, 'aria-label': 'Prefix length, 0 to 32', 'aria-invalid': customBad(), style: 'width:76px', oninput: (e: Event) => { customText = (e.target as HTMLInputElement).value; customSoon(); redraw(); } })) : null),
           customOn ? (customBad() ? h('span', { class: 'msg bad', role: 'alert' }, 'Enter a whole number from 0 to 32.') : h('span', { class: 'dim', style: 'font-size:12px' }, prefix === 0 ? '/0 puts every address in one group.' : prefix === 32 ? '/32 keeps each host separate.' : `Addresses are grouped into /${prefix} networks.`)) : null),
         btn('Combine A ↔ B (merge both directions of a host pair)', { pressed: bidir, onclick: () => { bidir = !bidir; void run(); redraw(); } }),
-        field('Time range', select(range, RANGES, v => { range = v; void run(); redraw(); }, { aria: 'Time range', width: '176px' })),
+        field('Time range', rangePicker('reports', range, RANGES, v => { range = v; void run(); redraw(); }, { aria: 'Time range' })),
         field('Rank by', select(sortBy, [['bytes', 'Bytes'], ['pkts', 'Packets'], ['flows', 'Flows']], v => { sortBy = v; void run(); redraw(); }, { aria: 'Rank by', width: '130px' })),
         field('Show', select(topN, [['10', 'Top 10'], ['25', 'Top 25'], ['100', 'Top 100'], ['all', 'Up to 1000']], v => { topN = v; void run(); redraw(); }, { aria: 'Rows to show', width: '130px' })),
         r ? h('span', { class: 'muted', style: 'max-width:300px' }, `Read from ${r.tier === 'raw' ? 'raw records' : r.tier === 'm1' ? '1-minute rollups' : r.tier === 'h1' ? '1-hour rollups' : 'daily rollups'}, the finest tier that covers this range.`) : null)),
