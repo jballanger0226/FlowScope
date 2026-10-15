@@ -123,3 +123,44 @@ test('exporters that are not polled devices are left as they are', () => {
 test('neighborViews is stable for an empty list', () => {
   assert.deepEqual(neighborViews([], env(), DEVS), []);
 });
+
+/* ---- a switch that exports on input and on output reports each packet twice, each half knowing only one port */
+import { analyzeStream } from '../src/analysis/hops.js';
+import type { FlowRecord } from '../src/collector/types.js';
+
+const rec = (over: Partial<FlowRecord>): FlowRecord => ({
+  ts0: 1_000_000, ts1: 1_030_000, exporter: 'sw', inIf: 0, outIf: 0, srcIp: '192.168.254.248', dstIp: '192.168.10.39', proto: 6, sport: 58146, dport: 554,
+  flags: 0x1b, tos: 0, postTos: null, ttlMin: null, ttlMax: null, bytes: 1000, pkts: 10, srcMac: null, dstMac: null, vlan: null,
+  natSrcIp: null, natDstIp: null, natSport: null, natDport: null, nextHop: null, sampling: 1, ...over
+});
+const hctx = { deviceName: (ip: string) => ip, deviceRole: () => 'switch', ifName: (_: string, i: number) => (i ? `if${i}` : '—') };
+
+test('input-only and output-only records from one exporter are one hop with both ports, counted once', () => {
+  const d = analyzeStream('k', [
+    rec({ inIf: 1, outIf: 0, bytes: 5000, pkts: 50 }),
+    rec({ inIf: 0, outIf: 46, bytes: 5000, pkts: 50, ts0: 1_000_002 }),
+    rec({ inIf: 1, outIf: 0, bytes: 100, pkts: 1, ts0: 1_010_000 })
+  ], hctx)!;
+  const h = d.forward[0];
+  assert.equal(h.inIfIndex, 1); assert.equal(h.outIfIndex, 46);
+  assert.equal(h.pkts, 51, 'the larger half, not the sum of both'); assert.equal(h.bytes, 5100);
+  assert.ok(!h.obs.some(o => o.kind === 'path'), 'not reported as load sharing');
+});
+
+test('records that carry both ports are left alone, and a one-sided exporter stays one-sided', () => {
+  const full = analyzeStream('k', [rec({ inIf: 1, outIf: 2, bytes: 700, pkts: 7 })], hctx)!.forward[0];
+  assert.equal(full.inIfIndex, 1); assert.equal(full.outIfIndex, 2); assert.equal(full.pkts, 7);
+  const half = analyzeStream('k', [rec({ inIf: 1, outIf: 0, bytes: 700, pkts: 7 })], hctx)!.forward[0];
+  assert.equal(half.inIfIndex, 1); assert.equal(half.outIfIndex, 0); assert.equal(half.outIf, '—');
+  const mixed = analyzeStream('k', [rec({ inIf: 1, outIf: 2 }), rec({ inIf: 3, outIf: 4, bytes: 50 })], hctx)!.forward[0];
+  assert.ok(mixed.obs.some(o => o.kind === 'path'), 'two full pairs are still reported as two paths');
+});
+
+test('a multicast switch counts its input side, not the replicas', () => {
+  const g = '239.1.1.1';
+  const d = analyzeStream('k', [
+    rec({ dstIp: g, inIf: 1, outIf: 0, bytes: 1000, pkts: 10 }),
+    rec({ dstIp: g, inIf: 0, outIf: 5, bytes: 1000, pkts: 10 }), rec({ dstIp: g, inIf: 0, outIf: 6, bytes: 1000, pkts: 10 }), rec({ dstIp: g, inIf: 0, outIf: 7, bytes: 1000, pkts: 10 })
+  ], hctx)!.forward[0];
+  assert.equal(d.pkts, 10); assert.equal(d.inIfIndex, 1);
+});

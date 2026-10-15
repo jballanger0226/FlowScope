@@ -92,7 +92,26 @@ interface Agg {
   ttlLow: number | null; ttlWhy: 'ttl' | 'icmp' | null;
 }
 
-function aggregate(recs: FlowRecord[], local: ReadonlySet<string>): Agg[] {
+/**
+ * A switch that exports on both input and output reports each packet twice, once from each monitor, and each half knows only one port:
+ * the input monitor has the ingress interface and no egress (0), the output monitor the reverse. They are the same packets, so they are
+ * one hop with one in port and one out port, and the packets and bytes are counted once. Records that carry both ports are left as they are.
+ */
+function halves(rs: FlowRecord[]): { inOnly: FlowRecord[]; outOnly: FlowRecord[] } | null {
+  if (rs.some(r => r.inIf && r.outIf)) return null;
+  const inOnly = rs.filter(r => r.inIf && !r.outIf), outOnly = rs.filter(r => !r.inIf && r.outIf);
+  return inOnly.length && outOnly.length ? { inOnly, outOnly } : null;
+}
+
+function busiest(rs: FlowRecord[], key: (r: FlowRecord) => number): number {
+  const by = new Map<number, number>();
+  for (const r of rs) by.set(key(r), (by.get(key(r)) ?? 0) + r.bytes);
+  let best = 0, bb = -1;
+  for (const [k, b] of by) if (b > bb) { best = k; bb = b; }
+  return best;
+}
+
+function aggregate(recs: FlowRecord[], local: ReadonlySet<string>, multicast = false): Agg[] {
   const by = new Map<string, FlowRecord[]>();
   for (const r of recs) { const a = by.get(r.exporter); if (a) a.push(r); else by.set(r.exporter, [r]); }
   const out: Agg[] = [];
@@ -109,15 +128,34 @@ function aggregate(recs: FlowRecord[], local: ReadonlySet<string>): Agg[] {
       const k = r.inIf + '>' + r.outIf; ifBytes.set(k, (ifBytes.get(k) ?? 0) + r.bytes);
       if (r.natSrcIp || r.natDstIp) nat = r;
     }
-    let best = '', bb = -1;
-    for (const [k, b] of ifBytes) if (b > bb) { best = k; bb = b; }
-    const [ii, oo] = best.split('>').map(Number);
-    const main = rs.find(r => r.inIf === ii && r.outIf === oo) ?? rs[0];
+    let ii: number, oo: number;
+    let main: FlowRecord;
+    let outIfs: number[];
+    let multiPath: boolean;
+    const hv = halves(rs);
+    if (hv) {
+      // one pair, and the larger of the two halves as the count (they cover the same packets; the smaller one may just have been cut at the edge of the window)
+      ii = busiest(hv.inOnly, r => r.inIf); oo = busiest(hv.outOnly, r => r.outIf);
+      const sum = (a: FlowRecord[], k: 'pkts' | 'bytes') => a.reduce((t, r) => t + r[k], 0);
+      // a multicast switch replicates, so its output side is larger than its input and the input side is the stream
+      if (multicast || sum(hv.inOnly, 'bytes') >= sum(hv.outOnly, 'bytes')) { pkts = sum(hv.inOnly, 'pkts'); bytes = sum(hv.inOnly, 'bytes'); } else { pkts = sum(hv.outOnly, 'pkts'); bytes = sum(hv.outOnly, 'bytes'); }
+      main = hv.inOnly.find(r => r.inIf === ii) ?? rs[0];
+      const outBytes = new Map<number, number>();
+      for (const r of hv.outOnly) outBytes.set(r.outIf, (outBytes.get(r.outIf) ?? 0) + r.bytes);
+      outIfs = [...outBytes].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+      multiPath = new Set(hv.inOnly.map(r => r.inIf)).size > 1 || outBytes.size > 1;
+    } else {
+      let best = '', bb = -1;
+      for (const [k, b] of ifBytes) if (b > bb) { best = k; bb = b; }
+      [ii, oo] = best.split('>').map(Number);
+      main = rs.find(r => r.inIf === ii && r.outIf === oo) ?? rs[0];
+      outIfs = [...ifBytes].sort((a, b) => b[1] - a[1]).map(([k]) => Number(k.split('>')[1]));
+      multiPath = ifBytes.size > 1;
+    }
     const post = rs.find(r => r.postTos !== null && r.postTos !== undefined);
     out.push({
       exporter, recs: rs, pkts, bytes, t0, t1, ttl, tosIn: main.tos >> 2, tosOut: post && post.postTos !== null ? post.postTos >> 2 : null,
-      inIf: ii, outIf: oo, macS: main.srcMac, macD: main.dstMac, vlan: main.vlan, nat, multiPath: ifBytes.size > 1, ttlLow, ttlWhy,
-      outIfs: [...ifBytes].sort((a, b) => b[1] - a[1]).map(([k]) => Number(k.split('>')[1]))
+      inIf: ii, outIf: oo, macS: main.srcMac, macD: main.dstMac, vlan: main.vlan, nat, multiPath, ttlLow, ttlWhy, outIfs
     });
   }
   return out;
@@ -136,7 +174,7 @@ function buildHops(recs: FlowRecord[], ctx: HopContext, multicast = false): HopV
   // Multicast is one source and many receivers. Every device on the distribution tree sees the same packets, so they are not in series:
   // there is no previous hop to compare with (loss, latency, DSCP change) and the TTL does not give an order across branches.
   const aggs = multicast
-    ? aggregate(recs, ctx.localIps ?? new Set()).sort((x, y) => ctx.deviceName(x.exporter).localeCompare(ctx.deviceName(y.exporter)))
+    ? aggregate(recs, ctx.localIps ?? new Set(), true).sort((x, y) => ctx.deviceName(x.exporter).localeCompare(ctx.deviceName(y.exporter)))
     : order(aggregate(recs, ctx.localIps ?? new Set()));
   const dest = recs[0].dstIp;
   const slow = ctx.slowLinkMs ?? 30;
