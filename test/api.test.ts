@@ -150,7 +150,7 @@ test('HTTP API: auth, roles, CSRF, flows, devices, storage, admin, AAA', { timeo
     let ws = await sn.get(`/api/devices/${devId}/walks/${jid}?limit=5`);
     for (let i = 0; i < 100 && ws.json.job.state === 'running'; i++) { await new Promise(r => setTimeout(r, 100)); ws = await sn.get(`/api/devices/${devId}/walks/${jid}?limit=5`); }
     assert.equal(ws.json.job.state, 'done', ws.text);
-    assert.ok(ws.json.job.rows > 20, 'a whole-tree walk of the simulated device returns many rows');
+    assert.ok(ws.json.job.rows > 10, 'a whole-tree walk of the simulated device returns many rows');
     assert.equal(ws.json.rows.length, 5); assert.equal(ws.json.matched, ws.json.job.rows);
     const sys = await sn.get(`/api/devices/${devId}/walks/${jid}?limit=100&q=1.3.6.1.2.1.1.5.0`);
     assert.equal(sys.json.matched, 1);

@@ -149,7 +149,8 @@ export class SnmpClient {
       });
       const batch: VarBind[] = [];
       let end = false;
-      for (const vb of vbs) {
+      // GETBULK hands back one array of varbinds per OID asked about (the repeaters), where GETNEXT hands back plain varbinds
+      for (const vb of vbs.flat() as any[]) {
         if (snmp.isVarbindError(vb) || isMissing(vb.type) || !String(vb.oid).startsWith(prefix)) { end = true; break; }
         if (compareOid(vb.oid, cur) <= 0) { if (batch.length) onRows(batch); return 'disorder'; }
         batch.push(convert(vb)); cur = vb.oid;
