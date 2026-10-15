@@ -1,4 +1,5 @@
 import net from 'node:net';
+import { forgetResources, pruneResources, recordResources, resourceSeries, type ResSeries } from './resource_history.js';
 import type { ConfigDb } from '../db/configdb.js';
 import type { CredentialStore } from './creds.js';
 import { SnmpClient, type SnmpTarget } from './client.js';
@@ -179,7 +180,11 @@ export class DeviceService {
   /** Keeps the latest resource reading of a device. Each read replaces the last one. */
   saveResources(id: number, r: Resources): void {
     this.cdb.db.prepare('INSERT INTO device_resources(dev_id, data, read_at) VALUES (?,?,?) ON CONFLICT(dev_id) DO UPDATE SET data=excluded.data, read_at=excluded.read_at').run(id, JSON.stringify(r), r.readAt);
+    try { recordResources(this.cdb.db, id, r); } catch { /* history is a bonus: never let it fail a poll */ }
   }
+
+  resourceHistory(id: number, from: number, to: number, points: number): ResSeries { return resourceSeries(this.cdb.db, id, from, to, points); }
+  pruneResourceHistory(days: number): void { pruneResources(this.cdb.db, days); }
 
   resources(id: number): Resources | null {
     const r = this.cdb.db.prepare('SELECT data FROM device_resources WHERE dev_id = ?').get(id) as { data: string } | undefined;
@@ -285,6 +290,8 @@ export class DeviceService {
     this.cdb.tx(() => {
       for (const t of ['interfaces', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
       this.cdb.db.prepare('UPDATE exporters SET device_id = NULL WHERE device_id = ?').run(id);
+      this.cdb.db.prepare('DELETE FROM device_resources WHERE dev_id = ?').run(id);
+      forgetResources(this.cdb.db, id);
       this.cdb.db.prepare('DELETE FROM devices WHERE id = ?').run(id);
     });
     await this.store.deleteDevice(id);

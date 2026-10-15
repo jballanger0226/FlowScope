@@ -192,6 +192,14 @@ const MIGRATIONS: string[] = [
   ALTER TABLE device_ips ADD COLUMN mask TEXT NOT NULL DEFAULT '';
   CREATE TABLE device_resources (dev_id INTEGER PRIMARY KEY, data TEXT NOT NULL, read_at INTEGER NOT NULL);
   CREATE INDEX interfaces_mac ON interfaces(mac);
+  `,
+  `
+  -- history of device resources: a reading about every minute for a few days, and an hourly summary (average and peak) for a year
+  CREATE TABLE resource_samples (dev_id INTEGER NOT NULL, ts INTEGER NOT NULL, cpu REAL, mem REAL, swap REAL, disk REAL, load1 REAL, up INTEGER, PRIMARY KEY (dev_id, ts)) WITHOUT ROWID;
+  CREATE TABLE resource_1h (dev_id INTEGER NOT NULL, ts INTEGER NOT NULL, n INTEGER NOT NULL,
+    cpu_sum REAL, cpu_n INTEGER NOT NULL DEFAULT 0, cpu_max REAL, mem_sum REAL, mem_n INTEGER NOT NULL DEFAULT 0, mem_max REAL,
+    swap_sum REAL, swap_n INTEGER NOT NULL DEFAULT 0, swap_max REAL, disk_sum REAL, disk_n INTEGER NOT NULL DEFAULT 0, disk_max REAL,
+    load_sum REAL, load_n INTEGER NOT NULL DEFAULT 0, load_max REAL, up_min INTEGER, up_max INTEGER, PRIMARY KEY (dev_id, ts)) WITHOUT ROWID;
   `
 ];
 

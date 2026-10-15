@@ -218,6 +218,7 @@ export class App {
     every(60_000, async () => { const r = await this.store.maintain(this.settings.get('retention')); if (r.dropped.length) this.log.info('store', `Retention removed ${r.dropped.join(', ')}`); });
     every(60_000, () => this.syncExporters());
     every(3600_000, () => this.auth.sweep());
+    every(3600_000, () => { try { this.devices.pruneResourceHistory(this.settings.get('retention').sH); } catch { /* retried next hour */ } });
     every(6 * 3600_000, () => { const a = this.certs.status().active; if (a && a.daysLeft < 30) this.log.warn('cert', `The HTTPS certificate expires in ${a.daysLeft} days`); });
     void this.store.maintain(this.settings.get('retention')).catch(() => undefined);
     this.log.info('app', `FlowScope ${describeVersion(VERSION)} started. Web: ${this.ports.https ? 'https://:' + this.ports.https : ''} ${this.ports.http ? 'http://:' + this.ports.http : ''}; flow ports: ${this.collector.boundPorts.join(', ')}; data: ${cfg.dataDir}`);

@@ -119,7 +119,7 @@ function modeManage(): VNode {
         d.lastError && d.status !== 'ok' ? note(`The last poll failed: ${d.lastError}`, 'warn') : null,
         h('div', { class: 'row' },
           btn(d.polling ? 'Pause polling' : 'Resume polling', { disabled: mBusy, onclick: () => void setPolling(d, !d.polling) }),
-          btn('Open in Links and QoS', { onclick: () => go('links', { dev: d.name }) }),
+          btn('Open in Network health', { onclick: () => go('links', { dev: d.name }) }),
           btn('Read interfaces again', { kind: 'ghost', disabled: mBusy, onclick: () => void rediscover(d) }),
           !confirmRemove ? btn('Remove device', { kind: 'danger', onclick: () => { confirmRemove = true; redraw(); } }) : null),
         confirmRemove ? h('div', { class: 'note bad col', style: 'gap:10px' },

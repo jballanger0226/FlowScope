@@ -174,7 +174,9 @@ Reads standard MIB-II / IF-MIB (`ifDescr`, `ifName`, `ifAlias`, `ifHighSpeed`, `
 
 ### Service policies (Cisco class-based QoS)
 
-Both directions are read: the output policy that queues traffic on an interface and the input policy that marks or polices it. Input classes are listed with an `in` tag. Bandwidth guarantees use the MIB's units (percent, percent of remaining, kbps). Counters fall back from 64-bit to 32-bit when a device only implements the 32-bit ones, and per-VLAN policies are labelled with their VLAN. Control-plane policies are skipped because they do not belong to an interface. The poller re-reads the policy structure every hour so a policy attached later is picked up, and if a device returns nothing the reason is shown on the Links and QoS page (it is also stored in `devices.qos_note`) rather than the policy silently going missing.
+Both directions are read: the output policy that queues traffic on an interface and the input policy that marks or polices it. Input classes are listed with an `in` tag. Bandwidth guarantees use the MIB's units (percent, percent of remaining, kbps). Counters fall back from 64-bit to 32-bit when a device only implements the 32-bit ones, and per-VLAN policies are labelled with their VLAN. Control-plane policies are skipped because they do not belong to an interface. The poller re-reads the policy structure every hour so a policy attached later is picked up, and if a device returns nothing the reason is shown on the Network health page (it is also stored in `devices.qos_note`) rather than the policy silently going missing.
+
+Every device, switches and access points included, also reports its uptime, CPU, memory, swap, load and the fullest disks, read about once a minute from the first MIB it answers (Cisco process and memory pools, UCD-SNMP, HOST-RESOURCES). Network health shows them as tiles with a trend line and, below them, graphs of the history: a reading a minute is kept for three days and an hourly average and peak for the retention period of SNMP history, so a spike from last week is still visible. A drop in uptime is shown as a restart on the graphs.
 
 ### Ports, VLANs and finding hosts
 
@@ -197,7 +199,7 @@ Things to know:
 * **Cisco Catalyst switches keep one MAC table per VLAN.** To read them FlowScope uses the VLAN community (`community@vlan`) for SNMPv1/v2c, or the context `vlan-N` for SNMPv3. The SNMPv3 user must be allowed to use those contexts (`snmp-server group ... context vlan- match prefix` on IOS), and the device must accept VLAN-indexed communities. If the first three VLANs fail, FlowScope stops and says how many VLANs could not be read instead of waiting out a timeout for each.
 * A switch has to be in the device list for its ports to be known; a host behind an unmanaged switch is shown on the uplink side as "not found" or on the nearest managed port with a lower confidence.
 * The reads add SNMP load (one table walk per VLAN on Catalyst). Host tracking can be turned off or slowed down with `PUT /api/hosts/settings` (SNMP admin role; there is no screen for it yet) with `enabled`, `intervalSec` 60 to 86400 and `keepDays` 1 to 365. Addresses that disappear from a table are kept, marked as gone, for `keepDays`.
-* Interfaces that are VLANs or SVIs are left out of "Needs attention" on Links and QoS, since they carry routed traffic for a whole subnet and not a physical link.
+* Interfaces that are VLANs or SVIs are left out of "Needs attention" on Network health, since they carry routed traffic for a whole subnet and not a physical link.
 
 ### Multicast streams
 

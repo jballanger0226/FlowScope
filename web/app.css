@@ -143,6 +143,7 @@ select.input { padding-right: 8px; }
 .status.ok { color: var(--ok); } .status.warn { color: var(--warn); } .status.bad { color: var(--bad); }
 .stats { display: flex; flex-wrap: wrap; gap: 12px; }
 .stat { min-width: 150px; padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.spark { display: block; margin-top: 6px; overflow: visible; } .spark polyline { fill: none; stroke: var(--s1); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; } .spark circle { fill: var(--s1); }
 .slabel { font-size: 12px; color: var(--muted); } .svalue { font-size: 20px; font-weight: 600; margin-top: 2px; } .ssub { font-size: 12px; color: var(--dim); }
 .bar { display: inline-block; width: 90px; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; vertical-align: middle; }
 .barfill { display: block; height: 100%; } .barfill.accent { background: var(--accent); } .barfill.ok { background: var(--ok); } .barfill.warn { background: var(--warn); } .barfill.bad { background: var(--bad); }

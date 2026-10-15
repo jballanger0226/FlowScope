@@ -90,6 +90,15 @@ export function heading(eyebrow: string, title: string, blurb?: Child): VNode {
   return h('div', { class: 'heading' }, h('span', { class: 'eyebrow' }, eyebrow), h('h2', null, title), blurb ? h('p', { class: 'blurb' }, blurb) : null);
 }
 
+/** A tiny trend line with no axes, for a stat tile. Values are drawn on a fixed 0 to `max` scale when given, so a quiet device does not look busy. */
+export function spark(values: number[], o: { max?: number; w?: number; h?: number; label: string }): VNode | null {
+  if (values.length < 2) return null;
+  const W = o.w ?? 120, H = o.h ?? 26, hi = o.max ?? Math.max(...values, 1e-9), lo = o.max !== undefined ? 0 : Math.min(...values);
+  const span = Math.max(1e-9, hi - lo);
+  const pts = values.map((v, i) => `${((i / (values.length - 1)) * (W - 2) + 1).toFixed(1)},${(H - 2 - ((Math.min(hi, Math.max(lo, v)) - lo) / span) * (H - 4)).toFixed(1)}`);
+  return h('svg', { class: 'spark', viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: 'img', 'aria-label': o.label }, h('polyline', { points: pts.join(' ') }),
+    h('circle', { cx: pts[pts.length - 1].split(',')[0], cy: pts[pts.length - 1].split(',')[1], r: 2.2 }));
+}
 export function stat(label: string, value: Child, sub?: Child): VNode { return h('div', { class: 'stat' }, h('div', { class: 'slabel' }, label), h('div', { class: 'svalue' }, value), sub ? h('div', { class: 'ssub' }, sub) : null); }
 
 export function bar(value: number, max = 100, kind: 'auto' | 'ok' | 'warn' | 'bad' | 'accent' = 'auto'): VNode {

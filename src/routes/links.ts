@@ -133,6 +133,15 @@ export function registerLinks(app: App): void {
     c.json({ range, util: u, classes: k.classes.map(cl => ({ ...cl, dscps: defs.find(d => d.cls === cl.cls)?.dscps ?? [], bw: defs.find(d => d.cls === cl.cls)?.bw ?? null })), step: u.step, tier: u.tier });
   });
 
+  // History of one device's CPU, memory, swap, disk and load, and the moments it restarted
+  w.get('/api/links/resources', 'ro', c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9);
+    if (!app.devices.row(dev)) throw new HttpError(404, 'No such device');
+    const range = parseRange(c.query, '6h');
+    const points = int(c.query.get('points'), 120, 10, 600);
+    c.json({ range, ...app.devices.resourceHistory(dev, range.from, range.to, points) });
+  });
+
   // Events: stretches where utilisation or drops were over the alert thresholds
   w.get('/api/links/events', 'ro', async c => {
     const range = parseRange(c.query, '24h');

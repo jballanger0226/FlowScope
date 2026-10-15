@@ -1,7 +1,7 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw, go } from '../state.js';
-import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, stat, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
+import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, spark, stat, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
 import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, rangeMs, svcLabel } from '../util.js';
 import { post } from '../api.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
@@ -50,6 +50,10 @@ let devId = 0; let ifIndex = 0;
 let graphRange = '6h';
 let dropThr = 1;
 let hidden = new Set<string>();
+interface ResPoint { ts: number; cpu: number | null; cpuMax: number | null; mem: number | null; memMax: number | null; swap: number | null; disk: number | null; load: number | null; loadMax: number | null }
+interface ResHist { step: number; tier: 'raw' | 'h1'; points: ResPoint[]; restarts: number[] }
+let resHist: ResHist | null = null; let resHistError = ''; let resHistLoading = false; let resRange = '6h'; let resOpen = true;
+const RES_RANGES: [string, string][] = [['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['3d', 'Last 3 days'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
 let series: SeriesRes | null = null; let seriesError = ''; let seriesLoading = false;
 let streams: StreamRow[] = []; let streamsTotal = 0; let streamsLoading = false;
 let pendingName: { dev: string; ifn: string } | null = null;
@@ -66,7 +70,7 @@ export function enter(p: URLSearchParams): void {
   }
   void load();
   window.clearInterval(timer);
-  timer = window.setInterval(() => { if (!document.hidden && location.hash.startsWith('#/links')) void load(true); }, 30_000);
+  timer = window.setInterval(() => { if (!document.hidden && location.hash.startsWith('#/links')) { void load(true); void loadResHist(true); } }, 30_000);
 }
 
 async function load(quiet = false): Promise<void> {
@@ -95,10 +99,21 @@ let prevDev = 0;
 function select_(d: number, i: number): void {
   if (d !== devId) ifSearch = '';
   devId = d; ifIndex = i; series = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
-  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); }
+  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHist = null; void loadResHist(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
+}
+
+let rseq = 0;
+async function loadResHist(quiet = false): Promise<void> {
+  if (!devId) return;
+  const my = ++rseq, d = devId; if (!quiet) { resHistLoading = true; resHistError = ''; redraw(); }
+  try {
+    const r = await get<ResHist>('/api/links/resources' + qs({ dev: d, range: resRange, points: 120 }));
+    if (my === rseq && d === devId) { resHist = r; resHistError = ''; }
+  } catch (e) { if (my === rseq && !quiet) { resHist = null; resHistError = (e as Error).message; } }
+  if (my === rseq) { resHistLoading = false; redraw(); }
 }
 
 let sseq = 0;
@@ -297,7 +312,7 @@ function nbCell(ns: Neighbor[]): VNode {
     const tip = `${n.protos.map(p => p.toUpperCase()).join('·')}: ${n.name || n.ip}${n.port ? ' ' + n.port : ''}`;
     return h('span', { key: k, title: tip },
       n.device
-        ? h('button', { type: 'button', class: 'lnk', style: 'font-weight:500', title: `Open ${n.device.name}${n.devicePort ? ' at ' + n.devicePort.name : ''} in Links and QoS`, onclick: (e: Event) => { e.stopPropagation(); openPort(n.device!.name, n.devicePort?.name); } }, label)
+        ? h('button', { type: 'button', class: 'lnk', style: 'font-weight:500', title: `Open ${n.device.name}${n.devicePort ? ' at ' + n.devicePort.name : ''} in Network health`, onclick: (e: Event) => { e.stopPropagation(); openPort(n.device!.name, n.devicePort?.name); } }, label)
         : h('span', { style: 'font-weight:500' }, label),
       n.port ? h('span', { class: 'dim mono', style: 'font-size:11.5px' }, ' ' + n.port) : null);
   }));
@@ -320,7 +335,7 @@ function neighborsPanel(dev: Dev): VNode {
       h('div', { class: 'scroll', style: 'max-height:320px' }, ports.flatMap(p => p.neighbors.map((n, k) => h('div', { key: p.ifIndex + '/' + k, class: 'tr' },
         k === 0 ? h('button', { type: 'button', class: 'lnk', title: `Show ${p.ifName}`, onclick: () => select_(dev.id, p.ifIndex) }, p.ifName) : h('span', null),
         h('span', null, n.device
-          ? h('button', { type: 'button', class: 'lnk', title: `Open ${n.device.name}${n.devicePort ? ' at ' + n.devicePort.name : ''} in Links and QoS`, onclick: () => openPort(n.device!.name, n.devicePort?.name) }, n.name || n.device.name)
+          ? h('button', { type: 'button', class: 'lnk', title: `Open ${n.device.name}${n.devicePort ? ' at ' + n.devicePort.name : ''} in Network health`, onclick: () => openPort(n.device!.name, n.devicePort?.name) }, n.name || n.device.name)
           : (n.name || n.ip || 'unnamed'), n.ip && n.name ? h('span', { class: 'dim mono', style: 'font-size:11.5px' }, ' ' + n.ip) : null),
         h('span', { class: 'mono', style: 'font-size:12px' }, n.port || '—'),
         h('span', { style: 'font-size:12px' }, KIND_TEXT[n.kind] ?? n.kind),
@@ -535,12 +550,13 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
 }
 
 /** The tiles for uptime, CPU, memory and disks, the same for switches, routers, firewalls and access points. */
-function resourceTileList(r: Resources): VNode[] {
+function resourceTileList(r: Resources, hist?: ResHist | null): VNode[] {
+  const trend = (pick: (p: ResPoint) => number | null, label: string, max?: number): VNode | null => (hist ? spark(hist.points.map(pick).filter((v): v is number => v !== null), { max, label }) : null);
   const tiles: VNode[] = [];
   if (r.uptimeSec !== null) tiles.push(stat('Uptime', dur(r.uptimeSec * 1000)));
-  if (r.cpuPct !== null) tiles.push(stat('CPU', h('span', { style: sevStyle(r.cpuPct) }, `${Math.round(r.cpuPct)}%`), [r.cores ? `${r.cores} cores` : null, r.load ? `load ${r.load.map(x => x.toFixed(2)).join(' / ')}` : null].filter(Boolean).join(' · ') || undefined));
+  if (r.cpuPct !== null) tiles.push(stat('CPU', h('span', { style: sevStyle(r.cpuPct) }, `${Math.round(r.cpuPct)}%`), [h('span', null, [r.cores ? `${r.cores} cores` : null, r.load ? `load ${r.load.map(x => x.toFixed(2)).join(' / ')}` : null].filter(Boolean).join(' · ')), trend(p => p.cpu, 'CPU over the chosen range', 100)]));
   else if (r.load) tiles.push(stat('Load average', r.load.map(x => x.toFixed(2)).join(' / '), '1, 5 and 15 minutes'));
-  if (r.memPct !== null) tiles.push(stat('Memory', h('span', { style: sevStyle(r.memPct) }, `${Math.round(r.memPct)}%`), r.memTotal !== null && r.memUsed !== null ? `${bytes(r.memUsed)} of ${bytes(r.memTotal)}${r.swapPct !== null ? ` · swap ${Math.round(r.swapPct)}%` : ''}` : undefined));
+  if (r.memPct !== null) tiles.push(stat('Memory', h('span', { style: sevStyle(r.memPct) }, `${Math.round(r.memPct)}%`), [h('span', null, r.memTotal !== null && r.memUsed !== null ? `${bytes(r.memUsed)} of ${bytes(r.memTotal)}${r.swapPct !== null ? ` · swap ${Math.round(r.swapPct)}%` : ''}` : ''), trend(p => p.mem, 'Memory over the chosen range', 100)]));
   for (const d of r.disks) tiles.push(stat(`Disk ${d.name}`, h('span', { style: sevStyle(d.usedPct, 80, 95) }, `${d.usedPct < 10 ? d.usedPct.toFixed(1) : Math.round(d.usedPct)}%`), `${bytes(d.usedBytes)} of ${bytes(d.totalBytes)}`));
   return tiles;
 }
@@ -560,11 +576,47 @@ const sevStyle = (p: number | null, warn = 75, bad = 90): string | undefined => 
 function resourcesPanel(dev: Dev): VNode | null {
   const r = dev.resources;
   if (!r) return dev.lastOk === null ? null : h('span', { class: 'dim', style: 'font-size:12px' }, 'This device does not publish uptime, CPU or memory through HOST-RESOURCES-MIB, UCD-SNMP-MIB or the Cisco process and memory MIBs.');
-  const tiles = resourceTileList(r);
+  const tiles = resourceTileList(r, resOpen ? resHist : null);
   if (!tiles.length) return null;
-  return h('div', { class: 'col', style: 'gap:6px' },
+  return h('div', { class: 'col', style: 'gap:10px' },
     h('div', { class: 'row', style: 'gap:10px;align-items:stretch' }, tiles),
-    h('span', { class: 'dim', style: 'font-size:11.5px' }, `Read ${ago(r.readAt)}${r.source ? ' from ' + r.source : ''}. Memory leaves out the file cache where the device reports it.`));
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, `Read ${ago(r.readAt)}${r.source ? ' from ' + r.source : ''}. Memory leaves out the file cache where the device reports it.`),
+    resHistoryPanel(dev));
+}
+
+/** CPU, memory, disk and load over time for the selected device, with its restarts marked. The graphs follow each other's hover like the interface graphs do. */
+function resHistoryPanel(dev: Dev): VNode {
+  const hist = resHist;
+  const spanMs = rangeMs(resRange) ?? 6 * 3600e3;
+  const to = Date.now(), from = to - spanMs;
+  const fmtT = (t: number) => (spanMs > 86400e3 ? dayClock(t) : clock(t, false));
+  const head = h('div', { class: 'row', style: 'justify-content:space-between' },
+    h('div', { class: 'col', style: 'gap:2px' }, h('b', null, 'Resource history'),
+      h('span', { class: 'muted', style: 'font-size:12px' }, 'CPU, memory, disk and load as the device reported them. Point at a graph to read every graph at that moment.')),
+    h('div', { class: 'row' },
+      resOpen ? rangePicker('res-hist', resRange, RES_RANGES, v => { resRange = v; void loadResHist(); }, { aria: 'Resource history time range' }) : null,
+      btn(resOpen ? 'Hide' : 'Show history', { small: true, kind: 'ghost', pressed: resOpen, aria: resOpen ? 'Hide resource history' : 'Show resource history', onclick: () => { resOpen = !resOpen; redraw(); } })));
+  if (!resOpen) return h('div', { class: 'col', style: 'gap:8px' }, head);
+  if (resHistLoading && !hist) return h('div', { class: 'col', style: 'gap:8px' }, head, spinner('Loading the history…'));
+  if (resHistError && !hist) return h('div', { class: 'col', style: 'gap:8px' }, head, note(resHistError, 'bad', true));
+  if (!hist || !hist.points.length) return h('div', { class: 'col', style: 'gap:8px' }, head, h('span', { class: 'dim', style: 'font-size:12px' }, 'No readings are stored for this range yet. They are taken about once a minute while the device answers.'));
+  const col = (k: keyof ResPoint) => hist.points.filter(p => p[k] !== null).map(p => ({ t: p.ts, v: p[k] as number }));
+  // with one-minute readings the peak of a bucket is the reading itself; the peak line only helps once readings are averaged together
+  const peaks = hist.step >= 180_000;
+  const mk = (name: string, color: string, k: keyof ResPoint): Series[] => (col(k).length ? [{ name, color, points: col(k) }] : []);
+  const bands = hist.restarts.map(t => ({ a: t - 30_000, b: t + 30_000 }));
+  const pctV = (v: number) => pct(v, 1);
+  const charts: { key: string; build: (size: { w: number; h: number }) => VNode }[] = [];
+  if (col('cpu').length) charts.push({ key: 'cpu', build: size => lineChart({ ...size, sync: 'res', title: 'CPU', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'cpuMax') : []), ...mk(peaks ? 'Average' : 'CPU', 'var(--s1)', 'cpu')], from, to, bands, fmtT, fmtV: pctV, aria: `CPU of ${dev.name}` }) });
+  if (col('mem').length) charts.push({ key: 'mem', build: size => lineChart({ ...size, sync: 'res', title: 'Memory in use', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'memMax') : []), ...mk(peaks ? 'Average' : 'Memory', 'var(--s2)', 'mem'), ...mk('Swap', 'var(--s4)', 'swap')], from, to, bands, fmtT, fmtV: pctV, aria: `Memory of ${dev.name}` }) });
+  if (col('disk').length) charts.push({ key: 'disk', build: size => lineChart({ ...size, sync: 'res', title: 'Fullest disk', unit: v => Math.round(v) + '%', yMax: 100, series: mk('Disk', 'var(--s3)', 'disk'), from, to, bands, fmtT, fmtV: pctV, aria: `Disk use of ${dev.name}` }) });
+  if (col('load').length) charts.push({ key: 'load', build: size => lineChart({ ...size, sync: 'res', title: 'Load average (1 minute)', unit: v => v.toFixed(v < 10 ? 1 : 0), series: [...(peaks ? mk('Peak', 'var(--s5)', 'loadMax') : []), ...mk(peaks ? 'Average' : 'Load', 'var(--s6)', 'load')], from, to, bands, fmtT, fmtV: v => v.toFixed(2), aria: `Load of ${dev.name}` }) });
+  const restartsIn = hist.restarts.filter(t => t >= from);
+  return h('div', { class: 'col', style: 'gap:10px' }, head,
+    h('div', { class: 'row', style: 'gap:8px' },
+      hist.tier === 'h1' ? chip('hourly summaries', 'info', 'The range is older than the per-minute readings kept (three days), so hourly averages and peaks are shown') : null,
+      restartsIn.length ? chip(`${restartsIn.length === 1 ? 'Restarted' : restartsIn.length + ' restarts, last'} ${hist.tier === 'h1' ? 'around ' : ''}${dayClock(restartsIn[restartsIn.length - 1])}`, 'warn', 'The uptime went backwards: the device restarted. Restarts are shaded on the graphs.') : null),
+    charts.length ? chartGrid(charts.length, size => charts.map(c => c.build(size))) : h('span', { class: 'dim', style: 'font-size:12px' }, 'The stored readings have no CPU, memory or disk values to draw.'));
 }
 
 function streamsPanel(dev: Dev, itf: Iface): VNode {
@@ -582,11 +634,11 @@ function streamsPanel(dev: Dev, itf: Iface): VNode {
 /* ------------------------------------------------------------------ view */
 
 export function render(): VNode {
-  if (loading && !data) return h('main', null, heading('Links and QoS', 'Interfaces and queues'), spinner());
-  if (loadError && !data) return h('main', null, heading('Links and QoS', 'Interfaces and queues'), note(loadError, 'bad', true), btn('Try again', { onclick: () => void load() }));
+  if (loading && !data) return h('main', null, heading('Network health', 'Interfaces, queues and device resources'), spinner());
+  if (loadError && !data) return h('main', null, heading('Network health', 'Interfaces, queues and device resources'), note(loadError, 'bad', true), btn('Try again', { onclick: () => void load() }));
   if (!data) return h('main');
   const { dev, itf } = cur();
-  const head = heading('Links and QoS', 'Interfaces and queues', 'Utilisation, discards and per-class queue drops read from your devices over SNMP. Pick a device and interface to see how it behaved and which streams use it.');
+  const head = heading('Network health', 'Interfaces, queues and device resources', 'How your devices are doing, read over SNMP: uptime, CPU, memory and disk with their history, and for each interface its utilisation, discards and per-class queue drops. Pick a device and interface to see how it behaved and which streams use it.');
   if (!data.devices.length) return h('main', null, head, h('div', { class: 'panel' }, empty('No SNMP devices have been added yet. Add switches and routers on the SNMP devices tab, and their interfaces and queues will appear here.')), btn('Go to SNMP devices', { kind: 'primary', onclick: () => go('devices') }));
   return h('main', null, head, h('div', { class: 'split' }, sidebar(),
     h('div', { class: 'mainp' },

@@ -16,10 +16,10 @@ export const PORT_SOURCE_TEXT: Record<string, string> = {
   host: 'The exporter did not report this port. The MAC address and ARP tables show the host is plugged in to it.'
 };
 
-/** Opens the Links and QoS page on a device and port. */
+/** Opens the Network health page on a device and port. */
 export function openPort(dev: string, port?: string): void { go('links', { dev, if: port }); }
 
-/** A port name that opens that port in Links and QoS, with a note when it was worked out rather than exported. */
+/** A port name that opens that port in Network health, with a note when it was worked out rather than exported. */
 export function portLink(dev: string, name: string, from?: PortSource, canOpen = true): VNode {
   const label = name || '—';
   const link = canOpen && name && name !== '—'
@@ -36,7 +36,7 @@ export function neighborLines(ns: Neighbor[] | undefined): VNode | null {
     return h('div', { key: i, class: 'nbr', title: `${n.protos.map(p => p.toUpperCase()).join(' and ')} neighbour${n.ip ? ' ' + n.ip : ''}${n.caps.length ? ' · ' + n.caps.join(', ') : ''}` },
       h('span', { class: 'dim' }, n.protos.map(p => p.toUpperCase()).join('·') + ' '),
       n.device
-        ? h('button', { type: 'button', class: 'lnk', title: `Open ${n.device.name} in Links and QoS`, onclick: () => openPort(n.device!.name, n.devicePort?.name) }, n.name || n.device.name)
+        ? h('button', { type: 'button', class: 'lnk', title: `Open ${n.device.name} in Network health`, onclick: () => openPort(n.device!.name, n.devicePort?.name) }, n.name || n.device.name)
         : h('span', null, n.name || n.ip || 'unnamed'),
       n.port ? h('span', { class: 'dim' }, ' · ' + n.port) : null,
       h('span', { class: 'dim' }, ` (${what}${n.device ? ', polled' : ''})`));

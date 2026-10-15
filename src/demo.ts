@@ -1,4 +1,5 @@
 import type { App } from './app.js';
+import { recordResources } from './snmp/resource_history.js';
 import type { FlowRecord } from './collector/types.js';
 import type { ClsPoint, IfPoint } from './store/types.js';
 import { dscpName } from './query/apps.js';
@@ -17,12 +18,17 @@ function demoResources(d: Dev, now: number): Resources {
   const k = [...d.name].reduce((a, c) => a + c.charCodeAt(0), 0);
   const wave = (period: number, phase = 0) => (Math.sin((now / 1000 + k * 37 + phase) / period) + 1) / 2;
   const base = { switch: [6, 14, 38, 20, 4], router: [10, 24, 44, 24, 8], firewall: [14, 34, 58, 20, 16] }[d.role];
-  const cpu = Math.round(base[0] + wave(500) * base[1]);
+  // now and then a short burst, so the history has something worth looking at; the firewall also has a slow memory leak that is reset by its restart
+  const burst = wave(1700, 11) > 0.96 ? 30 + wave(90) * 25 : 0;
+  const cpu = Math.min(99, Math.round(base[0] + wave(500) * base[1] + burst));
   const memTotal = base[4] * 1024 ** 3;
   const memPct = Math.round((base[2] + wave(2400, 5) * base[3]) * 10) / 10;
   const up = (3 + (k % 40)) * 86400 + 5 * 3600 + (k % 59) * 60;
+  // the first switch restarted 20 hours ago, which the history marks
+  const restartAt = d.name === 'dist-sw-01' ? DEMO_BOOT - 20 * 3600_000 : 0;
+  const uptimeSec = restartAt && now >= restartAt ? Math.floor((now - restartAt) / 1000) : up + Math.floor((now - DEMO_BOOT) / 1000);
   return {
-    uptimeSec: up + Math.floor((now - DEMO_BOOT) / 1000), cpuPct: cpu, cores: d.role === 'firewall' ? 8 : d.role === 'router' ? 4 : null,
+    uptimeSec, cpuPct: cpu, cores: d.role === 'firewall' ? 8 : d.role === 'router' ? 4 : null,
     load: d.role === 'firewall' ? [Math.round(cpu / 12) / 10, Math.round(cpu / 14) / 10, Math.round(cpu / 16) / 10] : null,
     memPct, memTotal, memUsed: Math.round(memTotal * memPct / 100), swapPct: d.role === 'firewall' ? 1.2 : null,
     disks: d.role === 'firewall' ? [{ name: '/', usedPct: 18.4, totalBytes: 120 * 1024 ** 3, usedBytes: Math.round(120 * 1024 ** 3 * 0.184) }, { name: '/var/log', usedPct: 41.0, totalBytes: 20 * 1024 ** 3, usedBytes: Math.round(20 * 1024 ** 3 * 0.41) }] : [],
@@ -360,6 +366,9 @@ function seedConfig(app: App, net: Net): void {
     // every interface answers with the device's MAC address in the demo, so a MAC seen in a stream can be named
     db.prepare("UPDATE interfaces SET mac = ? WHERE dev_id = ? AND mac = ''").run(d.mac, row.id);
     app.devices.saveResources(row.id, demoResources(d, Date.now()));
+    // two weeks of history: a reading a minute for the last three days, one every five minutes before that
+    const nowMs = Date.now();
+    app.cdb.tx(() => { for (let t = nowMs - 14 * 86400_000; t < nowMs - 60_000; t += t < nowMs - 3 * 86400_000 ? 300_000 : 60_000) recordResources(db, row.id, demoResources(d, t)); });
   }
   seedHosts(app, net);
   for (const [id, name] of VLANS) db.prepare("INSERT OR IGNORE INTO vlans(id, name, source) VALUES (?,?,'manual')").run(id, name);

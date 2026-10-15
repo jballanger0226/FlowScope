@@ -9,7 +9,7 @@ interface Cred { id: number; name: string; version: string; username: string; le
 
 const ROLES: [string, string][] = [['ro', 'Read only'], ['snmp', 'SNMP device admin'], ['admin', 'Full admin']];
 const MATRIX: [string, boolean, boolean, boolean][] = [
-  ['Search flows, follow streams, view Links and QoS', true, true, true],
+  ['Search flows, follow streams, view Network health', true, true, true],
   ['Build and export reports', true, true, true],
   ['Create API tokens for themselves', true, true, true],
   ['View Storage and retention', false, true, true],
