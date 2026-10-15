@@ -5,8 +5,8 @@ import { bar, btn, chip, dot, note, spinner } from '../components.js';
 import { ago, bps, bytes, dur, num, pct, stamp } from '../util.js';
 
 /**
- * The home page. Top to bottom: a one-line verdict, a row of tiles for the numbers worth seeing first, what needs attention
- * (devices that stopped answering, then notices), the traffic picture, and the state of the devices and of FlowScope itself.
+ * The home page. Top to bottom: a one-line verdict, a row of tiles for the numbers worth seeing first, the traffic picture,
+ * what needs attention (devices that stopped answering, then notices), and the state of the devices and of FlowScope itself.
  * Every item opens the page it came from.
  */
 
@@ -162,7 +162,7 @@ function flowsBox(d: Reply): VNode {
     h('button', { type: 'button', class: 'ovitem ovbtn', title: 'Search for this stream in Flow explorer', onclick: () => go('explorer', { q: `src:${x.srcIp} dst:${x.dstIp} dport:${x.dport}`, range: '1h' }) },
       h('div', { class: 'ovmain' }, h('span', { class: 'ovtitle mono' }, `${x.srcIp} → ${x.dstIp}`), h('span', { class: 'muted', style: 'font-size:12px' }, [x.app || x.protoName, `port ${x.dport}`, plural(x.hopCount, 'hop'), x.ttlExpired ? 'TTL expired' : '', x.qosChanged ? 'DSCP changed' : ''].filter(Boolean).join(' · '))),
       h('b', { class: 'mono', style: 'flex:none' }, bytes(x.bytes)))))));
-  return box('Biggest flows', 'The five largest streams of the last hour, by bytes. Select one to look it up in Flow explorer.', body, btn('Open Flow explorer', { small: true, onclick: () => go('explorer') }));
+  return box('Largest flows', 'The five largest streams of the last hour, by bytes. Select one to look it up in Flow explorer.', body, btn('Open Flow explorer', { small: true, onclick: () => go('explorer') }));
 }
 
 function portsBox(d: Reply): VNode {
@@ -242,8 +242,8 @@ export function render(): VNode {
     verdictHead(d),
     loadError ? note('Could not refresh: ' + loadError + '. Showing the last data received.', 'warn', true) : null,
     tiles(d),
-    attention(d),
     section('Traffic', h('div', { class: 'ovgrid' }, appsBox(d), flowsBox(d), portsBox(d), exportersBox(d), unusualBox(d))),
+    attention(d),
     section('Devices and system', h('div', { class: 'ovgrid' }, devicesBox(d), logsBox(d))),
     h('div', { style: 'height:24px' }));
 }
