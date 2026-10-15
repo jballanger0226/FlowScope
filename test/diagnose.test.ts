@@ -59,3 +59,18 @@ test('formatValue prints text as text and binary as hex', () => {
   assert.deepEqual(formatValue(2, 7), { type: 'Integer', text: '7' });
   assert.equal(formatValue(99, 1).type, 'type 99');
 });
+
+test('LLDP missing while lldpd runs on the device: named as an AgentX gap, with the neighbour count from its process title', async () => {
+  const f = { role: 'router', cisco: false };
+  const HR_NAME = '1.3.6.1.2.1.25.4.2.1.2', HR_PATH = '1.3.6.1.2.1.25.4.2.1.4';
+  const on = byId(await runChecks(fake({ [OID.ifName]: { '1': 'igb0' }, [HR_NAME]: { '19497': 'lldpd', '21437': 'lldpd', '39852': 'snmpd' }, [HR_PATH]: { '19497': 'lldpd: monitor.', '21437': 'lldpd: 2 neighbors.', '39852': '/usr/local/sbin/snmpd' } }), f));
+  assert.equal(on.lldp.state, 'fail');
+  assert.match(on.lldp.detail, /lldpd is running on this device and sees 2 neighbours/);
+  assert.match(on.lldp.hint ?? '', /-x/); assert.match(on.lldp.hint ?? '', /master agentx/);
+  const one = byId(await runChecks(fake({ [OID.ifName]: { '1': 'igb0' }, [HR_NAME]: { '5': '/usr/sbin/lldpd' }, [HR_PATH]: { '5': '/usr/sbin/lldpd' } }), f));
+  assert.match(one.lldp.detail, /lldpd is running on this device, but nothing is published/, 'no count in the title: still named, without a number');
+  const off = byId(await runChecks(fake({ [OID.ifName]: { '1': 'igb0' }, [HR_NAME]: { '39852': 'snmpd' } }), f));
+  assert.match(off.lldp.detail, /Nothing came back/, 'no lldpd process: the generic explanation');
+  const noTable = byId(await runChecks(fake({ [OID.ifName]: { '1': 'igb0' } }, [HR_NAME]), f));
+  assert.equal(noTable.lldp.state, 'fail', 'an unreadable process table does not break the check');
+});
