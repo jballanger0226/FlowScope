@@ -4,7 +4,8 @@ import { redraw, go } from '../state.js';
 import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, spark, stat, note, PALETTE, select, spinner, status as statusEl, tabs, textInput, type Series } from '../components.js';
 import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, rangeMs, svcLabel } from '../util.js';
 import { post } from '../api.js';
-import { hardwarePanel, hasHardware, hasOptics, healthSummary, linkQuality, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
+import { attentionPanel, cards, cardsRow, issues, type Target } from './links_overview.js';
+import { hardwarePanel, hasHardware, hasOptics, linkQuality, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
 interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
@@ -817,11 +818,18 @@ function availableTabs(dev: Dev): { id: DevTab; label: string }[] {
 function devTabs(dev: Dev, tab: DevTab): VNode {
   return tabs('Network health sections', availableTabs(dev).map(t => ({ id: t.id, label: t.label, on: t.id === tab })), id => { devTab = id as DevTab; redraw(); });
 }
+/** Jump to what an Overview item is about: its tab, and for an interface problem the interface and the section with the detail. */
+function openTarget(dev: Dev, t: Target): void {
+  if (t.ifIndex !== undefined) { if (t.section) ifTab = t.section; select_(dev.id, t.ifIndex, t.tab); } else { devTab = t.tab; redraw(); }
+  window.scrollTo({ top: 0 });
+}
+function overviewPanel(dev: Dev): VNode {
+  const input = { dev, health: healthRes, wlan, neighbours: nbRes ? nbRes.ports.reduce((n, p) => n + p.neighbors.length, 0) : null, arp: arpRes ? arpRes.rows.length : null, hasHardware: hasHardware(healthRes), thresholds: data?.thresholds ?? { util: 80, drop: 1 } };
+  const all = issues(input);
+  return h('div', { class: 'col', style: 'gap:18px' }, attentionPanel(all, t => openTarget(dev, t)), cardsRow(cards(input, all), t => openTarget(dev, t)), resourcesPanel(dev));
+}
 function tabBody(dev: Dev, tab: DevTab): VNode {
-  const flagged = dev.interfaces.filter(i => i.flagged).length;
-  const body = tab === 'overview' ? h('div', { class: 'col', style: 'gap:16px' },
-      flagged ? h('div', { class: 'row', style: 'gap:8px' }, chip(`${flagged} interface${flagged === 1 ? ' needs' : 's need'} attention`, 'warn'), btn('Show interfaces', { small: true, kind: 'ghost', onclick: () => { devTab = 'interfaces'; redraw(); } })) : null,
-      resourcesPanel(dev), healthSummary(healthRes))
+  const body = tab === 'overview' ? overviewPanel(dev)
     : tab === 'interfaces' ? ifTable(dev)
     : tab === 'hardware' ? hardwarePanel({ data: healthRes })
     : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes }), arpPanel(dev), neighborsPanel(dev))
