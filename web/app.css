@@ -252,3 +252,6 @@ a.btn { text-decoration: none; }
 
 .verstrip { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 14px; padding: 8px 14px; border: 1px solid var(--line2); border-radius: 8px; background: var(--panel, transparent); font-size: 13px; }
 .verstrip code { user-select: all; }
+
+.tr.pick { cursor: pointer; } .tr.pick:hover { background: var(--field); } .tr.pick[aria-current="true"] { background: var(--sel-bg); box-shadow: inset 3px 0 0 var(--accent); }
+.rowbtn { background: none; border: 0; padding: 0; font: inherit; font-weight: inherit; color: inherit; text-align: left; cursor: pointer; }
