@@ -25,7 +25,7 @@ interface Located { ip: string | null; macs: string[]; macSource: string; attach
 interface Multicast { group: string; source: string; location: Located | null }
 export interface Detail {
   skey: string; initiator: { ip: string; port: number }; responder: { ip: string; port: number }; proto: number; protoName: string; app: string; appPort: number | null; t0: number; t1: number;
-  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null; multicast: Multicast | null;
+  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; marking?: { direction: 'forward' | 'reverse'; values: { dscp: number; name: string; pkts: number; bytes: number; where: string[] }[] }[]; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null; multicast: Multicast | null;
   activity: { t0: number; t1: number; fwd: number[]; rev: number[] };
 }
 
@@ -75,6 +75,12 @@ function qosMessage(d: Detail): { text: string; dev?: string; ifName?: string } 
       const ob = hops[i].obs.find(o => o.kind === 'remark' && o.text.startsWith('DSCP arrived'));
       if (ob) return { text: `${ob.text}. The marking changed between ${hops[i - 1].dev} and ${hops[i].dev}, ${dirName}.`, dev: hops[i - 1].dev, ifName: hops[i - 1].outIf };
     }
+  }
+  // no hop re-marks the traffic, but the packets of the stream do not all carry the same DSCP value
+  for (const m of d.marking ?? []) {
+    const total = m.values.reduce((a, v) => a + v.pkts, 0) || 1;
+    const parts = m.values.map(v => `${v.name} ${v.pkts.toLocaleString()} packets (${(100 * v.pkts / total) < 0.1 ? '<0.1' : (100 * v.pkts / total).toFixed(1)}%) at ${v.where[0]}`);
+    return { text: `The packets of this stream carry more than one DSCP value, ${m.direction === 'forward' ? 'initiator → responder' : 'responder → initiator'}: ${parts.join('; ')}. No device re-marked them; the sender uses different markings for different packets of the same conversation.` };
   }
   return d.qosChanged ? { text: 'The marking differs between hops.' } : null;
 }

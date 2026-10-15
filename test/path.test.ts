@@ -37,7 +37,7 @@ const exporterDev = (ip: string) => ({ '192.168.254.1': 1, '192.168.100.10': 2 }
 function detail(forward: HopView[], reverse: HopView[], dst = '192.168.10.39'): StreamDetail {
   return {
     skey: 'k', initiator: { ip: '192.168.254.248', port: 56270 }, responder: { ip: dst, port: 554 }, proto: 6, protoName: 'TCP', app: 'RTSP', appPort: 554, t0: 0, t1: 1,
-    forward, reverse, qosChanged: false, ttlExpired: false, totals: { fwdBytes: 0, revBytes: 0, fwdPkts: 0, revPkts: 0 }, note: null, multicast: null
+    forward, reverse, qosChanged: false, marking: [], ttlExpired: false, totals: { fwdBytes: 0, revBytes: 0, fwdPkts: 0, revPkts: 0 }, note: null, multicast: null
   };
 }
 
@@ -195,4 +195,20 @@ test('the MAC addresses and VLAN of a merged hop come from whichever half has th
     rec({ inIf: 0, outIf: 46, bytes: 5000, pkts: 50, srcMac: 'aa:aa:aa:aa:aa:01', dstMac: 'aa:aa:aa:aa:aa:02', vlan: 150 })
   ], hctx)!.forward[0];
   assert.equal(h.frameSrc, 'aa:aa:aa:aa:aa:01'); assert.equal(h.frameDst, 'aa:aa:aa:aa:aa:02'); assert.equal(h.vlan, 150);
+});
+
+test('a stream whose packets carry two DSCP values is reported as mixed marking, with where and how many', () => {
+  const d = analyzeStream('k', [
+    rec({ inIf: 1, outIf: 2, tos: 0, bytes: 4_500_000_000, pkts: 6_499_000 }),
+    rec({ inIf: 1, outIf: 2, tos: 48 << 2, bytes: 90_000, pkts: 677, ts0: 1_010_000 }),
+    rec({ srcIp: '192.168.10.39', dstIp: '192.168.254.248', sport: 554, dport: 58146, inIf: 2, outIf: 1, tos: 0, ts0: 1_000_500 })
+  ], hctx)!;
+  assert.equal(d.forward[0].qosChanged, false, 'no hop re-marked it');
+  assert.equal(d.qosChanged, true, 'the stream is flagged, as the list flags it');
+  assert.equal(d.marking.length, 1);
+  assert.equal(d.marking[0].direction, 'forward');
+  assert.deepEqual(d.marking[0].values.map(v => [v.dscp, v.pkts]), [[0, 6_499_000], [48, 677]]);
+  assert.match(d.marking[0].values[1].where[0], /if1 → if2/);
+  const one = analyzeStream('k', [rec({ inIf: 1, outIf: 2 })], hctx)!;
+  assert.equal(one.qosChanged, false); assert.deepEqual(one.marking, []);
 });
