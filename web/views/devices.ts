@@ -20,6 +20,11 @@ let devs: Dev[] = []; let creds: Cred[] = []; let canCreds = false; let loaded =
 let nName = '', nIp = '', nCred = '', nSec = '60'; let addBusy = false; let addMsg = ''; let addOk = false;
 // manage
 let mQ = ''; let sel = 0; let confirmRemove = false; let mMsg = ''; let mBusy = false;
+// diagnostics
+interface Check { id: string; title: string; state: 'ok' | 'warn' | 'fail' | 'na'; count: number; detail: string; hint?: string }
+interface WalkRow { oid: string; type: string; text: string }
+let diagFor = 0; let chk: { checkedAt: number; checks: Check[] } | null = null; let chkBusy = false; let chkErr = '';
+let wOid = '1.0.8802.1.1.2.1.4'; let wRes: { oid: string; more: boolean; rows: WalkRow[] } | null = null; let wBusy = false; let wErr = ''; let wOpen = false;
 // scan
 let dRange = '', dCred = '', dSec = '60', dTryOthers = false; let job: Job | null = null; let dMsg = ''; let picked = new Set<string>(); let scanTimer: number | undefined; let addFoundBusy = false;
 
@@ -118,7 +123,62 @@ function modeManage(): VNode {
         confirmRemove ? h('div', { class: 'note bad col', style: 'gap:10px' },
           h('span', null, `Remove ${d.name}? FlowScope stops polling it and deletes its stored interface and queue history. Flow records that passed through it are kept.`),
           h('div', { class: 'row' }, btn(`Remove ${d.name}`, { kind: 'danger', disabled: mBusy, onclick: () => void remove(d) }), btn('Cancel', { kind: 'ghost', onclick: () => { confirmRemove = false; redraw(); } }))) : null,
-        msg(mMsg)])));
+        msg(mMsg),
+        diagnostics(d)])));
+}
+
+/* ------------------------------------------------------------------ diagnostics */
+
+const WALK_PRESETS: [string, string][] = [['1.0.8802.1.1.2.1.4', 'LLDP neighbours (LLDP-MIB lldpRemTable)'], ['1.0.8802.1.1.2.1.3', 'LLDP local system and ports'], ['1.3.6.1.4.1.9.9.23.1.2.1', 'CDP neighbours (Cisco)'],
+  ['1.3.6.1.2.1.1', 'System (name, description, uptime)'], ['1.3.6.1.2.1.31.1.1.1.1', 'Interface names (ifName)'], ['1.3.6.1.2.1.4.35.1.4', 'ARP / neighbour cache (MAC addresses)']];
+const CHK_LABEL: Record<Check['state'], [string, 'ok' | 'warn' | 'bad' | 'default']> = { ok: ['Published', 'ok'], warn: ['Check', 'warn'], fail: ['Missing', 'bad'], na: ['Not applicable', 'default'] };
+
+function syncDiag(d: Dev): void {
+  if (diagFor === d.id) return;
+  diagFor = d.id; chk = null; chkErr = ''; wRes = null; wErr = '';
+}
+async function runCheck(d: Dev): Promise<void> {
+  chkBusy = true; chkErr = ''; redraw();
+  try { const r = await post<{ checkedAt: number; checks: Check[] }>(`/api/devices/${d.id}/check`, {}); if (diagFor === d.id) chk = r; }
+  catch (e) { if (diagFor === d.id) { chk = null; chkErr = (e as Error).message; } }
+  chkBusy = false; redraw();
+}
+async function runWalk(d: Dev): Promise<void> {
+  wBusy = true; wErr = ''; redraw();
+  try { const r = await post<{ oid: string; more: boolean; rows: WalkRow[] }>(`/api/devices/${d.id}/walk`, { oid: wOid.trim(), max: 200 }); if (diagFor === d.id) wRes = r; }
+  catch (e) { if (diagFor === d.id) { wRes = null; wErr = (e as Error).message; } }
+  wBusy = false; redraw();
+}
+
+function diagnostics(d: Dev): VNode {
+  syncDiag(d);
+  const cols = 'minmax(220px,2fr) 110px minmax(200px,3fr)';
+  return h('div', { class: 'col', style: 'gap:12px;border-top:1px solid var(--line);padding-top:14px' },
+    h('div', { class: 'col', style: 'gap:2px' }, h('h3', { style: 'font-size:15px' }, 'SNMP diagnostics'),
+      h('span', { class: 'muted', style: 'font-size:12.5px' }, 'Ask this device what it publishes, or read any part of its MIB. Both use the credential set above and only read.')),
+    h('div', { class: 'row' },
+      btn(chkBusy ? 'Checking…' : 'Check what this device publishes', { disabled: chkBusy, onclick: () => void runCheck(d) }),
+      btn(wOpen ? 'Hide OID walk' : 'Walk an OID', { kind: 'ghost', pressed: wOpen, onclick: () => { wOpen = !wOpen; redraw(); } })),
+    chkErr ? note(chkErr, 'bad', true) : null,
+    chkBusy && !chk ? spinner('Reading the device…') : null,
+    chk ? h('div', { class: 'col', style: 'gap:8px' },
+      h('span', { class: 'dim', style: 'font-size:12px' }, `Checked ${ago(chk.checkedAt)}. "Not applicable" means this kind of device normally does not publish it.`),
+      h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:700px` },
+        h('div', { class: 'tr head' }, ...['What', 'Result', 'Detail'].map(t => h('span', null, t))),
+        h('div', null, chk.checks.map(k => h('div', { key: k.id, class: 'tr tall', style: 'align-items:start' },
+          h('span', { style: 'font-weight:600' }, k.title), h('span', null, chip(CHK_LABEL[k.state][0], CHK_LABEL[k.state][1])),
+          h('span', { class: 'col', style: 'gap:4px' }, h('span', null, k.detail), k.hint ? h('span', { class: 'dim', style: 'font-size:12px' }, k.hint) : null))))))) : null,
+    wOpen ? h('div', { class: 'col', style: 'gap:10px' },
+      h('div', { class: 'row', style: 'align-items:end' },
+        field('Starting OID', textInput(wOid, v => { wOid = v; }, { placeholder: '1.0.8802.1.1.2.1.4', aria: 'OID to walk', mono: true, width: '280px', onenter: () => void runWalk(d) })),
+        field('Common starting points', select('', [['', 'Pick one…'], ...WALK_PRESETS], v => { if (v) { wOid = v; redraw(); } }, { aria: 'Common OIDs' })),
+        btn(wBusy ? 'Walking…' : 'Walk', { kind: 'primary', disabled: wBusy || !wOid.trim(), onclick: () => void runWalk(d) })),
+      wErr ? note(wErr, 'bad', true) : null,
+      wRes ? h('div', { class: 'col', style: 'gap:6px' },
+        h('span', { class: 'muted', style: 'font-size:12.5px', role: 'status' }, wRes.rows.length ? `${num(wRes.rows.length)} row${wRes.rows.length === 1 ? '' : 's'} under ${wRes.oid}${wRes.more ? '. Showing the first rows only; walk a narrower OID to see the rest.' : '.'}` : `Nothing under ${wRes.oid}. The device does not publish it, or this credential may not read it.`),
+        wRes.rows.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(240px,2fr) 110px minmax(200px,3fr);--w:700px' },
+          h('div', { class: 'tr head' }, ...['OID', 'Type', 'Value'].map(t => h('span', null, t))),
+          h('div', { class: 'scroll', style: 'max-height:320px' }, wRes.rows.map((r, i) => h('div', { key: i, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px;word-break:break-all' }, r.oid), h('span', { class: 'dim', style: 'font-size:12px' }, r.type), h('span', { class: 'mono', style: 'font-size:12px;word-break:break-all' }, r.text)))))) : null) : null) : null);
 }
 
 /* ------------------------------------------------------------------ discovery */

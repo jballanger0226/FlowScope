@@ -4,6 +4,7 @@ import { DeviceError } from '../snmp/devices.js';
 import { CredError, type CredInput } from '../snmp/creds.js';
 import { TargetPolicy } from '../snmp/allowed.js';
 import { int, str } from './util.js';
+import { runChecks, cleanOid, formatValue } from '../snmp/diagnose.js';
 
 /** Turns the service-level errors into HTTP errors with the right status. */
 async function guard<T>(fn: () => T | Promise<T>): Promise<T> {
@@ -104,6 +105,44 @@ export function registerDevices(app: App): void {
       app.log.audit(who(c), `Read host tables from ${d.name}: ${r.macs} MAC addresses, ${r.arp} ARP entries, ${r.neighbors} neighbours`);
       c.json({ ...r, device: app.devices.list().find(x => x.id === id) });
     } catch (e) { throw new HttpError(502, (e as Error).message); } finally { cl.close(); }
+  });
+
+  /* ---- diagnostics: what the device publishes, and a read-only look at one OID ---- */
+  const busy = new Set<number>();   // one diagnostic at a time per device, so a click-happy user cannot hammer a switch
+  const withDevice = async <T>(c: { params: Record<string, string>; user(): { role: string } }, fn: (d: NonNullable<ReturnType<typeof app.devices.row>>, cl: ReturnType<typeof app.devices.open>) => Promise<T>): Promise<T> => {
+    const id = int(c.params.id, 0, 0, 1e9);
+    const d = app.devices.row(id);
+    if (!d) throw new HttpError(404, 'No such device');
+    checkTarget(c, d.ip);
+    if (busy.has(id)) throw new HttpError(429, 'A check or walk is already running on this device. Wait for it to finish.');
+    busy.add(id);
+    const cl = app.devices.open(d);
+    try { return await fn(d, cl); } finally { cl.close(); busy.delete(id); }
+  };
+
+  w.post('/api/devices/:id/check', 'snmp', async c => {
+    const r = await withDevice(c, async (d, cl) => {
+      try { await cl.get(['1.3.6.1.2.1.1.2.0']); } catch (e) { throw new HttpError(502, (e as Error).message); }
+      const checks = await runChecks(cl, { role: d.role ?? 'device', cisco: (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.') });
+      app.log.audit(who(c), `Checked what ${d.name} publishes over SNMP`);
+      return { device: d.name, checkedAt: Date.now(), checks };
+    });
+    c.json(r);
+  });
+
+  // Reads, never writes: a bounded GETBULK walk with the device's own credential. The OID and device are recorded.
+  w.post('/api/devices/:id/walk', 'snmp', async c => {
+    const b = await c.body<{ oid?: string; max?: number }>(1000);
+    const oid = cleanOid(str(b.oid, 300));
+    if (!oid) throw new HttpError(400, 'Enter a numeric OID such as 1.0.8802.1.1.2.1.4 (a leading dot is fine).');
+    const max = int(b.max, 200, 1, 1000);
+    const r = await withDevice(c, async (d, cl) => {
+      let res: Awaited<ReturnType<typeof cl.walkBounded>>;
+      try { res = await cl.walkBounded(oid, max); } catch (e) { throw new HttpError(502, (e as Error).message); }
+      app.log.audit(who(c), `Walked OID ${oid} on ${d.name}: ${res.rows.length} rows`);
+      return { device: d.name, oid, more: res.more, rows: res.rows.map(v => ({ oid: v.oid, ...formatValue(v.type, v.value) })) };
+    });
+    c.json(r);
   });
 
   w.del('/api/devices/:id', 'snmp', async c => {

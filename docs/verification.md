@@ -35,3 +35,4 @@ Be aware of what has actually been exercised before relying on this in productio
 ## Known limits
 * Dependencies were vendored from source for development because the package registries were unreachable; `package.json` lists only `net-snmp` and no lock file is included, so the first `npm install` resolves current versions.
 * Switching storage backends does not migrate data. Existing installs are never switched automatically; a new default applies only to a first start.
+* **SNMP diagnostics (device check and OID walk).** The check logic, OID validation and value formatting are unit tested with in-memory tables, and the endpoints (permissions, input validation, a check and a bounded walk) are covered by the API test against the simulated agent. The bounded walk uses GETBULK (GETNEXT for SNMPv1) and has not been run against a real OPNsense or Catalyst.

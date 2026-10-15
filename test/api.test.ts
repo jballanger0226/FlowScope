@@ -131,6 +131,22 @@ test('HTTP API: auth, roles, CSRF, flows, devices, storage, admin, AAA', { timeo
     assert.equal((await sn.put(`/api/devices/${devId}/classes`, { ifIndex: 2, cls: 'voice', dscps: [99] })).status, 400);
     assert.equal((await sn.post(`/api/devices/${devId}/polling`, { on: false })).json.device.status, 'paused');
     assert.equal((await sn.post(`/api/devices/${devId}/polling`, { on: true })).status, 200);
+
+    // ---- diagnostics: read-only checks and a bounded OID walk
+    assert.equal((await ro.post(`/api/devices/${devId}/check`, {})).status, 403);
+    assert.equal((await ro.post(`/api/devices/${devId}/walk`, { oid: '1.3.6.1.2.1.1' })).status, 403);
+    assert.equal((await sn.post(`/api/devices/${devId}/walk`, { oid: 'sysDescr' })).status, 400);
+    assert.equal((await sn.post(`/api/devices/${devId}/walk`, { oid: '1.3.6.1.2.1.1;x' })).status, 400);
+    assert.equal((await sn.post('/api/devices/99999/walk', { oid: '1.3.6.1.2.1.1' })).status, 404);
+    const chk = await sn.post(`/api/devices/${devId}/check`, {});
+    assert.equal(chk.status, 200, chk.text);
+    const cks = Object.fromEntries((chk.json.checks as { id: string; state: string }[]).map(k => [k.id, k.state]));
+    assert.equal(cks.interfaces, 'ok');
+    assert.equal(cks.lldp, 'fail');   // the simulated device publishes no LLDP-MIB
+    const walk = await sn.post(`/api/devices/${devId}/walk`, { oid: '.1.3.6.1.2.1.1', max: 3 });
+    assert.equal(walk.status, 200, walk.text);
+    assert.equal(walk.json.rows.length, 3); assert.equal(walk.json.more, true);
+    assert.ok(walk.json.rows.every((r: { oid: string }) => r.oid.startsWith('1.3.6.1.2.1.1.')));
     assert.equal((await admin.get('/api/meta')).json.vlans.some((v: any) => v.id === 140), true);
     // discovery
     const dj = await sn.post('/api/discovery', { spec: '127.0.0.1' });

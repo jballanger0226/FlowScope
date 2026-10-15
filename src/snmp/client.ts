@@ -124,6 +124,33 @@ export class SnmpClient {
     });
   }
 
+  /**
+   * Reads at most `max` varbinds under an OID, one batch at a time, and says whether the subtree has more. For a person typing an OID
+   * into the diagnostics box, where an unbounded walk of a large table (the MAC table, say) would be a poor answer. A leaf OID is returned as itself.
+   */
+  async walkBounded(oid: string, max = 200): Promise<{ rows: VarBind[]; more: boolean }> {
+    const one = await this.get([oid]);
+    const leaf = one.get(oid);
+    if (leaf) return { rows: [leaf], more: false };
+    const rows: VarBind[] = []; const prefix = oid + '.';
+    let cur = oid;
+    for (let guard = 0; guard < 200; guard++) {
+      const vbs = await new Promise<any[]>((resolve, reject) => {
+        const cb = (err: Error | null, v: any[]) => err ? reject(classify(err)) : resolve(v ?? []);
+        if (this.cred.version === 'v1') this.s.getNext([cur], cb); else this.s.getBulk([cur], 0, 20, cb);
+      });
+      let progressed = false;
+      for (const vb of vbs) {
+        if (snmp.isVarbindError(vb) || isMissing(vb.type)) return { rows, more: false };
+        if (!String(vb.oid).startsWith(prefix)) return { rows, more: false };
+        if (rows.length >= max) return { rows, more: true };
+        rows.push(convert(vb)); cur = vb.oid; progressed = true;
+      }
+      if (!progressed) break;
+    }
+    return { rows, more: rows.length >= max };
+  }
+
   /** Walks a column and returns map of the index suffix to value. */
   async column(colOid: string, maxRep = 20): Promise<Map<string, SnmpValue>> {
     const vbs = await this.walk(colOid, maxRep);
