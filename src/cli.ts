@@ -6,6 +6,7 @@ import os from 'node:os';
 import { loadConfig, defaultDataDir, applyDemoDefaults } from './config.js';
 import { VERSION } from './app.js';
 import { describeVersion } from './buildinfo.js';
+import { checkPorts } from './healthports.js';
 
 const HELP = `FlowScope ${VERSION}: NetFlow / IPFIX collector with SNMP link and QoS monitoring
 
@@ -25,8 +26,9 @@ async function healthcheck(): Promise<number> {
     const req = mod.request({ host: '127.0.0.1', port, path: '/api/auth/config', timeout: 4000, rejectUnauthorized: false } as https.RequestOptions, r => { r.resume(); res((r.statusCode ?? 500) < 500); });
     req.on('error', () => res(false)); req.on('timeout', () => { req.destroy(); res(false); }); req.end();
   });
-  if (cfg.tls === 'auto' && await tryOne(https, cfg.httpsPort)) return 0;
-  if (cfg.httpPort > 0 && await tryOne(http, cfg.httpPort)) return 0;
+  const ports = checkPorts(cfg, process.env);
+  if (cfg.tls === 'auto' && await tryOne(https, ports.https)) return 0;
+  if (ports.http > 0 && await tryOne(http, ports.http)) return 0;
   return 1;
 }
 

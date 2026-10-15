@@ -26,6 +26,7 @@ import { SamlState } from './auth/saml/saml.js';
 import { registerRoutes } from './routes/index.js';
 import { describeVersion } from './buildinfo.js';
 import { listenHint } from './server/listenerr.js';
+import { writePorts } from './healthports.js';
 
 export const VERSION = '0.1.0';
 
@@ -205,6 +206,7 @@ export class App {
     try {
       this.ports = await this.web.listen({ host: cfg.bind, httpsPort: webPorts.https, httpPort: webPorts.http, tls: cfg.tls === 'auto' ? this.certs.options() : null, redirectToHttps: cfg.tls === 'auto' });
     } catch (e) { throw listenHint(e, [webPorts.https, webPorts.http]); }
+    writePorts(cfg.dataDir, this.ports);
     if (!this.demo) this.poller.start();
     const every = (ms: number, fn: () => void | Promise<void>) => { this.timers.push(guardedInterval(ms, fn, e => this.log.error('app', String(e)))); };
     every(60_000, async () => { const r = await this.store.maintain(this.settings.get('retention')); if (r.dropped.length) this.log.info('store', `Retention removed ${r.dropped.join(', ')}`); });
