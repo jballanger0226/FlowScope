@@ -216,9 +216,27 @@ function hoverChart(e: PointerEvent): void {
   }
   const rows = snapT === null ? null : mark(svg, snapT, false);
   if (snapT === null || !rows) { hoverOff(e); return; }
-  for (const other of siblings(svg)) mark(other, snapT, true);
-  const inBand = (o.bands ?? []).some(b => snapT! >= b.a && snapT! <= b.b);
-  showTip({ title: (o.fmtFull ?? stamp)(snapT), rows, note: inBand ? 'Inside a shaded drop period' : undefined }, e.clientX, e.clientY);
+  readout(svg, snapT, rows, e.clientX, e.clientY, 'main');
+  // Every linked graph answers for the same moment, each with its own readout next to its own guide line.
+  for (const other of siblings(svg)) {
+    const key = tipKey(other);
+    const orows = mark(other, snapT, true);
+    const lcO = lcOf(other);
+    const b = other.getBoundingClientRect();
+    if (!orows || !lcO || !b.width || b.bottom < 0 || b.top > window.innerHeight) { hideTip(key); continue; }
+    readout(other, snapT, orows, b.left + lcO.g.x(snapT) * (b.width / lcO.g.W), Math.min(Math.max(b.top + 10, 8), window.innerHeight - 60), key);
+  }
+}
+
+let tipSeq = 0;
+const tipKey = (svg: Element): string => ((svg as any).__tipKey ??= 'c' + tipSeq++);
+
+function readout(svg: Element, t: number, rows: TipRow[], cx: number, cy: number, key: string): void {
+  const lc = lcOf(svg);
+  if (!lc) return;
+  const { o } = lc;
+  const inBand = (o.bands ?? []).some(b => t >= b.a && t <= b.b);
+  showTip({ sub: o.title, title: (o.fmtFull ?? stamp)(t), rows, note: inBand ? 'Inside a shaded drop period' : undefined }, cx, cy, key);
 }
 
 function hoverOff(e: Event): void {

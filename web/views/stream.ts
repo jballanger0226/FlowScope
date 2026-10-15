@@ -226,7 +226,7 @@ function activity(d: Detail, f: Follower): VNode {
   const n = Math.max(1, a.fwd.length);
   const slot = (a.t1 - a.t0) / n;
   const sums = { '': d.totals.fwdBytes, rev: d.totals.revBytes };
-  const bars = (arr: number[], cls: '' | 'rev') => h('div', { class: 'act ' + cls, 'aria-hidden': 'true', onpointerleave: hideTip, onpointercancel: hideTip },
+  const bars = (arr: number[], cls: '' | 'rev') => h('div', { class: 'act ' + cls, 'aria-hidden': 'true', onpointerleave: () => hideTip(), onpointercancel: () => hideTip() },
     arr.map((v, i) => h('span', {
       key: i, class: 'cell',
       // The cell spans the full height so even a near-empty interval is easy to point at; the bar inside is the visible part.
