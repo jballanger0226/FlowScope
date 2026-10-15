@@ -45,13 +45,17 @@ export function registerFlows(app: App): void {
     const sort = (['time', 'bytes', 'pkts'] as const).find(s => s === c.query.get('sort')) ?? 'time';
     const dir = c.query.get('dir') === 'asc' ? 'asc' : 'desc';
     const limit = int(c.query.get('limit'), 200, 1, 2000);
-    const page = await app.store.searchStreams({ range, conds: parsed.conds, sort, dir, limit, localIps: app.localIps() });
+    const offset = int(c.query.get('offset'), 0, 0, 10_000_000);
+    // preview=N: answer quickly from the newest N flow records. The page says when that left older records out ("partial"), and the client then asks again for everything.
+    const preview = int(c.query.get('preview'), 0, 0, 20_000);
+    const page = await app.store.searchStreams({ range, conds: parsed.conds, sort, dir, limit, offset, recent: preview || undefined, localIps: app.localIps() });
     const user = c.user().username;
     // health of the first rows: a quick hop analysis of each stream (loss between hops, slow links) without the SNMP lookups
     const localIps = new Set(app.localIps());
     const quick: HopContext = { localIps, deviceName: ip => app.devices.deviceName(ip), deviceRole: ip => app.devices.deviceRole(ip), ifName: (ip, i) => app.devices.ifName(ip, i) };
     const health = new Map<string, { kind: 'ok' | 'warn' | 'bad'; text: string }>();
-    await Promise.all(page.rows.slice(0, 100).map(async r => {
+    // a partial preview skips this per-stream analysis (it is the slow part); the full answer that follows has it
+    await Promise.all((page.partial ? [] : page.rows.slice(0, 100)).map(async r => {
       try {
         const recs = await app.store.streamRecords(r.skey, range);
         const d = analyzeStream(r.skey, recs, quick);
@@ -64,8 +68,8 @@ export function registerFlows(app: App): void {
         else health.set(r.skey, { kind: 'ok', text: 'Healthy' });
       } catch { /* leave the status blank */ }
     }));
-    if (q.trim()) app.log.info('query', `Flow search: ${q.trim()} (${page.total} result${page.total === 1 ? '' : 's'})`, user);
-    c.json({ rows: page.rows.map(r => ({ ...streamView(app, r), health: health.get(r.skey) ?? null })), total: page.total, truncated: page.truncated, errors: parsed.errors, range, tier: page.tier });
+    if (q.trim() && !page.partial) app.log.info('query', `Flow search: ${q.trim()} (${page.total} result${page.total === 1 ? '' : 's'})`, user);
+    c.json({ rows: page.rows.map(r => ({ ...streamView(app, r), health: health.get(r.skey) ?? null })), total: page.total, truncated: page.truncated, partial: !!page.partial, offset, scanned: page.partial ? preview : null, errors: parsed.errors, range, tier: page.tier });
   });
 
   // One stream with its hops. The stream id contains punctuation, so it goes in the query string.

@@ -14,6 +14,11 @@ let range = '6h';
 let sort: { key: 'time' | 'bytes' | 'pkts'; dir: 'asc' | 'desc' } = { key: 'time', dir: 'desc' };
 let rows: Row[] = []; let total = 0; let truncated = false; let errors: string[] = [];
 let loading = false; let loadError = '';
+/** Paging. The first page is answered from the newest PREVIEW flow records so the list appears at once; the full answer follows and replaces it. */
+const PREVIEW = 2000;
+const PAGE_SIZES = [100, 200, 500, 1000, 2000];
+let page = 0; let pageSize = 200;
+let partial = false;
 const follow = new Follower(() => bigRange(), () => redraw(), id => pick(id));
 let live = false; let liveTimer: number | undefined;
 
@@ -51,16 +56,35 @@ function syncHash(): void {
 }
 
 let seq = 0;
-async function load(quiet = false): Promise<void> {
+type Reply = { rows: Row[]; total: number; truncated: boolean; partial: boolean; errors: string[] };
+async function load(quiet = false, keepPage = false): Promise<void> {
   const my = ++seq;
+  if (!keepPage) page = 0;
   if (!quiet) { loading = true; loadError = ''; redraw(); }
+  const base = { range, q: fullQuery(), sort: sort.key, dir: sort.dir, limit: pageSize, offset: page * pageSize };
+  const apply = (r: Reply) => { rows = r.rows; total = r.total; truncated = r.truncated; errors = r.errors; };
   try {
-    const r = await get<{ rows: Row[]; total: number; truncated: boolean; errors: string[] }>('/api/streams' + qs({ range, q: fullQuery(), sort: sort.key, dir: sort.dir, limit: 200 }));
+    // First page of a fresh search: show the newest records straight away, then fetch everything in the background
+    if (!quiet && page === 0) {
+      const p = await get<Reply>('/api/streams' + qs({ ...base, preview: PREVIEW }));
+      if (my !== seq) return;
+      apply(p); partial = p.partial; loading = false; redraw();
+      if (!p.partial) return;
+    }
+    const r = await get<Reply>('/api/streams' + qs(base));
     if (my !== seq) return;
-    rows = r.rows; total = r.total; truncated = r.truncated; errors = r.errors; loadError = '';
-  } catch (e) { if (my === seq) { loadError = (e as Error).message; rows = []; total = 0; } }
+    if (!r.rows.length && page > 0 && r.total > 0) { page = Math.max(0, Math.ceil(r.total / pageSize) - 1); return load(true, true); }   // the list shrank under us
+    apply(r); partial = false; loadError = '';
+  } catch (e) {
+    if (my === seq) {
+      loadError = (e as Error).message;
+      if (!partial) { rows = []; total = 0; }   // keep a preview that is already on screen
+      partial = false;
+    }
+  }
   if (my === seq) { loading = false; redraw(); }
 }
+function goPage(n: number): void { page = Math.max(0, n); void load(false, true).then(() => document.querySelector('.tbl .scroll')?.scrollTo(0, 0)); }
 const loadSoon = debounce(() => { void load(); }, 350);
 
 /** Detail is looked up over a wider window than the list, so a stream found a while ago can still be opened. */
@@ -128,9 +152,11 @@ function list(): VNode {
     ttlCount && !ttlOnly ? h('div', { class: 'note bad row', style: 'justify-content:space-between' },
       h('span', null, h('b', null, `${ttlCount} stream${ttlCount === 1 ? '' : 's'}`), ' had the TTL expire before reaching the destination, or a router reported Time Exceeded for them.'),
       btn('Show only these', { kind: 'danger', onclick: () => { ttlOnly = true; void load(); redraw(); } })) : null,
+    partial ? h('div', { class: 'note warn row', role: 'status', style: 'gap:10px' }, h('span', { 'aria-hidden': 'true', class: 'spin' }),
+      h('span', null, h('b', null, 'Not everything has loaded yet. '), `This is the newest ${num(PREVIEW)} flow records. The rest of the time range is still loading, so byte and packet totals and the stream count will change when it finishes.`)) : null,
     h('div', { class: 'row', style: 'justify-content:space-between;color:var(--muted)' },
-      h('span', { 'aria-live': 'polite' }, loading ? 'Searching…' : loadError ? '' : `${num(rows.length)} of ${num(total)} stream${total === 1 ? '' : 's'} shown${truncated ? ' (more exist: narrow the search)' : ''}`),
-      h('span', null, 'Select a flow to follow the stream and inspect it hop by hop')),
+      h('span', { 'aria-live': 'polite' }, loading ? 'Searching…' : countText()),
+      pager(false)),
     loadError ? note(loadError, 'bad', true) : null,
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${COLS};--w:1470px` },
       h('div', { class: 'tr head' }, hdrBtn('Time', 'time'), h('span', null, 'Source'), h('span', null, 'Destination'), h('span', null, 'Proto'), h('span', null, 'Service'), h('span', null, 'VLAN'), hdrBtn('Bytes', 'bytes'), hdrBtn('Pkts', 'pkts'), h('span', null, 'Hops'), h('span', null, 'Status'), h('span', null, 'QoS'), h('span', null, 'TTL')),
@@ -148,7 +174,26 @@ function list(): VNode {
           r.health ? statusEl(r.health.kind, r.health.text) : h('span', { class: 'dim' }, '—'),
           qosTag(r), ttlTag(r))),
         !rows.length && !loading ? empty('No flows match this search. Loosen the filters, widen the time range, or clear the search.') : null,
-        loading && !rows.length ? spinner('Searching…') : null))));
+        loading && !rows.length ? spinner('Searching…') : null))),
+    h('div', { class: 'row', style: 'justify-content:space-between;color:var(--muted)' }, h('span', null, 'Select a flow to follow the stream and inspect it hop by hop'), pager(true)));
+}
+
+function countText(): string {
+  if (loadError && !rows.length) return '';
+  if (partial) return `${num(rows.length)} stream${rows.length === 1 ? '' : 's'} so far`;
+  if (!total) return '0 streams';
+  const from = page * pageSize + 1, to = page * pageSize + rows.length;
+  return `${num(from)}–${num(to)} of ${num(total)} stream${total === 1 ? '' : 's'}`;
+}
+
+function pager(bottom: boolean): VNode {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const busy = loading || partial;   // the totals are not final until the full answer is in
+  return h('div', { class: 'row', style: 'gap:8px', role: 'navigation', 'aria-label': bottom ? 'Pages (bottom)' : 'Pages' },
+    bottom ? null : [h('span', null, 'Rows per page'), select(String(pageSize), PAGE_SIZES.map(n => [String(n), String(n)] as [string, string]), v => { pageSize = Number(v); void load(); }, { aria: 'Rows per page', width: '84px' })],
+    btn('‹ Previous', { small: true, kind: 'ghost', disabled: busy || page === 0, onclick: () => goPage(page - 1) }),
+    h('span', { class: 'mono', style: 'font-size:12px' }, partial ? '…' : `Page ${num(page + 1)} of ${num(pages)}`),
+    btn('Next ›', { small: true, kind: 'ghost', disabled: busy || page + 1 >= pages, onclick: () => goPage(page + 1) }));
 }
 
 export function render(): VNode {

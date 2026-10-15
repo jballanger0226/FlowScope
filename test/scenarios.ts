@@ -104,6 +104,28 @@ export function scenarios(label: string, mk: Mk): void {
     } finally { await t.done(); }
   });
 
+  test(label + ': streams can be paged and previewed from the newest records', async () => {
+    const t = await mk();
+    try {
+      // five streams, each one record; the newer the record, the higher the port
+      await t.s.insertFlows([1, 2, 3, 4, 5].map(i => rec({ srcIp: '10.1.9.' + i, sport: 40000 + i, ts0: NOW - (60 - i * 10) * 1000, ts1: NOW - (55 - i * 10) * 1000, bytes: i * 100, pkts: i })));
+      const all = (await t.s.searchStreams(q([], { limit: 50 })));
+      assert.equal(all.total, 5); assert.equal(all.partial, false); assert.equal(all.rows.length, 5);
+      const p1 = await t.s.searchStreams(q([], { limit: 2 })), p2 = await t.s.searchStreams(q([], { limit: 2, offset: 2 })), p3 = await t.s.searchStreams(q([], { limit: 2, offset: 4 }));
+      assert.deepEqual([...p1.rows, ...p2.rows, ...p3.rows].map(r => r.skey), all.rows.map(r => r.skey), 'pages join up to the full list');
+      assert.equal(p2.total, 5); assert.equal(p1.truncated, true); assert.equal(p3.rows.length, 1); assert.equal(p3.truncated, false);
+      assert.equal((await t.s.searchStreams(q([], { limit: 2, offset: 9 }))).rows.length, 0);
+      // preview: only the 3 newest records are read, and the page says older ones were left out
+      const pv = await t.s.searchStreams(q([], { limit: 50, recent: 3 }));
+      assert.equal(pv.partial, true); assert.equal(pv.total, 3);
+      assert.deepEqual(pv.rows.map(r => r.srcIp).sort(), ['10.1.9.3', '10.1.9.4', '10.1.9.5']);
+      const whole = await t.s.searchStreams(q([], { limit: 50, recent: 5 }));
+      assert.equal(whole.partial, false, 'a preview that reads every record is complete'); assert.equal(whole.total, 5);
+      const ch = await t.s.searchStreams(q([{ kind: 'dport', ports: [443] }], { limit: 50, recent: 2 }));
+      assert.equal(ch.partial, true); assert.equal(ch.total, 2);
+    } finally { await t.done(); }
+  });
+
   test(label + ': src filter is exact on the initiator, port filter is either direction', async () => {
     const t = await mk();
     try {
