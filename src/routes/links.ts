@@ -14,6 +14,7 @@ export const MIBS = [
   { name: 'Q-BRIDGE-MIB · dot1qVlanStaticName', what: 'VLAN numbers and their names, so flows and interfaces can be searched by either.' },
   { name: 'CISCO-CLASS-BASED-QOS-MIB', what: 'Input and output service policies, per-class packets, bytes and drops, and queue depth (64-bit counters, or 32-bit where a device has no others). Used for devices that implement it.' },
   { name: 'CISCO-VLAN-MEMBERSHIP-MIB · CISCO-VTP-MIB · Q-BRIDGE-MIB', what: 'The VLAN of each port: access and voice VLAN, trunk native and allowed VLANs, or the standard port VLAN id.' },
+  { name: 'Aruba AI-AP-MIB (Instant access points)', what: 'Radios (channel, power, noise, how busy the channel is), SSIDs, and the wireless clients with their name, IP address, signal and traffic, read with the host tables.' },
   { name: 'BRIDGE-MIB · Q-BRIDGE-MIB · IP-MIB · LLDP-MIB · CISCO-CDP-MIB', what: 'MAC address tables, ARP, and LLDP/CDP neighbours every few minutes, to show which port a host is plugged into. Cisco switches are read one VLAN at a time.' }
 ];
 
@@ -35,7 +36,7 @@ export function registerLinks(app: App): void {
     const counts = app.hosts.portCounts();
     const devices = app.devices.list().map(d => ({
       id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
-      qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote,
+      qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id),
       interfaces: app.devices.interfaces(d.id).map(i => {
         const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
         // VLAN and SVI interfaces carry routed traffic for a whole subnet and are never listed under "needs attention"
@@ -67,6 +68,13 @@ export function registerLinks(app: App): void {
       hosts: app.hosts.portHosts(dev, ifx, 300).map(h => ({ ...h, vlanName: h.vlan ? app.vlanName(h.vlan) : '' })), neighbors: neighborViews(app.hosts.neighborsOf(dev, ifx).map(n => ({ ...n, ifIndex: ifx })), env, env.devices()),
       readAt: d.hosts_at, note: d.hosts_note ?? '', tracking: app.settings.get('hosts').enabled
     });
+  });
+
+  // Wi-Fi state of an access point: the AP itself, its radios, its SSIDs and the clients connected to it
+  w.get('/api/links/wlan', 'ro', c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9);
+    if (!app.devices.row(dev)) throw new HttpError(404, 'No such device');
+    c.json(app.hosts.wlanOf(dev) ?? { readAt: null, aps: [], radios: [], ssids: [], clients: [] });
   });
 
   // Everything a device's CDP and LLDP tables say, by port, with the neighbours that are polled devices linked so the console can open them.

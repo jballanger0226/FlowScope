@@ -13,14 +13,20 @@ interface Iface {
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; flagged: boolean;
 }
-interface Dev { id: number; name: string; ip: string; role: string; status: string; lastOk: number | null; lastError: string | null; profile: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; interfaces: Iface[] }
+interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; interfaces: Iface[] }
 interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number }; mibs: { name: string; what: string }[] }
 interface SeriesRes {
   util: { step: number; points: { ts: number; utilIn: number; utilOut: number; inBps: number; outBps: number; disc: number; err: number }[] };
   classes: { cls: string; dscps: number[]; bw: string | null; points: { ts: number; dropPct: number; dropBps: number; dropPps: number; sentBps: number; qdepth: number }[] }[];
   step: number; tier: string;
 }
-interface PortHost { mac: string; vlan: number; vlanName: string; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean }
+interface Wifi { name: string; os: string; ssid: string; ap: string; radio: number | null; band: string; channel: string; snr: number; txRate: number; rxRate: number; txBytes: number; rxBytes: number; uptimeSec: number; readAt: number }
+interface PortHost { mac: string; vlan: number; vlanName: string; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean; wifi: Wifi | null }
+interface WlanAp { mac: string; name: string; ip: string; serial: string; model: string; cpuPct: number; memFree: number; memTotal: number; uptimeSec: number; role: string }
+interface WlanRadio { apMac: string; idx: number; mac: string; channel: string; band: string; txPower: number; noiseFloor: number; util4: number; util64: number; clients: number; mode: string; up: boolean }
+interface WlanSsid { apMac: string; bssid: string; name: string; radio: number | null; ssidId: number | null; clients: number; ifName: string | null }
+interface WlanClient { mac: string; apMac: string; apName: string; bssid: string; ssid: string; radio: number | null; ip: string; name: string; os: string; snr: number; txRate: number; rxRate: number; txBytes: number; rxBytes: number; uptimeSec: number }
+interface WlanRes { readAt: number | null; aps: WlanAp[]; radios: WlanRadio[]; ssids: WlanSsid[]; clients: WlanClient[] }
 interface NbPort { ifIndex: number; ifName: string; neighbors: Neighbor[] }
 interface NbRes { ports: NbPort[]; readAt: number | null; note: string; tracking: boolean }
 interface HostsRes { hosts: PortHost[]; neighbors: Neighbor[]; readAt: number | null; note: string; tracking: boolean }
@@ -35,6 +41,7 @@ let hostsRes: HostsRes | null = null; let hostsLoading = false; let hostsError =
 let findQ = ''; let found: Located | null = null; let findError = ''; let finding = false;
 let readingHosts = false; let readMsg = '';
 let nbRes: NbRes | null = null; let nbError = ''; let nbLoading = false;
+let wlan: WlanRes | null = null; let wlanError = ''; let wlanLoading = false; let clientFilter = '';
 let devId = 0; let ifIndex = 0;
 let graphRange = '6h';
 let dropThr = 1;
@@ -65,7 +72,8 @@ async function load(quiet = false): Promise<void> {
     data = await get<Overview>('/api/links?minutes=10');
     loadError = '';
     if (pendingName) resolvePending();
-    else if (!devId && data.devices.length) { const first = needsAttention()[0]; if (first) select_(first.dev.id, first.itf.ifIndex); else select_(data.devices[0].id, data.devices[0].interfaces[0]?.ifIndex ?? 0); }
+    else if (devId && cur().dev?.hasWlan) void loadWlan(true);
+    if (!pendingName && !devId && data.devices.length) { const first = needsAttention()[0]; if (first) select_(first.dev.id, first.itf.ifIndex); else select_(data.devices[0].id, data.devices[0].interfaces[0]?.ifIndex ?? 0); }
   } catch (e) { loadError = (e as Error).message; }
   loading = false; redraw();
 }
@@ -84,7 +92,7 @@ let prevDev = 0;
 function select_(d: number, i: number): void {
   if (d !== devId) ifSearch = '';
   devId = d; ifIndex = i; series = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
-  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); }
+  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
@@ -122,6 +130,16 @@ async function loadNeighbors(): Promise<void> {
   if (my === nseq) { nbLoading = false; redraw(); }
 }
 
+let wseq = 0;
+/** Wi-Fi state of the selected device, when it is an access point. Read from what FlowScope stored at the last host-table read. */
+async function loadWlan(quiet = false): Promise<void> {
+  const d = cur().dev; if (!d?.hasWlan) { wlan = null; return; }
+  const my = ++wseq; if (!quiet) { wlanLoading = true; wlanError = ''; redraw(); }
+  try { const r = await get<WlanRes>('/api/links/wlan' + qs({ dev: d.id })); if (my === wseq) wlan = r; }
+  catch (e) { if (my === wseq) { wlan = null; wlanError = (e as Error).message; } }
+  if (my === wseq) { wlanLoading = false; redraw(); }
+}
+
 let hseq = 0;
 async function loadHosts(): Promise<void> {
   if (!devId || !ifIndex) return;
@@ -138,7 +156,7 @@ async function readHostsNow(): Promise<void> {
   try {
     const r = await post<{ macs: number; arp: number; neighbors: number; note: string }>(`/api/devices/${devId}/read-hosts`, {});
     readMsg = `Read ${num(r.macs)} MAC addresses, ${num(r.arp)} ARP entries and ${num(r.neighbors)} neighbours.${r.note ? ' ' + r.note : ''}`;
-    await load(true); await loadHosts(); await loadNeighbors();
+    await load(true); await loadHosts(); await loadNeighbors(); await loadWlan(true);
   } catch (e) { readMsg = (e as Error).message; }
   readingHosts = false; redraw();
 }
@@ -164,6 +182,7 @@ const cur = () => {
   return { dev: d, itf: d?.interfaces.find(i => i.ifIndex === ifIndex) };
 };
 
+const roleLabel = (r: string): string => (r === 'ap' ? 'access point' : r);
 const classColor = (name: string, all: string[]) => PALETTE[Math.max(0, all.indexOf(name)) % PALETTE.length];
 const dscpText = (d: number[]) => (d.length ? d.join(', ') : '—');
 
@@ -172,7 +191,7 @@ const dscpText = (d: number[]) => (d.length ? d.join(', ') : '—');
 function sidebar(): VNode {
   const d = data!;
   const t = search.trim().toLowerCase();
-  const devs = d.devices.filter(x => !t || x.name.toLowerCase().includes(t) || x.ip.includes(t) || x.role.toLowerCase().includes(t) || x.interfaces.some(i => i.name.toLowerCase().includes(t) || i.alias.toLowerCase().includes(t)));
+  const devs = d.devices.filter(x => !t || x.name.toLowerCase().includes(t) || x.ip.includes(t) || x.role.toLowerCase().includes(t) || roleLabel(x.role).includes(t) || x.interfaces.some(i => i.name.toLowerCase().includes(t) || i.alias.toLowerCase().includes(t)));
   const attn = needsAttention();
   return h('aside', { class: 'side', 'aria-label': 'Devices' },
     h('div', { class: 'panel col', style: 'gap:10px' },
@@ -182,7 +201,7 @@ function sidebar(): VNode {
         devs.map(x => {
           const flagged = x.interfaces.filter(i => i.flagged).length;
           return h('button', { key: x.id, type: 'button', class: 'cardbtn', 'aria-pressed': x.id === devId, onclick: () => { const first = x.interfaces.find(i => i.flagged) ?? x.interfaces[0]; select_(x.id, first?.ifIndex ?? 0); } },
-            h('span', { class: 't' }, x.name), h('span', { class: 's' }, `${x.role} · ${x.ip}`),
+            h('span', { class: 't' }, x.name), h('span', { class: 's' }, `${roleLabel(x.role)} · ${x.ip}`),
             h('span', { class: 's' }, x.status === 'ok' ? statusEl(flagged ? 'warn' : 'ok', flagged ? `${flagged} interface${flagged === 1 ? ' needs' : 's need'} attention` : 'Healthy') : statusEl(x.status === 'paused' ? 'off' : 'bad', x.status === 'paused' ? 'Polling paused' : x.lastError ? 'Not answering' : 'Waiting for first poll')));
         }),
         !devs.length ? h('span', { class: 'dim' }, d.devices.length ? 'No device matches.' : 'No devices are polled yet. Add one on the SNMP devices tab.') : null)),
@@ -326,6 +345,7 @@ function classTable(itf: Iface): VNode {
 
 function hostsPanel(dev: Dev, itf: Iface): VNode {
   const r = hostsRes;
+  const wifiCols = !!r?.hosts.some(x => x.wifi);
   const head = h('div', { class: 'row', style: 'justify-content:space-between' },
     h('div', { class: 'col', style: 'gap:2px' }, h('b', null, `Hosts on ${itf.name}`),
       h('span', { class: 'muted', style: 'font-size:12px' }, dev.hostsAt ? `From the MAC address, ARP and LLDP/CDP tables of ${dev.name}, last read ${ago(dev.hostsAt)}.` : 'From the MAC address, ARP and LLDP/CDP tables. Not read yet from this device.')),
@@ -336,14 +356,72 @@ function hostsPanel(dev: Dev, itf: Iface): VNode {
     r && !r.tracking ? note('Host tracking is turned off, so no tables are being read automatically. Tables can still be read with the button above.', 'info') : null,
     r && r.neighbors.length ? neighborLines(r.neighbors) : null,
     r && r.neighbors.some(n => n.kind === 'infra') ? h('span', { class: 'dim', style: 'font-size:12px' }, 'This port leads to another switch or router. Addresses below are just what that device has forwarded, not hosts plugged in here.') : null,
-    r && r.hosts.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1fr) minmax(130px,1fr) minmax(140px,1fr) 110px 110px;--w:700px' },
-      h('div', { class: 'tr head' }, ...['MAC address', 'IP address', 'VLAN', 'First seen', 'Last seen'].map(t => h('span', null, t))),
+    r && r.hosts.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${wifiCols ? 'minmax(150px,1fr) ' : ''}minmax(150px,1fr) minmax(130px,1fr)${wifiCols ? ' minmax(190px,1.2fr)' : ''} minmax(140px,1fr) 110px 110px;--w:${wifiCols ? 1090 : 700}px` },
+      h('div', { class: 'tr head' }, ...[...(wifiCols ? ['Name'] : []), 'MAC address', 'IP address', ...(wifiCols ? ['Wi-Fi'] : []), 'VLAN', 'First seen', 'Last seen'].map(t => h('span', null, t))),
       h('div', { class: 'scroll', style: 'max-height:240px' }, r.hosts.slice(0, 100).map(x => h('div', { key: x.mac + x.vlan, class: 'tr' },
+        wifiCols ? h('span', null, x.wifi ? [x.wifi.name || '—', x.wifi.os ? h('span', { class: 'dim', style: 'font-size:12px' }, ' · ' + x.wifi.os) : null] : h('span', { class: 'dim' }, '—')) : null,
         h('span', { class: 'mono', style: 'font-size:12px' }, x.mac), h('span', { class: 'mono', style: 'font-size:12px' }, x.ips.join(', ') || '—'),
+        wifiCols ? (x.wifi ? h('span', { style: 'font-size:12px' }, `${x.wifi.ssid || 'Wi-Fi'} · ${bandText(x.wifi.band, x.wifi.channel)} · `, snrTag(x.wifi.snr)) : h('span', { class: 'dim' }, '—')) : null,
         h('span', null, vlanLabel(x.vlan, x.vlanName) || '—'), h('span', { class: 'muted', style: 'font-size:12px' }, dayClock(x.firstSeen)),
         h('span', { class: x.active ? 'muted' : 'dim', style: 'font-size:12px' }, x.active ? ago(x.lastSeen) : 'gone ' + ago(x.lastSeen))))))) : null,
     r && !r.hosts.length && r.tracking && !hostsError ? h('span', { class: 'dim' }, dev.hostsAt ? 'No MAC addresses have been learned on this port.' : 'Nothing read yet. The first read happens within a few minutes of adding the device, or press Read tables now.') : null,
     r && r.hosts.length > 100 ? h('span', { class: 'dim' }, `${num(r.hosts.length)} addresses; the newest 100 are shown.`) : null);
+}
+
+/* ------------------------------------------------------------------ Wi-Fi (access points) */
+
+const bandText = (band: string, channel: string): string => (band ? `${band} GHz` : 'radio') + (channel ? ` ch ${channel}` : '');
+/** Signal to noise: a rough guide, 25 dB and up is good for most use, under 15 dB is poor. */
+function snrTag(snr: number): VNode {
+  const kind = snr >= 25 ? 'ok' : snr >= 15 ? 'warn' : 'bad';
+  return h('span', { class: 'mono', style: `color:${kind === 'ok' ? 'inherit' : kind === 'warn' ? 'var(--warn)' : 'var(--bad)'}`, title: 'Signal to noise ratio. Roughly: 25 dB and up is good, 15 to 25 is fair, under 15 is poor.' }, `${snr} dB`);
+}
+
+function wlanPanel(dev: Dev): VNode {
+  const w = wlan;
+  const q = clientFilter.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const radioName = (apMac: string, idx: number | null): string => { const r = w?.radios.find(x => x.apMac === apMac && x.idx === idx); return r ? bandText(r.band, r.channel) : idx === null ? '—' : `radio ${idx}`; };
+  const clients = (w?.clients ?? []).filter(c => !q.length || q.every(t => `${c.name} ${c.os} ${c.mac} ${c.ip} ${c.ssid} ${c.apName}`.toLowerCase().includes(t)));
+  const apNames = new Set((w?.clients ?? []).map(c => c.apMac)); const multi = apNames.size > 1;
+  const cCols = `minmax(150px,1.2fr) 128px 112px minmax(150px,1.1fr) 66px 104px minmax(130px,1fr) 76px`;
+  return h('div', { class: 'col', style: 'gap:10px' },
+    h('div', { class: 'row', style: 'justify-content:space-between' },
+      h('div', { class: 'col', style: 'gap:2px' }, h('b', null, 'Wi-Fi'),
+        h('span', { class: 'muted', style: 'font-size:12px' }, w?.readAt ? `Radios, SSIDs and clients from the access point's own tables, last read ${ago(w.readAt)}. They are read with the host tables, every few minutes.` : 'Not read yet from this access point.')),
+      btn(readingHosts ? 'Reading…' : 'Read tables now', { small: true, kind: 'ghost', disabled: readingHosts, title: 'Ask the access point for its Wi-Fi tables right now', onclick: () => void readHostsNow() })),
+    wlanError ? note(wlanError, 'bad', true) : null,
+    wlanLoading && !w ? spinner('Loading Wi-Fi…') : null,
+    w && w.aps.length ? h('div', { class: 'cards' }, w.aps.map(a => h('div', { key: a.mac, class: 'cardbtn', style: 'cursor:default' },
+      h('span', { class: 't' }, a.name || a.mac), h('span', { class: 's' }, [a.model ? 'model ' + a.model : null, a.role || null, `up ${dur(a.uptimeSec * 1000)}`].filter(Boolean).join(' · ')),
+      h('span', { class: 's' }, `CPU ${a.cpuPct}%`, a.memTotal ? ` · memory ${Math.round((a.memTotal - a.memFree) / a.memTotal * 100)}% used of ${bytes(a.memTotal)}` : '')))) : null,
+    w && w.radios.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1.2fr) 90px 90px minmax(150px,1fr) minmax(150px,1fr) 80px 70px;--w:880px' },
+      h('div', { class: 'tr head' }, ...['Radio', 'Power', 'Noise floor', 'Channel busy (4 s)', 'Channel busy (64 s)', 'Clients', 'State'].map(t => h('span', null, t))),
+      w.radios.map(r => h('div', { key: r.apMac + r.idx, class: 'tr' },
+        h('span', { style: 'font-weight:600' }, `Radio ${r.idx} · ${bandText(r.band, r.channel)}`, r.mode ? h('span', { class: 'dim', style: 'font-weight:400' }, ' · ' + r.mode) : null),
+        h('span', { class: 'mono', style: 'font-size:12px' }, `${r.txPower} dBm`), h('span', { class: 'mono', style: 'font-size:12px' }, `${r.noiseFloor} dBm`),
+        h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, bar(r.util4), h('span', { class: 'mono', style: 'font-size:12px' }, pct(r.util4, 0))),
+        h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, bar(r.util64), h('span', { class: 'mono', style: 'font-size:12px' }, pct(r.util64, 0))),
+        h('span', { class: 'mono', style: 'font-size:12px' }, String(r.clients)), h('span', null, r.up ? statusEl('ok', 'up') : statusEl('bad', 'down')))))) : null,
+    w && w.ssids.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1.2fr) minmax(150px,1fr) minmax(150px,1fr) 80px minmax(170px,1fr);--w:760px' },
+      h('div', { class: 'tr head' }, ...['SSID', 'Radio', 'BSSID', 'Clients', 'Interface'].map(t => h('span', null, t))),
+      w.ssids.map(s => { const itf = s.ifName ? dev.interfaces.find(i => i.name === s.ifName) : undefined; return h('div', { key: s.bssid, class: 'tr' },
+        h('span', { style: 'font-weight:600' }, s.name || '—'), h('span', null, radioName(s.apMac, s.radio)), h('span', { class: 'mono', style: 'font-size:12px' }, s.bssid), h('span', { class: 'mono', style: 'font-size:12px' }, String(s.clients)),
+        itf ? h('button', { type: 'button', class: 'lnk', title: 'Show this interface: utilisation, discards and graphs', onclick: () => select_(dev.id, itf.ifIndex) }, itf.name) : h('span', { class: 'dim' }, '—')); }))) : null,
+    w && w.clients.length ? h('div', { class: 'col', style: 'gap:8px' },
+      h('div', { class: 'row', style: 'justify-content:space-between' },
+        h('b', null, `Wireless clients (${num(w.clients.length)})`),
+        textInput(clientFilter, v => { clientFilter = v; searchSoon(); }, { placeholder: 'Filter by name, MAC, IP or SSID', aria: 'Filter wireless clients', width: '280px' })),
+      h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cCols};--w:960px` },
+        h('div', { class: 'tr head' }, ...['Client', 'MAC address', 'IP address', 'SSID and radio', 'Signal', 'Link rate', 'To / from client', 'Connected'].map(t => h('span', null, t))),
+        h('div', { class: 'scroll', style: 'max-height:360px' }, clients.map(c => h('div', { key: c.mac, class: 'tr' },
+          h('span', null, c.name || '—', c.os ? h('span', { class: 'dim', style: 'font-size:12px' }, ' · ' + c.os) : null, multi && c.apName ? h('span', { class: 'dim', style: 'font-size:12px' }, ' · on ' + c.apName) : null),
+          h('span', { class: 'mono', style: 'font-size:12px' }, c.mac), h('span', { class: 'mono', style: 'font-size:12px' }, c.ip || '—'),
+          h('span', { style: 'font-size:12px' }, `${c.ssid || '—'} · ${radioName(c.apMac, c.radio)}`), snrTag(c.snr),
+          h('span', { class: 'mono', style: 'font-size:12px', title: 'Rate to the client / rate from the client, in Mbps' }, `${c.txRate} / ${c.rxRate} Mbps`),
+          h('span', { class: 'mono', style: 'font-size:12px', title: 'Bytes the access point sent to the client / received from it, since it connected' }, `${bytes(c.txBytes)} / ${bytes(c.rxBytes)}`),
+          h('span', { class: 'muted', style: 'font-size:12px' }, dur(c.uptimeSec * 1000)))),
+          !clients.length ? h('div', { class: 'empty' }, 'No client matches the filter.') : null)))) : null,
+    w && !w.clients.length && !wlanLoading && w.readAt ? h('span', { class: 'dim' }, 'No wireless clients are connected right now.') : null);
 }
 
 /** Sidebar box: type an IP or MAC address to see which switch port it is plugged in to. */
@@ -445,10 +523,11 @@ export function render(): VNode {
     h('div', { class: 'mainp' },
       dev ? h('section', { 'aria-label': 'Selected device', class: 'panel col', style: 'gap:14px' },
         h('div', { class: 'row', style: 'justify-content:space-between' },
-          h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, dev.name), h('span', { class: 'muted' }, `${dev.role} · ${dev.ip} · ${dev.profile || 'generic'} · last answered ${ago(dev.lastOk)}`)),
+          h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, dev.name), h('span', { class: 'muted' }, `${roleLabel(dev.role)} · ${dev.ip} · ${dev.profile || 'generic'} · last answered ${ago(dev.lastOk)}`)),
           btn('Edit in SNMP devices', { kind: 'ghost', small: true, onclick: () => go('devices', { id: dev.id }) })),
         dev.status !== 'ok' && dev.lastError ? note(`The last poll failed: ${dev.lastError}`, 'warn') : null,
         ifTable(dev),
+        dev.hasWlan ? wlanPanel(dev) : null,
         neighborsPanel(dev)) : null,
       dev && itf ? h('section', { 'aria-label': 'Selected interface', class: 'panel col', style: 'gap:16px' },
         h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, `${itf.name}${itf.alias ? ' · ' + itf.alias : ''}`),
