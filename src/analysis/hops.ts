@@ -38,6 +38,9 @@ export interface NeighborView {
 /** Where a port name on a hop came from: the flow record itself, or filled in because the exporter did not report it. */
 export type PortSource = 'flow' | 'reverse' | 'neighbor' | 'host';
 
+/** A class that dropped at least this share of its packets in some poll is flagged on the stream. Below it the drops are only mentioned. */
+const DROP_FLAG_PCT = 0.1;
+
 export interface HopView {
   n: number;
   exporter: string;
@@ -224,7 +227,13 @@ function buildHops(recs: FlowRecord[], ctx: HopContext, multicast = false): HopV
     else if (a.multiPath) obs.push({ kind: 'path', severity: 'info', text: 'Traffic used more than one interface pair on this device (load sharing or a path change)' });
     const drops = ctx.classDrops?.(a.exporter, a.outIf, a.t0 - 120_000, a.t1 + 120_000, dscpOut ?? a.tosIn) ?? [];
     for (const d of drops) {
-      if (d.dropPkts > 0) obs.push({ kind: 'qdrop', severity: d.dropPct >= 1 ? 'bad' : 'warn', text: `Egress queue drops on ${ctx.ifName(a.exporter, a.outIf)}: class ${d.cls} dropped ${d.dropPct.toFixed(2)}% (${d.dropPkts} packets) around this time` });
+      if (d.dropPkts <= 0) continue;
+      // The counters belong to the whole class on the port, over the whole life of the stream, not to this stream alone. A huge count at a tiny rate
+      // (a busy class-default over many hours) is not a problem for the stream, so it is noted but not flagged.
+      const peak = d.dropPct < 0.01 ? '<0.01%' : d.dropPct.toFixed(2) + '%';
+      const where = `${ctx.ifName(a.exporter, a.outIf)}: class ${d.cls}`;
+      if (d.dropPct >= DROP_FLAG_PCT) obs.push({ kind: 'qdrop', severity: d.dropPct >= 1 ? 'bad' : 'warn', text: `Egress queue drops on ${where} dropped ${peak} at worst (${d.dropPkts.toLocaleString()} packets in all) around this time` });
+      else obs.push({ kind: 'qdrop', severity: 'info', text: `Egress queue on ${where} dropped ${d.dropPkts.toLocaleString()} packets over the life of this stream, at worst ${peak} of the class in any one poll. These counts are for the whole class on the port, not just this stream, and the rate is too low to matter.` });
     }
     hops.push({
       n: i + 1, exporter: a.exporter, dev, role: ctx.deviceRole(a.exporter),
