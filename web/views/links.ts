@@ -1,8 +1,8 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw, go } from '../state.js';
-import { bar, btn, chartGrid, chip, empty, heading, lineChart, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
-import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, svcLabel } from '../util.js';
+import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
+import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, rangeMs, svcLabel } from '../util.js';
 import { post } from '../api.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
@@ -52,8 +52,7 @@ let streams: StreamRow[] = []; let streamsTotal = 0; let streamsLoading = false;
 let pendingName: { dev: string; ifn: string } | null = null;
 let timer: number | undefined;
 
-const GRAPH_RANGES: [string, string][] = [['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days']];
-const RANGE_MS: Record<string, number> = { '1h': 3600e3, '6h': 6 * 3600e3, '24h': 24 * 3600e3, '7d': 7 * 86400e3 };
+const GRAPH_RANGES: [string, string][] = [['15m', 'Last 15 minutes'], ['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days']];
 const THRESHOLDS: [string, string][] = [['0.5', '0.5%'], ['1', '1%'], ['2', '2%'], ['5', '5%']];
 
 export function enter(p: URLSearchParams): void {
@@ -494,16 +493,17 @@ function events(s: SeriesRes, names: string[]): Ev[] {
 
 function graphs(s: SeriesRes, itf: Iface): VNode {
   const names = s.classes.map(c => c.cls);
-  const to = Date.now(); const from = to - RANGE_MS[graphRange];
+  const spanMs = rangeMs(graphRange) ?? 6 * 3600e3;
+  const to = Date.now(); const from = to - spanMs;
   const shown = s.classes.filter(c => !hidden.has(c.cls));
   const evs = events(s, names);
   const bands = evs.map(e => ({ a: e.a - s.step / 2, b: e.b + s.step / 2 }));
-  const fmtT = (t: number) => (RANGE_MS[graphRange] > 86400e3 ? dayClock(t) : clock(t, false));
+  const fmtT = (t: number) => (spanMs > 86400e3 ? dayClock(t) : clock(t, false));
   const mk = (pick: (p: SeriesRes['classes'][0]['points'][0]) => number): Series[] => shown.map(c => ({ name: c.cls, color: classColor(c.cls, names), points: c.points.map(p => ({ t: p.ts, v: pick(p) })) }));
   const peak = (c: SeriesRes['classes'][0]) => Math.max(0, ...c.points.map(p => p.dropPct));
   return h('div', { class: 'col', style: 'gap:14px' },
     h('div', { class: 'row end' },
-      select(graphRange, GRAPH_RANGES, v => { graphRange = v; void loadSeries(); }, { aria: 'Graph time range', width: '176px' }),
+      rangePicker('links-graphs', graphRange, GRAPH_RANGES, v => { graphRange = v; void loadSeries(); }, { aria: 'Graph time range' }),
       h('label', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted' }, 'Mark drops above'), select(String(dropThr), THRESHOLDS, v => { dropThr = Number(v); redraw(); }, { aria: 'Drop threshold', width: '96px' })),
       s.tier === 'h1' ? chip('hourly averages', 'info', 'The range is older than the per-poll samples kept, so hourly summaries are shown') : null),
     names.length ? h('div', { role: 'group', 'aria-label': 'Classes shown', class: 'row', style: 'gap:8px' },
