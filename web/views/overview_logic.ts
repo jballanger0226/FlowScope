@@ -31,9 +31,9 @@ export function issues(o: OvInput): Issue[] {
   const names = new Map(dev.interfaces.map(i => [i.ifIndex, i.alias ? `${i.name} (${i.alias})` : i.name]));
   const r = dev.resources;
   if (r) {
-    if (r.cpuPct !== null && r.cpuPct >= 85) out.push({ level: r.cpuPct >= 95 ? 'bad' : 'warn', title: `CPU at ${pct(r.cpuPct)}`, detail: 'The graphs below show when it rose.' });
+    if (r.cpuPct !== null && r.cpuPct >= 85) out.push({ level: r.cpuPct >= 95 ? 'bad' : 'warn', title: `CPU at ${pct(r.cpuPct)}`, detail: 'The history graphs on the Hardware tab show when it rose.', target: { tab: 'hardware' } });
     if (r.memPct !== null && r.memPct >= 90) out.push({ level: r.memPct >= 95 ? 'bad' : 'warn', title: `Memory at ${pct(r.memPct)}`, detail: 'The resource graphs below show the trend.' });
-    for (const d of r.disks) if (d.usedPct >= 90) out.push({ level: d.usedPct >= 95 ? 'bad' : 'warn', title: `Disk ${d.name} ${pct(d.usedPct)} full`, detail: 'Free space before it runs out.' });
+    for (const d of r.disks) if (d.usedPct >= 90) out.push({ level: d.usedPct >= 95 ? 'bad' : 'warn', title: `Disk ${d.name} ${pct(d.usedPct)} full`, detail: 'Free space before it runs out.', target: { tab: 'hardware' } });
   }
   for (const i of dev.interfaces) if (i.flagged) {
     const bits: string[] = [];
@@ -80,7 +80,7 @@ export function cards(o: OvInput, all: Issue[]): Card[] {
   const ie = count('interfaces');
   const ifIssues = all.filter(i => i.target?.tab === 'interfaces' && i.target.ifIndex !== undefined).length;
   out.push({ tab: 'interfaces', label: 'Interfaces', level: ifIssues ? ie.level : 'ok', headline: ifIssues ? `${plural(ifIssues, 'issue')}` : 'No issues', lines: [`${up} of ${real.length} up`, `${plural(real.filter(i => i.flagged).length, 'over its limits', 'over their limits')}`] });
-  if (o.hasHardware) {
+  {
     const hl = o.health?.health; const sensors = hl?.sensors.filter(s => s.kind !== 'optic') ?? [];
     const c = count('hardware');
     out.push({ tab: 'hardware', label: 'Hardware', level: c.level, headline: c.n ? plural(c.n, 'issue') : 'All within limits', lines: [sensors.length ? plural(sensors.length, 'sensor') : '', hl?.poe.length ? 'PoE monitored' : ''].filter(Boolean) });

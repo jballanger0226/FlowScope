@@ -718,7 +718,8 @@ function resourceSubjects(dev: Dev): ResSubject[] {
 }
 
 /** Uptime, CPU, memory and disk with their history, for every kind of device: switches, routers, firewalls and access points alike. */
-function resourcesPanel(dev: Dev): VNode | null {
+/** The resource tiles of the device (and of each access point). The graphs of their history are only with them on the Hardware tab. */
+function resourcesPanel(dev: Dev, history = false): VNode | null {
   const subs = resourceSubjects(dev).filter(x => resourceTileList(x.r).length);
   if (!subs.length) return dev.lastOk === null && !dev.hasWlan ? null : h('span', { class: 'dim', style: 'font-size:12px' }, 'This device does not publish uptime, CPU or memory through HOST-RESOURCES-MIB, UCD-SNMP-MIB, the Cisco process and memory MIBs or a vendor MIB FlowScope reads.');
   return h('div', { class: 'col', style: 'gap:18px' }, subs.map((x, i) => {
@@ -727,7 +728,7 @@ function resourcesPanel(dev: Dev): VNode | null {
       x.title ? h('b', null, x.title) : null,
       h('div', { class: 'row', style: 'gap:10px;align-items:stretch' }, resourceTileList(r, resHists.get(x.key))),
       h('span', { class: 'dim', style: 'font-size:11.5px' }, `Read ${r.readAt ? ago(r.readAt) : 'recently'}${r.source ? ' from ' + r.source : ''}. Memory leaves out the file cache where the device reports it.`),
-      resHistoryPanel(x, i === 0));
+      history ? resHistoryPanel(x, i === 0) : null);
   }));
 }
 
@@ -810,7 +811,7 @@ function ifBody(dev: Dev, itf: Iface): VNode {
 /** The sub-tabs of the selected device. Only those with something to show are listed. */
 function availableTabs(dev: Dev): { id: DevTab; label: string }[] {
   const t: { id: DevTab; label: string }[] = [{ id: 'overview', label: 'Overview' }, { id: 'interfaces', label: `Interfaces (${dev.interfaces.length})` }];
-  if (hasHardware(healthRes)) t.push({ id: 'hardware', label: 'Hardware' });
+  t.push({ id: 'hardware', label: 'Hardware' });
   t.push({ id: 'network', label: 'Neighbours and routing' });
   if (dev.hasWlan) t.push({ id: 'wifi', label: 'Wi-Fi' });
   return t;
@@ -828,10 +829,16 @@ function overviewPanel(dev: Dev): VNode {
   const all = issues(input);
   return h('div', { class: 'col', style: 'gap:18px' }, attentionPanel(all, t => openTarget(dev, t)), cardsRow(cards(input, all), t => openTarget(dev, t)), resourcesPanel(dev));
 }
+/** Resources with their history, then sensors and PoE where the device publishes them. Every device has this tab. */
+function hardwareTab(dev: Dev): VNode {
+  const sensors = hardwarePanel({ data: healthRes });
+  return h('div', { class: 'col', style: 'gap:18px' }, resourcesPanel(dev, true),
+    sensors ?? (healthRes ? h('span', { class: 'dim', style: 'font-size:12px' }, 'This device does not publish temperature, fan, power supply or PoE sensors that FlowScope reads.') : null));
+}
 function tabBody(dev: Dev, tab: DevTab): VNode {
   const body = tab === 'overview' ? overviewPanel(dev)
     : tab === 'interfaces' ? ifTable(dev)
-    : tab === 'hardware' ? hardwarePanel({ data: healthRes })
+    : tab === 'hardware' ? hardwareTab(dev)
     : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes }), arpPanel(dev), neighborsPanel(dev))
     : wlanPanel(dev);
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:14px' }, body);

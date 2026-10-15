@@ -35,8 +35,8 @@ test('hardware and routing problems point at their own tabs, worst first', () =>
   assert.equal(cs.find(c => c.tab === 'hardware')!.level, 'warn');
 });
 
-test('high CPU is listed without a link, since the graphs are on the Overview', () => {
+test('high CPU opens the Hardware tab, where its history is', () => {
   const i = base(); i.dev.resources!.cpuPct = 97;
   const all = issues(i);
-  assert.equal(all[0]!.level, 'bad'); assert.equal(all[0]!.target, undefined);
+  assert.equal(all[0]!.level, 'bad'); assert.deepEqual(all[0]!.target, { tab: 'hardware' });
 });
