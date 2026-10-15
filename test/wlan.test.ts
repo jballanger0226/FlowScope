@@ -115,3 +115,84 @@ test('wlan: stored, returned, and a client is found by MAC with its IP when no r
     assert.equal(e.t.wlanOf(1)!.clients.length, 0);
   } finally { e.done(); }
 });
+
+/** A stub that serves table columns by their full OID, like the Aruba one above. */
+function stub(rows: [string, string, SnmpValue][]): Walker {
+  const t: Record<string, Record<string, SnmpValue>> = {};
+  for (const [col, key, v] of rows) (t[col] ??= {})[key] = v;
+  return { async column(oid: string) { return new Map(Object.entries(t[oid] ?? {})); } };
+}
+
+test('wlan vendors: which tables are tried for which device', async () => {
+  const { wlanVendor } = await import('../src/snmp/wlan_vendors.js');
+  assert.equal(wlanVendor('1.3.6.1.4.1.14823.1.2.113', ''), 'aruba');
+  assert.equal(wlanVendor('1.3.6.1.4.1.41112.1.6.1.2.21', ''), 'unifi');
+  assert.equal(wlanVendor('1.3.6.1.4.1.25053.3.1.5.15', ''), 'ruckus');
+  assert.equal(wlanVendor('1.3.6.1.4.1.9.1.2530', 'Cisco IOS XE Software, C9800-CL Wireless Controller'), 'cisco');
+  assert.equal(wlanVendor('1.3.6.1.4.1.9.1.2530', 'Cisco IOS Software, Catalyst L3 Switch'), null, 'a Cisco switch is not asked for wireless tables');
+  assert.equal(wlanVendor('1.3.6.1.4.1.8072.3.2.10', 'Linux'), null);
+});
+
+test('wlan vendors: roles of access points from other vendors', () => {
+  assert.equal(guessRole('UAP-AC-Pro-Gen2 6.5.28', 'office-ap', '1.3.6.1.4.1.41112.1.6.1.2.21'), 'ap');
+  assert.equal(guessRole('Ruckus Wireless R510', 'ruckus-1', '1.3.6.1.4.1.25053.3.1.5.45'), 'ap');
+  assert.equal(guessRole('Meraki MR36 Cloud Managed AP', 'mr36', ''), 'ap');
+  assert.equal(guessRole('Cisco AP Software, (ap3g3-k9w8), C9120AXI', 'cap1', '1.3.6.1.4.1.9.1.2530'), 'ap');
+  assert.equal(guessRole('Ruckus Wireless, Inc. ICX7150-48P Switch', 'icx', '1.3.6.1.4.1.1991.1.3.68'), 'switch', 'a Ruckus ICX is still a switch');
+});
+
+test('wlan vendors: a UniFi AP gives its SSIDs and channel use, and says nothing it does not know', async () => {
+  const { readUnifi } = await import('../src/snmp/wlan_vendors.js');
+  const U = '1.3.6.1.4.1.41112.1.6';
+  const w = await readUnifi(stub([
+    [`${U}.1.2.1.6`, '1', 'HomeNet'], [`${U}.1.2.1.6`, '2', 'HomeNet'], [`${U}.1.2.1.6`, '3', 'Guest'],
+    [`${U}.1.2.1.2`, '1', mac('74:ac:b9:00:00:01')], [`${U}.1.2.1.2`, '2', mac('74:ac:b9:00:00:02')], [`${U}.1.2.1.2`, '3', mac('76:ac:b9:00:00:02')],
+    [`${U}.1.2.1.4`, '1', 6], [`${U}.1.2.1.4`, '2', 36], [`${U}.1.2.1.4`, '3', 36],
+    [`${U}.1.2.1.7`, '1', 'ath0'], [`${U}.1.2.1.7`, '2', 'ath1'], [`${U}.1.2.1.7`, '3', 'ath2'],
+    [`${U}.1.2.1.8`, '1', 4], [`${U}.1.2.1.8`, '2', 7], [`${U}.1.2.1.8`, '3', 1],
+    [`${U}.1.2.1.9`, '1', 'ng'], [`${U}.1.2.1.9`, '2', 'na'], [`${U}.1.2.1.9`, '3', 'na'],
+    [`${U}.1.2.1.21`, '1', 20], [`${U}.1.2.1.21`, '2', 23], [`${U}.1.2.1.21`, '3', 23],
+    [`${U}.1.2.1.22`, '1', 1], [`${U}.1.2.1.22`, '2', 1], [`${U}.1.2.1.22`, '3', 1],
+    [`${U}.1.1.1.2`, '1', 'wifi0'], [`${U}.1.1.1.2`, '2', 'wifi1'], [`${U}.1.1.1.3`, '1', 'ng'], [`${U}.1.1.1.3`, '2', 'na'],
+    [`${U}.1.1.1.6`, '1', 18], [`${U}.1.1.1.6`, '2', 6],
+    [`${U}.3.1`, '0', Buffer.from([192, 168, 1, 9])], [`${U}.3.3`, '0', 'U7PG2'], [`${U}.3.5`, '0', 86400]
+  ]));
+  assert.ok(w);
+  assert.equal(w.vendor, 'unifi');
+  assert.deepEqual({ ...w.aps[0] }, { mac: '', name: '', ip: '192.168.1.9', serial: '', model: 'U7PG2', cpuPct: -1000, memFree: 0, memTotal: 0, uptimeSec: 86400, role: '' });
+  assert.deepEqual(w.radios.map(r => [r.band, r.channel, r.txPower, r.util64, r.util4, r.clients]), [['2.4', '6', 20, 18, -1000, 4], ['5', '36', 23, 6, -1000, 8]]);
+  assert.deepEqual(w.ssids.map(s => [s.name, s.radio, s.clients, s.ifName]), [['HomeNet', 0, 4, 'ath0'], ['HomeNet', 1, 7, 'ath1'], ['Guest', 1, 1, 'ath2']]);
+  assert.equal(w.clients.length, 0);
+  assert.equal(await readUnifi(stub([])), null, 'a device without the UniFi tables gives nothing');
+});
+
+test('wlan vendors: Ruckus gives its access points and WLANs', async () => {
+  const { readRuckus } = await import('../src/snmp/wlan_vendors.js');
+  const Z = '1.3.6.1.4.1.25053.1.2.2.1.1';
+  const k = idx('c4:10:8a:11:22:33');
+  const w = await readRuckus(stub([
+    [`${Z}.2.1.1.2`, k, 'lobby-ap'], [`${Z}.2.1.1.4`, k, 'R510'], [`${Z}.2.1.1.5`, k, '502012345678'], [`${Z}.2.1.1.6`, k, 360000], [`${Z}.2.1.1.10`, k, Buffer.from([10, 0, 0, 5])], [`${Z}.2.1.1.29`, k, 7],
+    [`${Z}.1.1.1.1`, '1', 'Staff'], [`${Z}.1.1.1.1`, '2', 'Guests'], [`${Z}.1.1.1.12`, '1', 9], [`${Z}.1.1.1.12`, '2', 3]
+  ]));
+  assert.ok(w);
+  assert.deepEqual({ ...w.aps[0] }, { mac: 'c4:10:8a:11:22:33', name: 'lobby-ap', ip: '10.0.0.5', serial: '502012345678', model: 'R510', cpuPct: 7, memFree: 0, memTotal: 0, uptimeSec: 3600, role: '' });
+  assert.deepEqual(w.ssids.map(s => [s.name, s.clients]), [['Staff', 9], ['Guests', 3]]);
+  assert.equal(w.radios.length, 0); assert.equal(w.clients.length, 0);
+});
+
+test('wlan vendors: a Cisco controller gives its access points and clients', async () => {
+  const { readCiscoWlc } = await import('../src/snmp/wlan_vendors.js');
+  const AP = '1.3.6.1.4.1.9.9.513.1.1.1.1', CL = '1.3.6.1.4.1.9.9.599.1.3.1.1';
+  const a = idx('00:11:22:33:44:55'), c1 = idx('aa:bb:cc:00:00:01'), c2 = idx('aa:bb:cc:00:00:02');
+  const w = await readCiscoWlc(stub([
+    [`${AP}.49`, a, 'ap-floor2'], [`${AP}.59`, a, 1234500], [`${AP}.56`, a, 12],
+    [`${CL}.2`, c1, 3], [`${CL}.2`, c2, 3],
+    [`${CL}.28`, c1, 'Corp'], [`${CL}.28`, c2, 'Corp'], [`${CL}.8`, c1, mac('00:11:22:33:44:55')], [`${CL}.8`, c2, mac('00:11:22:33:44:55')],
+    [`${CL}.10`, c1, Buffer.from([10, 1, 1, 20])], [`${CL}.27`, c1, 'alice'], [`${CL}.44`, c1, 'Apple-iPhone'], [`${CL}.15`, c1, 600], [`${CL}.50`, c1, 144]
+  ]));
+  assert.ok(w);
+  assert.equal(w.aps[0].name, 'ap-floor2'); assert.equal(w.aps[0].uptimeSec, 12345); assert.equal(w.aps[0].cpuPct, 12);
+  const x = w.clients.find(c => c.mac === 'aa:bb:cc:00:00:01')!;
+  assert.deepEqual({ ...x }, { mac: 'aa:bb:cc:00:00:01', apMac: '00:11:22:33:44:55', apName: 'ap-floor2', bssid: '', ssid: 'Corp', radio: null, ip: '10.1.1.20', name: 'alice', os: 'Apple-iPhone', snr: -1000, txRate: 144, rxRate: 0, txBytes: 0, rxBytes: 0, uptimeSec: 600 });
+  assert.deepEqual(w.ssids.map(s => [s.name, s.clients]), [['Corp', 2]]);
+});

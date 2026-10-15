@@ -379,7 +379,11 @@ function hostsPanel(dev: Dev, itf: Iface): VNode {
 
 const bandText = (band: string, channel: string): string => (band ? `${band} GHz` : 'radio') + (channel ? ` ch ${channel}` : '');
 /** Signal to noise: a rough guide, 25 dB and up is good for most use, under 15 dB is poor. */
+/** A value the access point does not report (see NA in src/snmp/wlan.ts). */
+const NA = -1000;
+const known = (n: number) => n > NA;
 function snrTag(snr: number): VNode {
+  if (!known(snr)) return h('span', { class: 'dim', title: 'This access point does not report signal strength' }, '—');
   const kind = snr >= 25 ? 'ok' : snr >= 15 ? 'warn' : 'bad';
   return h('span', { class: 'mono', style: `color:${kind === 'ok' ? 'inherit' : kind === 'warn' ? 'var(--warn)' : 'var(--bad)'}`, title: 'Signal to noise ratio. Roughly: 25 dB and up is good, 15 to 25 is fair, under 15 is poor.' }, `${snr} dB`);
 }
@@ -400,19 +404,19 @@ function wlanPanel(dev: Dev): VNode {
     wlanLoading && !w ? spinner('Loading Wi-Fi…') : null,
     w && w.aps.length ? h('div', { class: 'cards' }, w.aps.map(a => h('div', { key: a.mac, class: 'cardbtn', style: 'cursor:default' },
       h('span', { class: 't' }, a.name || a.mac), h('span', { class: 's' }, [a.model ? 'model ' + a.model : null, a.role || null, `up ${dur(a.uptimeSec * 1000)}`].filter(Boolean).join(' · ')),
-      h('span', { class: 's' }, `CPU ${a.cpuPct}%`, a.memTotal ? ` · memory ${Math.round((a.memTotal - a.memFree) / a.memTotal * 100)}% used of ${bytes(a.memTotal)}` : '')))) : null,
+      h('span', { class: 's' }, known(a.cpuPct) ? `CPU ${a.cpuPct}%` : null, a.memTotal ? ` · memory ${Math.round((a.memTotal - a.memFree) / a.memTotal * 100)}% used of ${bytes(a.memTotal)}` : '')))) : null,
     w && w.radios.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1.2fr) 90px 90px minmax(150px,1fr) minmax(150px,1fr) 80px 70px;--w:880px' },
       h('div', { class: 'tr head' }, ...['Radio', 'Power', 'Noise floor', 'Channel busy (4 s)', 'Channel busy (64 s)', 'Clients', 'State'].map(t => h('span', null, t))),
       w.radios.map(r => h('div', { key: r.apMac + r.idx, class: 'tr' },
         h('span', { style: 'font-weight:600' }, `Radio ${r.idx} · ${bandText(r.band, r.channel)}`, r.mode ? h('span', { class: 'dim', style: 'font-weight:400' }, ' · ' + r.mode) : null),
-        h('span', { class: 'mono', style: 'font-size:12px' }, `${r.txPower} dBm`), h('span', { class: 'mono', style: 'font-size:12px' }, `${r.noiseFloor} dBm`),
-        h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, bar(r.util4), h('span', { class: 'mono', style: 'font-size:12px' }, pct(r.util4, 0))),
-        h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, bar(r.util64), h('span', { class: 'mono', style: 'font-size:12px' }, pct(r.util64, 0))),
+        h('span', { class: 'mono', style: 'font-size:12px' }, known(r.txPower) ? `${r.txPower} dBm` : '—'), h('span', { class: 'mono', style: 'font-size:12px' }, known(r.noiseFloor) ? `${r.noiseFloor} dBm` : '—'),
+        known(r.util4) ? h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, bar(r.util4), h('span', { class: 'mono', style: 'font-size:12px' }, pct(r.util4, 0))) : h('span', { class: 'dim' }, '—'),
+        known(r.util64) ? h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, bar(r.util64), h('span', { class: 'mono', style: 'font-size:12px' }, pct(r.util64, 0))) : h('span', { class: 'dim' }, '—'),
         h('span', { class: 'mono', style: 'font-size:12px' }, String(r.clients)), h('span', null, r.up ? statusEl('ok', 'up') : statusEl('bad', 'down')))))) : null,
     w && w.ssids.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1.2fr) minmax(150px,1fr) minmax(150px,1fr) 80px minmax(170px,1fr);--w:760px' },
       h('div', { class: 'tr head' }, ...['SSID', 'Radio', 'BSSID', 'Clients', 'Interface'].map(t => h('span', null, t))),
       w.ssids.map(s => { const itf = s.ifName ? dev.interfaces.find(i => i.name === s.ifName) : undefined; return h('div', { key: s.bssid, class: 'tr' },
-        h('span', { style: 'font-weight:600' }, s.name || '—'), h('span', null, radioName(s.apMac, s.radio)), h('span', { class: 'mono', style: 'font-size:12px' }, s.bssid), h('span', { class: 'mono', style: 'font-size:12px' }, String(s.clients)),
+        h('span', { style: 'font-weight:600' }, s.name || '—'), h('span', null, radioName(s.apMac, s.radio)), h('span', { class: 'mono', style: 'font-size:12px' }, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(s.bssid) ? s.bssid : '—'), h('span', { class: 'mono', style: 'font-size:12px' }, String(s.clients)),
         itf ? h('button', { type: 'button', class: 'lnk', title: 'Show this interface: utilisation, discards and graphs', onclick: () => select_(dev.id, itf.ifIndex) }, itf.name) : h('span', { class: 'dim' }, '—')); }))) : null,
     w && w.clients.length ? h('div', { class: 'col', style: 'gap:8px' },
       h('div', { class: 'row', style: 'justify-content:space-between' },
@@ -424,8 +428,8 @@ function wlanPanel(dev: Dev): VNode {
           h('span', null, c.name || '—', c.os ? h('span', { class: 'dim', style: 'font-size:12px' }, ' · ' + c.os) : null, multi && c.apName ? h('span', { class: 'dim', style: 'font-size:12px' }, ' · on ' + c.apName) : null),
           h('span', { class: 'mono', style: 'font-size:12px' }, c.mac), h('span', { class: 'mono', style: 'font-size:12px' }, c.ip || '—'),
           h('span', { style: 'font-size:12px' }, `${c.ssid || '—'} · ${radioName(c.apMac, c.radio)}`), snrTag(c.snr),
-          h('span', { class: 'mono', style: 'font-size:12px', title: 'Rate to the client / rate from the client, in Mbps' }, `${c.txRate} / ${c.rxRate} Mbps`),
-          h('span', { class: 'mono', style: 'font-size:12px', title: 'Bytes the access point sent to the client / received from it, since it connected' }, `${bytes(c.txBytes)} / ${bytes(c.rxBytes)}`),
+          h('span', { class: 'mono', style: 'font-size:12px', title: 'Rate to the client / rate from the client, in Mbps' }, c.txRate || c.rxRate ? `${c.txRate} / ${c.rxRate} Mbps` : '—'),
+          h('span', { class: 'mono', style: 'font-size:12px', title: 'Bytes the access point sent to the client / received from it, since it connected' }, c.txBytes || c.rxBytes ? `${bytes(c.txBytes)} / ${bytes(c.rxBytes)}` : '—'),
           h('span', { class: 'muted', style: 'font-size:12px' }, dur(c.uptimeSec * 1000)))),
           !clients.length ? h('div', { class: 'empty' }, 'No client matches the filter.') : null)))) : null,
     w && !w.clients.length && !wlanLoading && w.readAt ? h('span', { class: 'dim' }, 'No wireless clients are connected right now.') : null);

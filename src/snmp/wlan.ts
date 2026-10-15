@@ -33,7 +33,9 @@ export interface WlanClient {
   /** Signal to noise ratio in dB. */
   snr: number; txRate: number; rxRate: number; txBytes: number; rxBytes: number; uptimeSec: number
 }
-export interface WlanData { aps: WlanAp[]; radios: WlanRadio[]; ssids: WlanSsid[]; clients: WlanClient[] }
+/** A value the device does not report. Stored as is and shown as a dash. */
+export const NA = -1000;
+export interface WlanData { aps: WlanAp[]; radios: WlanRadio[]; ssids: WlanSsid[]; clients: WlanClient[]; vendor?: 'aruba' | 'unifi' | 'ruckus' | 'cisco' }
 
 const num = (v: SnmpValue | undefined, d = 0): number => (v === undefined ? d : toNum(v) ?? d);
 const str = (v: SnmpValue | undefined): string => (v === undefined ? '' : toStr(v).trim());
