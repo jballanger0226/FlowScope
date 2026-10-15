@@ -49,6 +49,17 @@ export function days(n: number): string {
   return (n / 365).toFixed(1).replace(/\.0$/, '') + ' years';
 }
 export const RANGES: [string, string][] = [['15m', 'Last 15 minutes'], ['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
+/** A time range the server accepts: whole minutes, hours or days ("90m", "36h", "45d"), up to 800 days. */
+export const MAX_RANGE_DAYS = 800;
+export const UNITS: [string, string, number][] = [['m', 'minutes', 60_000], ['h', 'hours', 3_600_000], ['d', 'days', 86_400_000]];
+export function rangeMs(r: string): number | null {
+  const m = /^([1-9]\d*)([mhd])$/.exec(r); if (!m) return null;
+  const ms = Number(m[1]) * UNITS.find(u => u[0] === m[2])![2];
+  return ms <= MAX_RANGE_DAYS * 86_400_000 ? ms : null;
+}
+export const isRange = (r: string): boolean => rangeMs(r) !== null;
+/** The window used to look up one stream's detail: at least a day, so a stream found a while ago can still be opened. */
+export const detailRange = (r: string): string => ((rangeMs(r) ?? 0) < 86_400_000 ? '24h' : r);
 export function download(name: string, type: string, body: Blob | string): void {
   const url = URL.createObjectURL(typeof body === 'string' ? new Blob([body], { type }) : body);
   const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();

@@ -1,16 +1,16 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { session, redraw } from '../state.js';
-import { btn, chip, empty, field, heading, note, seg, select, spinner, status as statusEl } from '../components.js';
+import { btn, chip, empty, field, heading, note, rangePicker, seg, select, spinner, status as statusEl } from '../components.js';
 import { Follower, type Row } from './stream.js';
-import { bytes, dayClock, num, RANGES, debounce, svcLabel } from '../util.js';
+import { bytes, dayClock, num, RANGES, debounce, detailRange, isRange, svcLabel } from '../util.js';
 
 
 let q = '';
 const protos = { tcp: true, udp: true, icmp: true };
 let qosOnly = false;
 let ttlOnly = false;
-let range = '6h';
+let range = '15m';
 let sort: { key: 'time' | 'bytes' | 'pkts'; dir: 'asc' | 'desc' } = { key: 'time', dir: 'desc' };
 let rows: Row[] = []; let total = 0; let truncated = false; let errors: string[] = [];
 let loading = false; let loadError = '';
@@ -26,7 +26,7 @@ export function enter(p: URLSearchParams): void {
   const nq = p.get('q'), ns = p.get('s'), nr = p.get('range');
   let changed = false;
   if (nq !== null && nq !== q) { q = nq; changed = true; }
-  if (nr && nr !== range && RANGES.some(r => r[0] === nr)) { range = nr; changed = true; }
+  if (nr && nr !== range && isRange(nr)) { range = nr; changed = true; }
   follow.select(ns ?? '');
   if (changed || !rows.length) void load();
   setLive();
@@ -50,7 +50,7 @@ function syncHash(): void {
   const p = new URLSearchParams();
   if (q.trim()) p.set('q', q.trim());
   if (follow.selId) p.set('s', follow.selId);
-  if (range !== '6h') p.set('range', range);
+  if (range !== '15m') p.set('range', range);
   const s = p.toString();
   history.replaceState(null, '', '#/explorer' + (s ? '?' + s : ''));
 }
@@ -90,7 +90,7 @@ const loadSoon = debounce(() => { void load(); }, 350);
 /** Detail is looked up over a wider window than the list, so a stream found a while ago can still be opened. */
 function pick(id: string): void { follow.select(follow.selId === id ? '' : id); syncHash(); }
 
-function bigRange(): string { return range === '15m' || range === '1h' ? '24h' : range === '6h' ? '24h' : range; }
+function bigRange(): string { return detailRange(range); }
 
 
 
@@ -114,7 +114,7 @@ function search(): VNode {
         if (protos[k] && Object.values(protos).filter(Boolean).length === 1) return;   // keep at least one
         protos[k] = !protos[k]; void load(); redraw();
       }),
-      select(range, RANGES, v => { range = v; syncHash(); void load(); if (follow.selId) void follow.load(); }, { aria: 'Time range', width: '176px' }),
+      rangePicker('explorer', range, RANGES, v => { range = v; syncHash(); void load(); if (follow.selId) void follow.load(); }, { aria: 'Time range' }),
       btn('QoS re-marked only', { pressed: qosOnly, onclick: () => { qosOnly = !qosOnly; void load(); redraw(); } }),
       btn('TTL expired only', { pressed: ttlOnly, title: 'Streams whose TTL ran out before they reached the destination', onclick: () => { ttlOnly = !ttlOnly; void load(); redraw(); } }),
       btn(live ? 'Live: on' : 'Live: off', { pressed: live, title: 'Refresh the list every 15 seconds', onclick: () => { live = !live; setLive(); redraw(); } }),
