@@ -65,27 +65,33 @@ export function attention(hl: Health | null): { level: Level; text: string }[] {
   return out;
 }
 
-export function healthPanel(o: { data: HealthRes | null; loading: boolean; open: boolean; toggle: () => void; ifNames: Map<number, string>; openInterface: (ifIndex: number) => void; localAs?: number | null }): VNode | null {
-  const hl = o.data?.health ?? null;
-  if (!hl) return o.loading && !o.data ? null : null;
+/** What the Overview shows of the hardware and protocol reads: whether anything is outside its limits, in one row of chips. */
+export function healthSummary(data: HealthRes | null): VNode | null {
+  const hl = data?.health ?? null;
+  if (!hl || (!hl.sensors.length && !hl.poe.length && !hl.stp && !hl.ospf.length && !hl.bgp.length)) return null;
   const att = attention(hl);
-  const optics = hl.sensors.filter(s => s.kind === 'optic');
-  const others = hl.sensors.filter(s => s.kind !== 'optic');
   const parts: string[] = [];
+  const others = hl.sensors.filter(s => s.kind !== 'optic'), optics = hl.sensors.filter(s => s.kind === 'optic');
   if (others.length) parts.push(`${others.length} sensor${others.length === 1 ? '' : 's'}`);
-  if (optics.length) parts.push(`${new Set(optics.map(s => s.ifIndex ?? s.name)).size} optic${new Set(optics.map(s => s.ifIndex ?? s.name)).size === 1 ? '' : 's'}`);
+  if (optics.length) { const n = new Set(optics.map(s => s.ifIndex ?? s.name)).size; parts.push(`${n} optic${n === 1 ? '' : 's'}`); }
   if (hl.poe.length) parts.push('PoE');
   if (hl.stp) parts.push('spanning tree');
   if (hl.ospf.length) parts.push(`${hl.ospf.length} OSPF neighbour${hl.ospf.length === 1 ? '' : 's'}`);
   if (hl.bgp.length) parts.push(`${hl.bgp.length} BGP peer${hl.bgp.length === 1 ? '' : 's'}`);
-  const head = h('div', { class: 'row', style: 'justify-content:space-between' },
-    h('div', { class: 'col', style: 'gap:2px' }, h('b', null, 'Hardware and protocols'),
-      h('span', { class: 'muted', style: 'font-size:12px' }, `${parts.join(', ')}. Read every few minutes.`)),
-    btn(o.open ? 'Hide' : 'Show', { small: true, kind: 'ghost', pressed: o.open, aria: o.open ? 'Hide hardware and protocols' : 'Show hardware and protocols', onclick: o.toggle }));
-  const flags = att.length ? h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap' }, att.slice(0, 8).map((a, i) => chip(a.text, a.level === 'bad' ? 'bad' : 'warn')), att.length > 8 ? chip(`+${att.length - 8} more`, 'default') : null)
-    : h('div', { class: 'row', style: 'gap:6px' }, chip('Nothing outside its limits', 'ok'));
-  if (!o.open) return h('div', { class: 'col', style: 'gap:8px' }, head, flags);
+  return h('div', { class: 'col', style: 'gap:6px' },
+    h('span', { class: 'muted', style: 'font-size:12px' }, `Hardware and protocols: ${parts.join(', ')}. Read every few minutes.`),
+    att.length ? h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap' }, att.slice(0, 8).map(a => chip(a.text, a.level === 'bad' ? 'bad' : 'warn')), att.length > 8 ? chip(`+${att.length - 8} more`, 'default') : null)
+      : h('div', { class: 'row', style: 'gap:6px' }, chip('Nothing outside its limits', 'ok')));
+}
+export const hasHardware = (data: HealthRes | null): boolean => !!data?.health && (data.health.sensors.length > 0 || data.health.poe.length > 0);
+export const hasProtocols = (data: HealthRes | null): boolean => !!data?.health && (!!data.health.stp || data.health.ospf.length > 0 || data.health.bgp.length > 0);
 
+/** Sensors, optics and PoE: the physical state of the device. */
+export function hardwarePanel(o: { data: HealthRes | null; ifNames: Map<number, string>; openInterface: (ifIndex: number) => void }): VNode | null {
+  const hl = o.data?.health ?? null;
+  if (!hl || !hasHardware(o.data)) return null;
+  const optics = hl.sensors.filter(s => s.kind === 'optic');
+  const others = hl.sensors.filter(s => s.kind !== 'optic');
   const sections: (VNode | null)[] = [];
   for (const [kind, title] of SENSOR_GROUPS) {
     const list = others.filter(s => (SENSOR_GROUPS.some(g => g[0] === s.kind) ? s.kind : 'other') === kind);
@@ -98,6 +104,14 @@ export function healthPanel(o: { data: HealthRes | null; loading: boolean; open:
     h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' }, hl.poe.map(p => stat(hl.poe.length > 1 ? `PoE source ${p.group}` : 'PoE power',
       h('span', { style: colour(p.status === 'faulty' ? 'bad' : p.usedPct !== null && p.usedPct >= 90 ? 'warn' : 'ok') }, p.usedW !== null && p.budgetW ? `${num(p.usedW)} of ${num(p.budgetW)} W` : p.status),
       [p.usedPct !== null ? `${p.usedPct}% of the budget` : null, p.portsTotal ? `${p.portsDelivering} of ${p.portsTotal} ports delivering${p.portsFault ? `, ${p.portsFault} in fault` : ''}` : null].filter(Boolean).join(' · ') || undefined)))));
+  return h('div', { class: 'col', style: 'gap:12px' }, sections);
+}
+
+/** Spanning tree and routing protocols: how the device sees the rest of the network. */
+export function protocolsPanel(o: { data: HealthRes | null }): VNode | null {
+  const hl = o.data?.health ?? null;
+  if (!hl || !hasProtocols(o.data)) return null;
+  const sections: (VNode | null)[] = [];
   if (hl.stp) {
     const s = hl.stp;
     sections.push(h('div', { key: 'stp', class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Spanning tree'),
@@ -117,7 +131,7 @@ export function healthPanel(o: { data: HealthRes | null; loading: boolean; open:
         statusEl(p.level === 'off' ? 'off' : p.level, p.admin === 'stop' && p.level !== 'ok' ? `${p.state} (shut down)` : p.state),
         h('span', { class: 'muted' }, p.upSec !== null ? dur(p.upSec * 1000) : '—'), h('span', { class: 'mono', style: 'font-size:12px' }, p.updatesIn === null ? '—' : num(p.updatesIn)), h('span', { class: 'mono', style: 'font-size:12px' }, p.updatesOut === null ? '—' : num(p.updatesOut))))))));
   void STP_TEXT;
-  return h('div', { class: 'col', style: 'gap:12px' }, head, flags, sections);
+  return h('div', { class: 'col', style: 'gap:12px' }, sections);
 }
 
 /** The link quality of one interface: duplex, errors, collisions and broadcast, multicast and unknown-protocol traffic, with plain-language warnings and the interface's optic readings. */

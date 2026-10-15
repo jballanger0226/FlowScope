@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ConfigDb } from '../src/db/configdb.js';
-import { forgetResources, pruneResources, recordResources, resourceSeries } from '../src/snmp/resource_history.js';
+import { apAsResources, forgetResources, pruneResources, recordResources, resourceSeries } from '../src/snmp/resource_history.js';
 import type { Resources } from '../src/snmp/resources.js';
 
 const res = (readAt: number, cpu: number, mem: number, up: number, disk = 40): Resources => ({
@@ -71,4 +71,29 @@ test('temperature and sessions are kept, and a device without them has none rath
   const h1 = resourceSeries(cdb.db, 1, now - 7 * 86_400_000, now - 4 * 86_400_000, 50, now), h2 = resourceSeries(cdb.db, 2, now - 7 * 86_400_000, now - 4 * 86_400_000, 50, now);
   assert.equal(h1.points[0].tempMax, 53); assert.equal(h1.points[0].sessMax, 13);
   assert.equal(h2.points[0].tempMax, null); assert.equal(h2.points[0].sessMax, null); assert.equal(h2.points[0].temp, null);
+});
+
+test('each access point of a device keeps its own history, apart from the device and from the others', () => {
+  const cdb = db(); const now = Date.now(); const m = 60_000;
+  const ap = (cpu: number, free: number) => apAsResources({ cpuPct: cpu, memFree: free, memTotal: 1000, uptimeSec: 500 }, 0);
+  for (let i = 5; i >= 1; i--) {
+    recordResources(cdb.db, 1, res(now - i * m, 10, 40, 1000 + i));
+    recordResources(cdb.db, 1, { ...ap(30 + i, 400), readAt: now - i * m }, 'aa:01');
+    recordResources(cdb.db, 1, { ...ap(60, 200), readAt: now - i * m }, 'aa:02');
+  }
+  const dev = resourceSeries(cdb.db, 1, now - 10 * m, now, 10, now), a1 = resourceSeries(cdb.db, 1, now - 10 * m, now, 10, now, 'aa:01'), a2 = resourceSeries(cdb.db, 1, now - 10 * m, now, 10, now, 'aa:02');
+  assert.equal(dev.points.length, 5); assert.equal(dev.points[0].cpu, 10);
+  assert.equal(a1.points.length, 5); assert.equal(a1.points[0].cpu, 35); assert.equal(a1.points[0].mem, 60);
+  assert.equal(a2.points[0].cpu, 60); assert.equal(a2.points[0].mem, 80);
+  assert.equal(resourceSeries(cdb.db, 1, now - 10 * m, now, 10, now, 'aa:03').points.length, 0);
+  assert.deepEqual(apAsResources({ cpuPct: -1, memFree: 0, memTotal: 0, uptimeSec: 0 }, 5), { uptimeSec: null, cpuPct: null, cores: null, load: null, memPct: null, memTotal: null, memUsed: null, swapPct: null, disks: [], source: '', readAt: 5 });
+  forgetResources(cdb.db, 1);
+  assert.equal(resourceSeries(cdb.db, 1, now - 10 * m, now, 10, now, 'aa:01').points.length, 0);
+});
+
+test('history stored before access points had their own survives the migration as the device history', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-rh-')); const a = new ConfigDb(dir); const now = Date.now();
+  recordResources(a.db, 4, res(now - 60_000, 12, 34, 100)); a.db.close();
+  const b = new ConfigDb(dir);
+  assert.equal(resourceSeries(b.db, 4, now - 600_000, now, 10, now).points[0].cpu, 12);
 });

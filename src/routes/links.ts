@@ -158,7 +158,8 @@ export function registerLinks(app: App): void {
     if (!app.devices.row(dev)) throw new HttpError(404, 'No such device');
     const range = parseRange(c.query, '6h');
     const points = int(c.query.get('points'), 120, 10, 600);
-    c.json({ range, ...app.devices.resourceHistory(dev, range.from, range.to, points) });
+    const ap = (c.query.get('ap') ?? '').toLowerCase().slice(0, 40);
+    c.json({ range, ...app.devices.resourceHistory(dev, range.from, range.to, points, /^[0-9a-f:.-]*$/.test(ap) ? ap : '') });
   });
 
   // Events: stretches where utilisation or drops were over the alert thresholds

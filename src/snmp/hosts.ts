@@ -3,6 +3,7 @@ import type { AppLog } from '../logger.js';
 import type { DeviceRow, DeviceService } from './devices.js';
 import type { SnmpClient } from './client.js';
 import { readArp, readFdb, readNeighbors, readPortVlans, type Neighbor } from './ports.js';
+import { apAsResources, recordResources } from './resource_history.js';
 import type { WlanData } from './wlan.js';
 import { readWlanFor } from './wlan_vendors.js';
 
@@ -105,7 +106,10 @@ export class HostTracker {
   private storeWlan(devId: number, w: WlanData, now: number): void {
     for (const t of ['wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(devId);
     const ia = this.db.prepare('INSERT INTO wlan_ap(dev_id, mac, name, ip, serial, model, cpu_pct, mem_free, mem_total, uptime_sec, role, read_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
-    for (const a of w.aps) ia.run(devId, a.mac, a.name, a.ip, a.serial, a.model, a.cpuPct, a.memFree, a.memTotal, a.uptimeSec, a.role, now);
+    for (const a of w.aps) {
+      ia.run(devId, a.mac, a.name, a.ip, a.serial, a.model, a.cpuPct, a.memFree, a.memTotal, a.uptimeSec, a.role, now);
+      try { recordResources(this.db, devId, apAsResources(a, now), a.mac.toLowerCase()); } catch { /* history is a bonus */ }
+    }
     const ir = this.db.prepare('INSERT OR REPLACE INTO wlan_radio(dev_id, ap_mac, idx, mac, channel, band, tx_power, noise_floor, util4, util64, clients, mode, up) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
     for (const r of w.radios) ir.run(devId, r.apMac, r.idx, r.mac, r.channel, r.band, r.txPower, r.noiseFloor, r.util4, r.util64, r.clients, r.mode, r.up ? 1 : 0);
     const is = this.db.prepare('INSERT OR REPLACE INTO wlan_ssid(dev_id, ap_mac, bssid, name, radio, ssid_id, clients, if_name) VALUES (?,?,?,?,?,?,?,?)');

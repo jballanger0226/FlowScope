@@ -212,7 +212,7 @@ export class DeviceService {
     return m;
   }
 
-  resourceHistory(id: number, from: number, to: number, points: number): ResSeries { return resourceSeries(this.cdb.db, id, from, to, points); }
+  resourceHistory(id: number, from: number, to: number, points: number, ap = ''): ResSeries { return resourceSeries(this.cdb.db, id, from, to, points, Date.now(), ap); }
   pruneResourceHistory(days: number): void { pruneResources(this.cdb.db, days); }
 
   resources(id: number): Resources | null {

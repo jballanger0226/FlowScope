@@ -213,6 +213,20 @@ const MIGRATIONS: string[] = [
   ALTER TABLE resource_1h ADD COLUMN sess_sum REAL;
   ALTER TABLE resource_1h ADD COLUMN sess_n INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE resource_1h ADD COLUMN sess_max REAL;
+  `,
+  `
+  -- resource history can now belong to one access point of a device (ap = its MAC), not only to the device itself (ap = '')
+  CREATE TABLE resource_samples_n (dev_id INTEGER NOT NULL, ap TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL, cpu REAL, mem REAL, swap REAL, disk REAL, load1 REAL, up INTEGER, temp REAL, sess REAL, PRIMARY KEY (dev_id, ap, ts)) WITHOUT ROWID;
+  INSERT INTO resource_samples_n(dev_id, ap, ts, cpu, mem, swap, disk, load1, up, temp, sess) SELECT dev_id, '', ts, cpu, mem, swap, disk, load1, up, temp, sess FROM resource_samples;
+  DROP TABLE resource_samples; ALTER TABLE resource_samples_n RENAME TO resource_samples;
+  CREATE TABLE resource_1h_n (dev_id INTEGER NOT NULL, ap TEXT NOT NULL DEFAULT '', ts INTEGER NOT NULL, n INTEGER NOT NULL,
+    cpu_sum REAL, cpu_n INTEGER NOT NULL DEFAULT 0, cpu_max REAL, mem_sum REAL, mem_n INTEGER NOT NULL DEFAULT 0, mem_max REAL,
+    swap_sum REAL, swap_n INTEGER NOT NULL DEFAULT 0, swap_max REAL, disk_sum REAL, disk_n INTEGER NOT NULL DEFAULT 0, disk_max REAL,
+    load_sum REAL, load_n INTEGER NOT NULL DEFAULT 0, load_max REAL, up_min INTEGER, up_max INTEGER,
+    temp_sum REAL, temp_n INTEGER NOT NULL DEFAULT 0, temp_max REAL, sess_sum REAL, sess_n INTEGER NOT NULL DEFAULT 0, sess_max REAL, PRIMARY KEY (dev_id, ap, ts)) WITHOUT ROWID;
+  INSERT INTO resource_1h_n(dev_id, ap, ts, n, cpu_sum, cpu_n, cpu_max, mem_sum, mem_n, mem_max, swap_sum, swap_n, swap_max, disk_sum, disk_n, disk_max, load_sum, load_n, load_max, up_min, up_max, temp_sum, temp_n, temp_max, sess_sum, sess_n, sess_max)
+    SELECT dev_id, '', ts, n, cpu_sum, cpu_n, cpu_max, mem_sum, mem_n, mem_max, swap_sum, swap_n, swap_max, disk_sum, disk_n, disk_max, load_sum, load_n, load_max, up_min, up_max, temp_sum, temp_n, temp_max, sess_sum, sess_n, sess_max FROM resource_1h;
+  DROP TABLE resource_1h; ALTER TABLE resource_1h_n RENAME TO resource_1h;
   `
 ];
 

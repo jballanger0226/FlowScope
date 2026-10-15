@@ -1,10 +1,10 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { redraw, go } from '../state.js';
-import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, spark, stat, note, PALETTE, select, spinner, status as statusEl, textInput, type Series } from '../components.js';
+import { bar, btn, chartGrid, chip, empty, heading, lineChart, rangePicker, spark, stat, note, PALETTE, select, spinner, status as statusEl, tabs, textInput, type Series } from '../components.js';
 import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, debounce, rangeMs, svcLabel } from '../util.js';
 import { post } from '../api.js';
-import { healthPanel, linkQuality, type HealthRes } from './links_health.js';
+import { hardwarePanel, hasHardware, healthSummary, linkQuality, protocolsPanel, type HealthRes } from './links_health.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
 interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
@@ -53,7 +53,11 @@ let dropThr = 1;
 let hidden = new Set<string>();
 interface ResPoint { ts: number; cpu: number | null; cpuMax: number | null; mem: number | null; memMax: number | null; swap: number | null; disk: number | null; load: number | null; loadMax: number | null; temp: number | null; tempMax: number | null; sess: number | null; sessMax: number | null }
 interface ResHist { step: number; tier: 'raw' | 'h1'; points: ResPoint[]; restarts: number[] }
-let resHist: ResHist | null = null; let resHistError = ''; let resHistLoading = false; let resRange = '6h'; let resOpen = true;
+/** Resource history by subject: '' is the device itself, otherwise an access point's MAC address. */
+const resHists = new Map<string, ResHist>();
+type DevTab = 'overview' | 'interfaces' | 'hardware' | 'network' | 'wifi';
+let devTab: DevTab = 'overview';
+let resHistError = ''; let resHistLoading = false; let resRange = '6h'; let resOpen = true;
 const RES_RANGES: [string, string][] = [['1h', 'Last hour'], ['6h', 'Last 6 hours'], ['24h', 'Last 24 hours'], ['3d', 'Last 3 days'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
 let series: SeriesRes | null = null; let seriesError = ''; let seriesLoading = false;
 let streams: StreamRow[] = []; let streamsTotal = 0; let streamsLoading = false;
@@ -93,20 +97,22 @@ function resolvePending(): void {
   const d = data.devices.find(x => x.name.toLowerCase() === lc || x.ip === dev || String(x.id) === dev) ?? data.devices.find(x => x.name.toLowerCase().includes(lc));
   if (!d) return;
   const itf = ifn ? d.interfaces.find(i => i.name.toLowerCase() === ifn.toLowerCase() || String(i.ifIndex) === ifn) : d.interfaces.find(i => i.flagged) ?? d.interfaces[0];
-  select_(d.id, itf?.ifIndex ?? d.interfaces[0]?.ifIndex ?? 0);
+  select_(d.id, itf?.ifIndex ?? d.interfaces[0]?.ifIndex ?? 0, ifn ? 'interfaces' : undefined);
 }
 
 let prevDev = 0;
-function select_(d: number, i: number): void {
+function select_(d: number, i: number, tab?: DevTab): void {
   if (d !== devId) ifSearch = '';
+  if (d !== prevDev) devTab = 'overview';
+  if (tab) devTab = tab;
   devId = d; ifIndex = i; series = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
-  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHist = null; void loadResHist(); healthRes = null; void loadHealth(); }
+  if (d !== prevDev) { nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); void loadResHist(); healthRes = null; void loadHealth(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
 }
 
-let healthRes: HealthRes | null = null; let healthLoading = false; let healthOpen = true;
+let healthRes: HealthRes | null = null; let healthLoading = false;
 let hlseq = 0;
 async function loadHealth(quiet = false): Promise<void> {
   if (!devId) return;
@@ -119,13 +125,17 @@ async function loadHealth(quiet = false): Promise<void> {
 }
 
 let rseq = 0;
+/** Reads the history of the device and of each of its access points for the chosen range. */
 async function loadResHist(quiet = false): Promise<void> {
   if (!devId) return;
   const my = ++rseq, d = devId; if (!quiet) { resHistLoading = true; resHistError = ''; redraw(); }
-  try {
-    const r = await get<ResHist>('/api/links/resources' + qs({ dev: d, range: resRange, points: 120 }));
-    if (my === rseq && d === devId) { resHist = r; resHistError = ''; }
-  } catch (e) { if (my === rseq && !quiet) { resHist = null; resHistError = (e as Error).message; } }
+  const keys = ['', ...(wlan?.aps ?? []).map(a => a.mac.toLowerCase())];
+  await Promise.all(keys.map(async k => {
+    try {
+      const r = await get<ResHist>('/api/links/resources' + qs({ dev: d, range: resRange, points: 120, ap: k }));
+      if (my === rseq && d === devId) { resHists.set(k, r); if (k === '') resHistError = ''; }
+    } catch (e) { if (my === rseq && !quiet && k === '') { resHists.delete(k); resHistError = (e as Error).message; } }
+  }));
   if (my === rseq) { resHistLoading = false; redraw(); }
 }
 
@@ -166,7 +176,10 @@ let wseq = 0;
 async function loadWlan(quiet = false): Promise<void> {
   const d = cur().dev; if (!d?.hasWlan) { wlan = null; return; }
   const my = ++wseq; if (!quiet) { wlanLoading = true; wlanError = ''; redraw(); }
-  try { const r = await get<WlanRes>('/api/links/wlan' + qs({ dev: d.id })); if (my === wseq) wlan = r; }
+  try {
+    const r = await get<WlanRes>('/api/links/wlan' + qs({ dev: d.id }));
+    if (my === wseq) { wlan = r; if (r.aps.some(a => !resHists.has(a.mac.toLowerCase()))) void loadResHist(true); }
+  }
   catch (e) { if (my === wseq) { wlan = null; wlanError = (e as Error).message; } }
   if (my === wseq) { wlanLoading = false; redraw(); }
 }
@@ -239,7 +252,7 @@ function sidebar(): VNode {
     h('div', { class: 'panel col', style: 'gap:10px' },
       h('h3', null, 'Needs attention'),
       h('p', { class: 'muted' }, `Interfaces above ${d.thresholds.util}% utilisation or dropping more than ${d.thresholds.drop}% of a class, in the last ${d.windowMinutes} minutes.`),
-      attn.length ? h('div', { class: 'cards' }, attn.slice(0, 8).map(a => h('button', { key: a.dev.id + '/' + a.itf.ifIndex, type: 'button', class: 'cardbtn', 'aria-pressed': a.dev.id === devId && a.itf.ifIndex === ifIndex, onclick: () => select_(a.dev.id, a.itf.ifIndex) },
+      attn.length ? h('div', { class: 'cards' }, attn.slice(0, 8).map(a => h('button', { key: a.dev.id + '/' + a.itf.ifIndex, type: 'button', class: 'cardbtn', 'aria-pressed': a.dev.id === devId && a.itf.ifIndex === ifIndex, onclick: () => select_(a.dev.id, a.itf.ifIndex, 'interfaces') },
         h('span', { class: 't' }, `${a.dev.name} · ${a.itf.name}`),
         h('span', { class: 's' }, [a.itf.worstDropPct !== null && a.itf.worstDropPct >= d.thresholds.drop ? `drops ${pct(a.itf.worstDropPct, 2)}` : null, `util ${pct(Math.max(a.itf.utilIn ?? 0, a.itf.utilOut ?? 0), 0)}`].filter(Boolean).join(' · '))))) : h('span', { class: 'dim' }, 'Nothing is over its threshold right now.')),
     locator(),
@@ -302,8 +315,8 @@ function ifTable(dev: Dev): VNode {
       h('span', { class: 'dim', style: 'font-size:12px' }, 'Words must all match. A number is a VLAN id; vlan:20 matches only VLANs.')),
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1230px` },
       h('div', { class: 'tr head' }, ...['Interface', 'Description', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', 'In', 'Out', 'Discards', 'Service policy', 'Flows'].map(t => h('span', null, t))),
-      h('div', { class: 'scroll' }, rows.map(i => h('div', { key: i.ifIndex, class: 'tr pick', 'aria-current': i.ifIndex === ifIndex ? 'true' : undefined, onclick: () => select_(dev.id, i.ifIndex) },
-        h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex); } }, i.name), i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
+      h('div', { class: 'scroll' }, rows.map(i => h('div', { key: i.ifIndex, class: 'tr pick', 'aria-current': i.ifIndex === ifIndex ? 'true' : undefined, onclick: () => select_(dev.id, i.ifIndex, 'interfaces') },
+        h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex, 'interfaces'); } }, i.name), i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
         h('span', { class: 'muted' }, i.alias || '—'),
         nbCell(nbOf(i.ifIndex)),
         vlanCell(i),
@@ -346,7 +359,7 @@ function neighborsPanel(dev: Dev): VNode {
     ports.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:880px` },
       h('div', { class: 'tr head' }, ...['Port', 'Neighbour', 'Its port', 'Type', 'Protocol', 'SNMP'].map(t => h('span', null, t))),
       h('div', { class: 'scroll', style: 'max-height:320px' }, ports.flatMap(p => p.neighbors.map((n, k) => h('div', { key: p.ifIndex + '/' + k, class: 'tr' },
-        k === 0 ? h('button', { type: 'button', class: 'lnk', title: `Show ${p.ifName}`, onclick: () => select_(dev.id, p.ifIndex) }, p.ifName) : h('span', null),
+        k === 0 ? h('button', { type: 'button', class: 'lnk', title: `Show ${p.ifName}`, onclick: () => select_(dev.id, p.ifIndex, 'interfaces') }, p.ifName) : h('span', null),
         h('span', null, n.device
           ? h('button', { type: 'button', class: 'lnk', title: `Open ${n.device.name}${n.devicePort ? ' at ' + n.devicePort.name : ''} in Network health`, onclick: () => openPort(n.device!.name, n.devicePort?.name) }, n.name || n.device.name)
           : (n.name || n.ip || 'unnamed'), n.ip && n.name ? h('span', { class: 'dim mono', style: 'font-size:11.5px' }, ' ' + n.ip) : null),
@@ -433,8 +446,8 @@ function wlanPanel(dev: Dev): VNode {
     wlanError ? note(wlanError, 'bad', true) : null,
     wlanLoading && !w ? spinner('Loading Wi-Fi…') : null,
     w && w.aps.length ? h('div', { class: 'cards' }, w.aps.map(a => h('div', { key: a.mac, class: 'cardbtn', style: 'cursor:default' },
-      h('span', { class: 't' }, a.name || a.mac), h('span', { class: 's' }, [a.model ? 'model ' + a.model : null, a.role || null].filter(Boolean).join(' · ') || null),
-      h('div', { style: 'margin-top:6px' }, resourceTiles(apResources(a)))))) : null,
+      h('span', { class: 't' }, a.name || a.mac), h('span', { class: 's' }, [a.model ? 'model ' + a.model : null, a.role || null, a.ip || null].filter(Boolean).join(' · ') || null),
+      a.uptimeSec > 0 ? h('span', { class: 's' }, `up ${dur(a.uptimeSec * 1000)} · CPU and memory are on the Overview tab`) : null))) : null,
     w && w.radios.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1.2fr) 90px 90px minmax(150px,1fr) minmax(150px,1fr) 80px 70px;--w:880px' },
       h('div', { class: 'tr head' }, ...['Radio', 'Power', 'Noise floor', 'Channel busy (4 s)', 'Channel busy (64 s)', 'Clients', 'State'].map(t => h('span', null, t))),
       w.radios.map(r => h('div', { key: r.apMac + r.idx, class: 'tr' },
@@ -447,7 +460,7 @@ function wlanPanel(dev: Dev): VNode {
       h('div', { class: 'tr head' }, ...['SSID', 'Radio', 'BSSID', 'Clients', 'Interface'].map(t => h('span', null, t))),
       w.ssids.map(s => { const itf = s.ifName ? dev.interfaces.find(i => i.name === s.ifName) : undefined; return h('div', { key: s.bssid, class: 'tr' },
         h('span', { style: 'font-weight:600' }, s.name || '—'), h('span', null, radioName(s.apMac, s.radio)), h('span', { class: 'mono', style: 'font-size:12px' }, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/.test(s.bssid) ? s.bssid : '—'), h('span', { class: 'mono', style: 'font-size:12px' }, String(s.clients)),
-        itf ? h('button', { type: 'button', class: 'lnk', title: 'Show this interface: utilisation, discards and graphs', onclick: () => select_(dev.id, itf.ifIndex) }, itf.name) : h('span', { class: 'dim' }, '—')); }))) : null,
+        itf ? h('button', { type: 'button', class: 'lnk', title: 'Show this interface: utilisation, discards and graphs', onclick: () => select_(dev.id, itf.ifIndex, 'interfaces') }, itf.name) : h('span', { class: 'dim' }, '—')); }))) : null,
     w && w.clients.length ? h('div', { class: 'col', style: 'gap:8px' },
       h('div', { class: 'row', style: 'justify-content:space-between' },
         h('b', null, `Wireless clients (${num(w.clients.length)})`),
@@ -486,7 +499,7 @@ function foundBlock(f: Located): VNode {
   const q = f.ip ? 'ip:' + f.ip : f.macs.length ? 'mac:' + f.macs[0] : '';
   return h('div', { class: 'col', style: 'gap:6px' },
     ...primary.map(a => h('div', { key: a.devId + '/' + a.ifIndex, class: 'col', style: 'gap:4px' },
-      h('button', { type: 'button', class: 'cardbtn', onclick: () => select_(a.devId, a.ifIndex) },
+      h('button', { type: 'button', class: 'cardbtn', onclick: () => select_(a.devId, a.ifIndex, 'interfaces') },
         h('span', { class: 't' }, `${a.dev} · ${a.ifName}`),
         h('span', { class: 's' }, [a.vlan ? `VLAN ${a.vlan}` : null, `${a.macCount} address${a.macCount === 1 ? '' : 'es'} on the port`, a.confidence ? `${a.confidence} confidence` : null].filter(Boolean).join(' · '))),
       h('div', { class: 'row' }, flowsBtn(a)))),
@@ -495,7 +508,7 @@ function foundBlock(f: Located): VNode {
     f.note ? h('span', { class: 'muted', style: 'font-size:12px' }, f.note) : null,
     rest.length ? h('details', null, h('summary', { class: 'muted' }, `Also seen on ${rest.length} other port${rest.length === 1 ? '' : 's'}`),
       h('div', { class: 'col', style: 'gap:4px;padding-top:4px' }, rest.map(o => h('div', { key: o.devId + '/' + o.ifIndex, class: 'row', style: 'gap:8px;font-size:12px' },
-        h('button', { type: 'button', class: 'lnk', title: `Show ${o.ifName}`, onclick: () => select_(o.devId, o.ifIndex) }, `${o.dev} · ${o.ifName}`),
+        h('button', { type: 'button', class: 'lnk', title: `Show ${o.ifName}`, onclick: () => select_(o.devId, o.ifIndex, 'interfaces') }, `${o.dev} · ${o.ifName}`),
         h('span', { class: 'muted' }, o.edge ? 'low confidence' : 'uplink'),
         flowsBtn(o))))) : null);
 }
@@ -575,42 +588,56 @@ function resourceTileList(r: Resources, hist?: ResHist | null): VNode[] {
   for (const d of r.disks) tiles.push(stat(`Disk ${d.name}`, h('span', { style: sevStyle(d.usedPct, 80, 95) }, `${d.usedPct < 10 ? d.usedPct.toFixed(1) : Math.round(d.usedPct)}%`), `${bytes(d.usedBytes)} of ${bytes(d.totalBytes)}`));
   return tiles;
 }
-function resourceTiles(r: Resources): VNode | null {
-  const tiles = resourceTileList(r);
-  return tiles.length ? h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' }, tiles) : null;
-}
 /** An access point's own readings in the same shape as any other device's. Memory used is total minus free. */
-function apResources(a: WlanAp): Resources {
+function apResources(a: WlanAp, readAt: number): Resources {
   const mem = a.memTotal > 0 ? Math.max(0, a.memTotal - a.memFree) : null;
   return { uptimeSec: a.uptimeSec > 0 ? a.uptimeSec : null, cpuPct: known(a.cpuPct) ? a.cpuPct : null, cores: null, load: null,
-    memPct: mem !== null ? Math.round(mem / a.memTotal * 1000) / 10 : null, memTotal: mem !== null ? a.memTotal : null, memUsed: mem, swapPct: null, disks: [], source: '', readAt: 0 };
+    memPct: mem !== null ? Math.round(mem / a.memTotal * 1000) / 10 : null, memTotal: mem !== null ? a.memTotal : null, memUsed: mem, swapPct: null, disks: [], source: "the access point's own tables", readAt };
 }
 
-/** Uptime, CPU, memory and disk of the selected device. Shown for every kind of device, switches included. */
 const sevStyle = (p: number | null, warn = 75, bad = 90): string | undefined => (p === null ? undefined : p >= bad ? 'color:var(--bad)' : p >= warn ? 'color:var(--warn)' : undefined);
+interface ResSubject { key: string; title: string | null; name: string; r: Resources }
+
+/**
+ * Whose resources the Overview shows: the device itself, and each access point it answers for. A device that is a single access point with no readings of
+ * its own is shown as that access point, and one whose only access point is itself is not repeated.
+ */
+function resourceSubjects(dev: Dev): ResSubject[] {
+  const out: ResSubject[] = [];
+  if (dev.resources) out.push({ key: '', title: null, name: dev.name, r: dev.resources });
+  const aps = wlan?.aps ?? [];
+  if (dev.hasWlan && (aps.length > 1 || !dev.resources)) for (const a of aps) out.push({ key: a.mac.toLowerCase(), title: a.name || a.mac, name: a.name || a.mac, r: apResources(a, wlan?.readAt ?? 0) });
+  if (out.length > 1) out[0].title = dev.name;
+  return out;
+}
+
+/** Uptime, CPU, memory and disk with their history, for every kind of device: switches, routers, firewalls and access points alike. */
 function resourcesPanel(dev: Dev): VNode | null {
-  const r = dev.resources;
-  if (!r) return dev.lastOk === null ? null : h('span', { class: 'dim', style: 'font-size:12px' }, 'This device does not publish uptime, CPU or memory through HOST-RESOURCES-MIB, UCD-SNMP-MIB or the Cisco process and memory MIBs.');
-  const tiles = resourceTileList(r, resOpen ? resHist : null);
-  if (!tiles.length) return null;
-  return h('div', { class: 'col', style: 'gap:10px' },
-    h('div', { class: 'row', style: 'gap:10px;align-items:stretch' }, tiles),
-    h('span', { class: 'dim', style: 'font-size:11.5px' }, `Read ${ago(r.readAt)}${r.source ? ' from ' + r.source : ''}. Memory leaves out the file cache where the device reports it.`),
-    resHistoryPanel(dev));
+  const subs = resourceSubjects(dev).filter(x => resourceTileList(x.r).length);
+  if (!subs.length) return dev.lastOk === null && !dev.hasWlan ? null : h('span', { class: 'dim', style: 'font-size:12px' }, 'This device does not publish uptime, CPU or memory through HOST-RESOURCES-MIB, UCD-SNMP-MIB, the Cisco process and memory MIBs or a vendor MIB FlowScope reads.');
+  return h('div', { class: 'col', style: 'gap:18px' }, subs.map((x, i) => {
+    const r = x.r;
+    return h('div', { key: x.key || 'device', class: 'col', style: 'gap:10px' },
+      x.title ? h('b', null, x.title) : null,
+      h('div', { class: 'row', style: 'gap:10px;align-items:stretch' }, resourceTileList(r, resHists.get(x.key))),
+      h('span', { class: 'dim', style: 'font-size:11.5px' }, `Read ${r.readAt ? ago(r.readAt) : 'recently'}${r.source ? ' from ' + r.source : ''}. Memory leaves out the file cache where the device reports it.`),
+      resHistoryPanel(x, i === 0));
+  }));
 }
 
 /** CPU, memory, disk and load over time for the selected device, with its restarts marked. The graphs follow each other's hover like the interface graphs do. */
-function resHistoryPanel(dev: Dev): VNode {
-  const hist = resHist;
+function resHistoryPanel(sub: ResSubject, first: boolean): VNode {
+  const hist = resHists.get(sub.key);
+  const grp = 'res:' + (sub.key || 'device');
   const spanMs = rangeMs(resRange) ?? 6 * 3600e3;
   const to = Date.now(), from = to - spanMs;
   const fmtT = (t: number) => (spanMs > 86400e3 ? dayClock(t) : clock(t, false));
   const head = h('div', { class: 'row', style: 'justify-content:space-between' },
-    h('div', { class: 'col', style: 'gap:2px' }, h('b', null, 'Resource history'),
+    h('div', { class: 'col', style: 'gap:2px' }, h('b', null, sub.title && !first ? `${sub.title} history` : 'Resource history'),
       h('span', { class: 'muted', style: 'font-size:12px' }, 'CPU, memory, disk and load as the device reported them. Point at a graph to read every graph at that moment.')),
-    h('div', { class: 'row' },
+    first ? h('div', { class: 'row' },
       resOpen ? rangePicker('res-hist', resRange, RES_RANGES, v => { resRange = v; void loadResHist(); }, { aria: 'Resource history time range' }) : null,
-      btn(resOpen ? 'Hide' : 'Show history', { small: true, kind: 'ghost', pressed: resOpen, aria: resOpen ? 'Hide resource history' : 'Show resource history', onclick: () => { resOpen = !resOpen; redraw(); } })));
+      btn(resOpen ? 'Hide' : 'Show history', { small: true, kind: 'ghost', pressed: resOpen, aria: resOpen ? 'Hide resource history' : 'Show resource history', onclick: () => { resOpen = !resOpen; redraw(); } })) : null);
   if (!resOpen) return h('div', { class: 'col', style: 'gap:8px' }, head);
   if (resHistLoading && !hist) return h('div', { class: 'col', style: 'gap:8px' }, head, spinner('Loading the history…'));
   if (resHistError && !hist) return h('div', { class: 'col', style: 'gap:8px' }, head, note(resHistError, 'bad', true));
@@ -622,12 +649,12 @@ function resHistoryPanel(dev: Dev): VNode {
   const bands = hist.restarts.map(t => ({ a: t - 30_000, b: t + 30_000 }));
   const pctV = (v: number) => pct(v, 1);
   const charts: { key: string; build: (size: { w: number; h: number }) => VNode }[] = [];
-  if (col('cpu').length) charts.push({ key: 'cpu', build: size => lineChart({ ...size, sync: 'res', title: 'CPU', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'cpuMax') : []), ...mk(peaks ? 'Average' : 'CPU', 'var(--s1)', 'cpu')], from, to, bands, fmtT, fmtV: pctV, aria: `CPU of ${dev.name}` }) });
-  if (col('mem').length) charts.push({ key: 'mem', build: size => lineChart({ ...size, sync: 'res', title: 'Memory in use', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'memMax') : []), ...mk(peaks ? 'Average' : 'Memory', 'var(--s2)', 'mem'), ...mk('Swap', 'var(--s4)', 'swap')], from, to, bands, fmtT, fmtV: pctV, aria: `Memory of ${dev.name}` }) });
-  if (col('disk').length) charts.push({ key: 'disk', build: size => lineChart({ ...size, sync: 'res', title: 'Fullest disk', unit: v => Math.round(v) + '%', yMax: 100, series: mk('Disk', 'var(--s3)', 'disk'), from, to, bands, fmtT, fmtV: pctV, aria: `Disk use of ${dev.name}` }) });
-  if (col('load').length) charts.push({ key: 'load', build: size => lineChart({ ...size, sync: 'res', title: 'Load average (1 minute)', unit: v => v.toFixed(v < 10 ? 1 : 0), series: [...(peaks ? mk('Peak', 'var(--s5)', 'loadMax') : []), ...mk(peaks ? 'Average' : 'Load', 'var(--s6)', 'load')], from, to, bands, fmtT, fmtV: v => v.toFixed(2), aria: `Load of ${dev.name}` }) });
-  if (col('temp').length) charts.push({ key: 'temp', build: size => lineChart({ ...size, sync: 'res', title: 'Temperature (hottest sensor)', unit: v => Math.round(v) + ' °C', series: [...(peaks ? mk('Peak', 'var(--s5)', 'tempMax') : []), ...mk(peaks ? 'Average' : 'Temperature', 'var(--s7)', 'temp')], from, to, bands, fmtT, fmtV: v => `${Math.round(v * 10) / 10} °C`, aria: `Temperature of ${dev.name}` }) });
-  if (col('sess').length) charts.push({ key: 'sess', build: size => lineChart({ ...size, sync: 'res', title: 'Sessions', unit: v => (v >= 1000 ? Math.round(v / 100) / 10 + 'k' : String(Math.round(v))), series: [...(peaks ? mk('Peak', 'var(--s5)', 'sessMax') : []), ...mk(peaks ? 'Average' : 'Sessions', 'var(--s8)', 'sess')], from, to, bands, fmtT, fmtV: v => num(Math.round(v)), aria: `Sessions on ${dev.name}` }) });
+  if (col('cpu').length) charts.push({ key: 'cpu', build: size => lineChart({ ...size, sync: grp, title: 'CPU', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'cpuMax') : []), ...mk(peaks ? 'Average' : 'CPU', 'var(--s1)', 'cpu')], from, to, bands, fmtT, fmtV: pctV, aria: `CPU of ${sub.name}` }) });
+  if (col('mem').length) charts.push({ key: 'mem', build: size => lineChart({ ...size, sync: grp, title: 'Memory in use', unit: v => Math.round(v) + '%', yMax: 100, series: [...(peaks ? mk('Peak', 'var(--s5)', 'memMax') : []), ...mk(peaks ? 'Average' : 'Memory', 'var(--s2)', 'mem'), ...mk('Swap', 'var(--s4)', 'swap')], from, to, bands, fmtT, fmtV: pctV, aria: `Memory of ${sub.name}` }) });
+  if (col('disk').length) charts.push({ key: 'disk', build: size => lineChart({ ...size, sync: grp, title: 'Fullest disk', unit: v => Math.round(v) + '%', yMax: 100, series: mk('Disk', 'var(--s3)', 'disk'), from, to, bands, fmtT, fmtV: pctV, aria: `Disk use of ${sub.name}` }) });
+  if (col('load').length) charts.push({ key: 'load', build: size => lineChart({ ...size, sync: grp, title: 'Load average (1 minute)', unit: v => v.toFixed(v < 10 ? 1 : 0), series: [...(peaks ? mk('Peak', 'var(--s5)', 'loadMax') : []), ...mk(peaks ? 'Average' : 'Load', 'var(--s6)', 'load')], from, to, bands, fmtT, fmtV: v => v.toFixed(2), aria: `Load of ${sub.name}` }) });
+  if (col('temp').length) charts.push({ key: 'temp', build: size => lineChart({ ...size, sync: grp, title: 'Temperature (hottest sensor)', unit: v => Math.round(v) + ' °C', series: [...(peaks ? mk('Peak', 'var(--s5)', 'tempMax') : []), ...mk(peaks ? 'Average' : 'Temperature', 'var(--s7)', 'temp')], from, to, bands, fmtT, fmtV: v => `${Math.round(v * 10) / 10} °C`, aria: `Temperature of ${sub.name}` }) });
+  if (col('sess').length) charts.push({ key: 'sess', build: size => lineChart({ ...size, sync: grp, title: 'Sessions', unit: v => (v >= 1000 ? Math.round(v / 100) / 10 + 'k' : String(Math.round(v))), series: [...(peaks ? mk('Peak', 'var(--s5)', 'sessMax') : []), ...mk(peaks ? 'Average' : 'Sessions', 'var(--s8)', 'sess')], from, to, bands, fmtT, fmtV: v => num(Math.round(v)), aria: `Sessions on ${sub.name}` }) });
   const restartsIn = hist.restarts.filter(t => t >= from);
   return h('div', { class: 'col', style: 'gap:10px' }, head,
     h('div', { class: 'row', style: 'gap:8px' },
@@ -650,11 +677,35 @@ function streamsPanel(dev: Dev, itf: Iface): VNode {
 
 /* ------------------------------------------------------------------ view */
 
+/** The sub-tabs of the selected device. Only those with something to show are listed. */
+function availableTabs(dev: Dev): { id: DevTab; label: string }[] {
+  const t: { id: DevTab; label: string }[] = [{ id: 'overview', label: 'Overview' }, { id: 'interfaces', label: `Interfaces (${dev.interfaces.length})` }];
+  if (hasHardware(healthRes)) t.push({ id: 'hardware', label: 'Hardware' });
+  t.push({ id: 'network', label: 'Neighbours and routing' });
+  if (dev.hasWlan) t.push({ id: 'wifi', label: 'Wi-Fi' });
+  return t;
+}
+function devTabs(dev: Dev, tab: DevTab): VNode {
+  return tabs('Network health sections', availableTabs(dev).map(t => ({ id: t.id, label: t.label, on: t.id === tab })), id => { devTab = id as DevTab; redraw(); });
+}
+function tabBody(dev: Dev, tab: DevTab): VNode {
+  const flagged = dev.interfaces.filter(i => i.flagged).length;
+  const body = tab === 'overview' ? h('div', { class: 'col', style: 'gap:16px' },
+      flagged ? h('div', { class: 'row', style: 'gap:8px' }, chip(`${flagged} interface${flagged === 1 ? ' needs' : 's need'} attention`, 'warn'), btn('Show interfaces', { small: true, kind: 'ghost', onclick: () => { devTab = 'interfaces'; redraw(); } })) : null,
+      resourcesPanel(dev), healthSummary(healthRes))
+    : tab === 'interfaces' ? ifTable(dev)
+    : tab === 'hardware' ? hardwarePanel({ data: healthRes, ifNames: new Map(dev.interfaces.map(i => [i.ifIndex, i.name])), openInterface: ix => select_(dev.id, ix, 'interfaces') })
+    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes }), neighborsPanel(dev))
+    : wlanPanel(dev);
+  return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:14px' }, body);
+}
+
 export function render(): VNode {
   if (loading && !data) return h('main', null, heading('Network health', 'Interfaces, queues and device resources'), spinner());
   if (loadError && !data) return h('main', null, heading('Network health', 'Interfaces, queues and device resources'), note(loadError, 'bad', true), btn('Try again', { onclick: () => void load() }));
   if (!data) return h('main');
   const { dev, itf } = cur();
+  const tab = dev ? availableTabs(dev).find(t => t.id === devTab)?.id ?? 'overview' : 'overview';
   const head = heading('Network health', 'Interfaces, queues and device resources', 'How your devices are doing, read over SNMP: uptime, CPU, memory and disk with their history, and for each interface its utilisation, discards and per-class queue drops. Pick a device and interface to see how it behaved and which streams use it.');
   if (!data.devices.length) return h('main', null, head, h('div', { class: 'panel' }, empty('No SNMP devices have been added yet. Add switches and routers on the SNMP devices tab, and their interfaces and queues will appear here.')), btn('Go to SNMP devices', { kind: 'primary', onclick: () => go('devices') }));
   return h('main', null, head, h('div', { class: 'split' }, sidebar(),
@@ -664,12 +715,9 @@ export function render(): VNode {
           h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, dev.name), h('span', { class: 'muted' }, `${roleLabel(dev.role)} · ${dev.ip} · ${dev.profile || 'generic'} · last answered ${ago(dev.lastOk)}`)),
           btn('Edit in SNMP devices', { kind: 'ghost', small: true, onclick: () => go('devices', { id: dev.id }) })),
         dev.status !== 'ok' && dev.lastError ? note(`The last poll failed: ${dev.lastError}`, 'warn') : null,
-        resourcesPanel(dev),
-        healthPanel({ data: healthRes, loading: healthLoading, open: healthOpen, toggle: () => { healthOpen = !healthOpen; redraw(); }, ifNames: new Map(dev.interfaces.map(i => [i.ifIndex, i.name])), openInterface: ix => select_(dev.id, ix) }),
-        ifTable(dev),
-        dev.hasWlan ? wlanPanel(dev) : null,
-        neighborsPanel(dev)) : null,
-      dev && itf ? h('section', { 'aria-label': 'Selected interface', class: 'panel col', style: 'gap:16px' },
+        devTabs(dev, tab),
+        tabBody(dev, tab)) : null,
+      dev && tab === 'interfaces' && itf ? h('section', { 'aria-label': 'Selected interface', class: 'panel col', style: 'gap:16px' },
         h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, `${itf.name}${itf.alias ? ' · ' + itf.alias : ''}`),
           h('span', { class: 'muted' }, [itf.speedMbps ? (itf.speedMbps >= 1000 ? itf.speedMbps / 1000 + ' Gbps' : itf.speedMbps + ' Mbps') : 'speed unknown',
             itf.portMode === 'trunk' ? `trunk, native VLAN ${vlanLabel(itf.vlan, itf.vlanName) || 'unknown'}${itf.vlanList ? ', allowed ' + itf.vlanList : ''}` : itf.vlan ? `${itf.isVlanIf ? 'SVI for ' : ''}VLAN ${vlanLabel(itf.vlan, itf.vlanName)}${itf.voiceVlan ? ', voice VLAN ' + vlanLabel(itf.voiceVlan, itf.voiceVlanName) : ''}` : null,
@@ -681,5 +729,5 @@ export function render(): VNode {
         linkQuality(healthRes?.ifExtra.find(x => x.ifIndex === itf.ifIndex), (healthRes?.health?.sensors ?? []).filter(x => x.kind === 'optic' && x.ifIndex === itf.ifIndex), itf.speedMbps),
         itf.isVlanIf ? null : hostsPanel(dev, itf),
         seriesLoading && !series ? spinner('Loading the graphs…') : seriesError ? note(seriesError, 'bad', true) : series ? graphs(series, itf) : null,
-        streamsPanel(dev, itf)) : dev ? h('div', { class: 'panel' }, empty('Select an interface to see its queues and graphs.')) : null)));
+        streamsPanel(dev, itf)) : dev && tab === 'interfaces' ? h('div', { class: 'panel' }, empty('Select an interface to see its queues and graphs.')) : null)));
 }
