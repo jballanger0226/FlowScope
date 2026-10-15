@@ -71,6 +71,9 @@ test('LLDP missing while lldpd runs on the device: named as an AgentX gap, with 
   assert.match(one.lldp.detail, /lldpd is running on this device, but nothing is published/, 'no count in the title: still named, without a number');
   const off = byId(await runChecks(fake({ [OID.ifName]: { '1': 'igb0' }, [HR_NAME]: { '39852': 'snmpd' } }), f));
   assert.match(off.lldp.detail, /Nothing came back/, 'no lldpd process: the generic explanation');
+  assert.match(off.lldp.detail, /lldpd is not running on it/, 'a readable process list without lldpd says so');
+  const sw = byId(await runChecks(fake({ [OID.ifName]: { '1': 'Gi1' }, [HR_NAME]: { '1': 'x' } }), { role: 'switch', cisco: false }));
+  assert.doesNotMatch(sw.lldp.detail, /lldpd is not running/, 'a switch is not expected to run lldpd');
   const noTable = byId(await runChecks(fake({ [OID.ifName]: { '1': 'igb0' } }, [HR_NAME]), f));
   assert.equal(noTable.lldp.state, 'fail', 'an unreadable process table does not break the check');
 });

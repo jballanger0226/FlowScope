@@ -44,9 +44,10 @@ export async function runChecks(c: Walker, f: CheckFacts): Promise<Check[]> {
 
   const nLoc = locPort.map.size, nRem = lldpRem.map.size;
   // With no LLDP table at all, see whether lldpd is running on the device: that turns "not published" into the real cause.
-  let lldpd: { running: boolean; neighbours: number | null } = { running: false, neighbours: null };
+  let lldpd: { running: boolean; neighbours: number | null; procsRead: boolean } = { running: false, neighbours: null, procsRead: false };
   if (!nLoc && !nRem) {
     const [names, paths] = await Promise.all([col(c, HR_SWRUN_NAME), col(c, HR_SWRUN_PATH)]);
+    lldpd.procsRead = names.map.size > 0;
     for (const [k, v] of names.map) {
       if (!/(^|\/)lldpd$/.test(String(v).trim())) continue;
       lldpd.running = true;
@@ -57,7 +58,7 @@ export async function runChecks(c: Walker, f: CheckFacts): Promise<Check[]> {
   out.push(nRem ? { id: 'lldp', title: 'LLDP neighbours', state: 'ok', count: nRem, detail: `${plural(nRem, 'neighbour')} on ${plural(ports(lldpRem.map, 1), 'port')}.` }
     : nLoc ? { id: 'lldp', title: 'LLDP neighbours', state: 'warn', count: 0, detail: `The device publishes LLDP (${plural(nLoc, 'local port')}) but has no neighbours yet.`, hint: 'Check that the other end sends LLDP and that LLDP is enabled on this port. On a firewall or server, lldpctl shows what lldpd has heard.' }
       : lldpd.running ? { id: 'lldp', title: 'LLDP neighbours', state: 'fail', count: 0, detail: `lldpd is running on this device${lldpd.neighbours !== null ? ` and sees ${plural(lldpd.neighbours, 'neighbour')}` : ''}, but nothing is published for the LLDP-MIB (.1.0.8802.1.1.2). It is not connected to the SNMP agent.`, hint: LLDPD_RUNNING_HINT }
-      : { id: 'lldp', title: 'LLDP neighbours', state: 'fail', count: 0, detail: err(locPort, lldpRem) ?? 'Nothing came back for the LLDP-MIB (.1.0.8802.1.1.2). Either the device does not publish it over SNMP, or this credential may not read it.', hint: LLDP_HINT });
+      : { id: 'lldp', title: 'LLDP neighbours', state: 'fail', count: 0, detail: err(locPort, lldpRem) ?? 'Nothing came back for the LLDP-MIB (.1.0.8802.1.1.2). Either the device does not publish it over SNMP, or this credential may not read it.' + (lldpd.procsRead && f.role !== 'switch' ? ' The device\'s process list was readable and lldpd is not running on it, so there is nothing to publish: start lldpd (with -x) first.' : ''), hint: LLDP_HINT });
 
   out.push(cdp.map.size ? { id: 'cdp', title: 'CDP neighbours', state: 'ok', count: cdp.map.size, detail: `${plural(cdp.map.size, 'neighbour')} on ${plural(ports(cdp.map, 0), 'port')}.` }
     : { id: 'cdp', title: 'CDP neighbours', state: 'na', count: 0, detail: 'No CDP table. Only Cisco devices publish it, so this is normal elsewhere.' });
