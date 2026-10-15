@@ -180,6 +180,11 @@ const MIGRATIONS: string[] = [
     tx_bytes INTEGER NOT NULL DEFAULT 0, rx_bytes INTEGER NOT NULL DEFAULT 0, uptime_sec INTEGER NOT NULL DEFAULT 0, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, mac)
   );
   CREATE INDEX wlan_client_mac ON wlan_client(mac);
+  `,
+  `
+  -- what each class matches and how it re-marks packets, read from the device's service policy, so a re-marked stream can be told from one nobody configured
+  ALTER TABLE class_defs ADD COLUMN matched TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE class_defs ADD COLUMN sets TEXT;
   `
 ];
 

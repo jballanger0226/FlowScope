@@ -9,23 +9,25 @@ import { bytes, clock, dur, ms, num, stamp, svcLabel } from '../util.js';
 
 export interface Row {
   id: string; srcIp: string; dstIp: string; sport: number; dport: number; proto: number; protoName: string; app: string; appPort: number | null; vlan: number | null; vlanName: string;
-  t0: number; t1: number; bytes: number; pkts: number; fwdBytes: number; revBytes: number; hopCount: number; hops: string[]; qosChanged: boolean;
+  t0: number; t1: number; bytes: number; pkts: number; fwdBytes: number; revBytes: number; hopCount: number; hops: string[]; qosChanged: boolean; qosVerdict?: (Verdict | { kind: 'mixed'; text: string }) | null;
   ttlExpired: boolean; ttlReason: 'ttl' | 'icmp' | null; ttlLow: number | null;
   dscpInS: string; dscpOutS: string | null; flags: number; health: { kind: 'ok' | 'warn' | 'bad'; text: string } | null;
 }
 export interface Hop {
   n: number; exporter: string; dev: string; role: string; inIf: string; outIf: string; frameSrc: string | null; frameDst: string | null; vlan: number | null; vlanName: string;
-  ttl: number | null; ttlExpired: 'ttl' | 'icmp' | null; dscpInS: string; dscpOutS: string; qosChanged: boolean; pkts: number; bytes: number; linkMs: number | null; cumMs: number | null; policy: string | null;
+  ttl: number | null; ttlExpired: 'ttl' | 'icmp' | null; dscpInS: string; dscpOutS: string; qosChanged: boolean; qosVerdict?: Verdict | null; pkts: number; bytes: number; linkMs: number | null; cumMs: number | null; policy: string | null;
   obs: { kind: string; text: string; severity: 'info' | 'warn' | 'bad' }[]; firstSeen: number; lastSeen: number;
   outIfs?: string[]; sourcePort?: string | null; sourceConfirmed?: boolean;
   notExported?: string[]; devId?: number | null; inFrom?: PortSource; outFrom?: PortSource; inNeighbors?: Neighbor[]; outNeighbors?: Neighbor[];
 }
 interface Attach { dev: string; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; confidence?: 'high' | 'medium' | 'low' }
 interface Located { ip: string | null; macs: string[]; macSource: string; attach: Attach | null; others: Attach[]; note: string }
+/** Whether a configured QoS policy explains a DSCP change (see explainRemark in src/analysis/hops.ts). */
+export interface Verdict { kind: 'policy' | 'unexplained' | 'unknown'; text: string }
 interface Multicast { group: string; source: string; location: Located | null }
 export interface Detail {
   skey: string; initiator: { ip: string; port: number }; responder: { ip: string; port: number }; proto: number; protoName: string; app: string; appPort: number | null; t0: number; t1: number;
-  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; marking?: { direction: 'forward' | 'reverse'; values: { dscp: number; name: string; pkts: number; bytes: number; where: string[] }[] }[]; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null; multicast: Multicast | null;
+  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; qosVerdict?: (Verdict | { kind: 'mixed'; text: string }) | null; marking?: { direction: 'forward' | 'reverse'; values: { dscp: number; name: string; pkts: number; bytes: number; where: string[] }[] }[]; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null; multicast: Multicast | null;
   activity: { t0: number; t1: number; fwd: number[]; rev: number[] };
 }
 
@@ -66,23 +68,34 @@ export class Follower {
 }
 
 
-function qosMessage(d: Detail): { text: string; dev?: string; ifName?: string } | null {
-  for (const [dirName, hops] of [['initiator → responder', d.forward], ['responder → initiator', d.reverse]] as const) {
-    for (const hp of hops) {
-      if (hp.qosChanged) return { text: `${hp.dscpInS} → ${hp.dscpOutS} by the egress policy on ${hp.dev} (${hp.outIf}), ${dirName}.`, dev: hp.dev, ifName: hp.outIf };
+function qosMessage(d: Detail): { text: string; dev?: string; ifName?: string; kind: 'bad' | 'info' | 'warn'; title: string } | null {
+  const v = d.qosVerdict;
+  if (!v) return null;
+  if (v.kind === 'mixed') { /* handled below, with where each value was seen */ }
+  const found = (): { text: string; dev?: string; ifName?: string } | null => {
+    for (const [dirName, hops] of [['initiator → responder', d.forward], ['responder → initiator', d.reverse]] as const) {
+      for (const hp of hops) {
+        if (hp.qosChanged) return { text: `${hp.dscpInS} → ${hp.dscpOutS} on ${hp.dev} (${hp.outIf}), ${dirName}.`, dev: hp.dev, ifName: hp.outIf };
+      }
+      for (let i = 1; i < hops.length; i++) {
+        const ob = hops[i].obs.find(o => o.kind === 'remark' && o.text.startsWith('DSCP arrived'));
+        if (ob) return { text: `${ob.text.split('. ')[0]}. The marking changed between ${hops[i - 1].dev} and ${hops[i].dev}, ${dirName}.`, dev: hops[i - 1].dev, ifName: hops[i - 1].outIf };
+      }
     }
-    for (let i = 1; i < hops.length; i++) {
-      const ob = hops[i].obs.find(o => o.kind === 'remark' && o.text.startsWith('DSCP arrived'));
-      if (ob) return { text: `${ob.text}. The marking changed between ${hops[i - 1].dev} and ${hops[i].dev}, ${dirName}.`, dev: hops[i - 1].dev, ifName: hops[i - 1].outIf };
+    return null;
+  };
+  if (v.kind === 'mixed') {
+    for (const m of d.marking ?? []) {
+      const total = m.values.reduce((a, x) => a + x.pkts, 0) || 1;
+      const parts = m.values.map(x => `${x.name} ${x.pkts.toLocaleString()} packets (${(100 * x.pkts / total) < 0.1 ? '<0.1' : (100 * x.pkts / total).toFixed(1)}%) at ${x.where[0]}`);
+      return { text: `The packets of this stream carry more than one DSCP value, ${m.direction === 'forward' ? 'initiator → responder' : 'responder → initiator'}: ${parts.join('; ')}. No device re-marked them; the sender uses different markings for different packets of the same conversation.`, kind: 'warn', title: 'Mixed DSCP markings' };
     }
+    return { text: v.text, kind: 'warn', title: 'Mixed DSCP markings' };
   }
-  // no hop re-marks the traffic, but the packets of the stream do not all carry the same DSCP value
-  for (const m of d.marking ?? []) {
-    const total = m.values.reduce((a, v) => a + v.pkts, 0) || 1;
-    const parts = m.values.map(v => `${v.name} ${v.pkts.toLocaleString()} packets (${(100 * v.pkts / total) < 0.1 ? '<0.1' : (100 * v.pkts / total).toFixed(1)}%) at ${v.where[0]}`);
-    return { text: `The packets of this stream carry more than one DSCP value, ${m.direction === 'forward' ? 'initiator → responder' : 'responder → initiator'}: ${parts.join('; ')}. No device re-marked them; the sender uses different markings for different packets of the same conversation.` };
-  }
-  return d.qosChanged ? { text: 'The marking differs between hops.' } : null;
+  const f = found();
+  if (v.kind === 'policy') return { text: `${f?.text ?? ''} ${v.text}`.trim(), kind: 'info', title: 'QoS re-marked by policy' };
+  if (v.kind === 'unexplained') return { ...(f ?? { text: '' }), text: `${f?.text ?? ''} ${v.text}`.trim(), kind: 'bad', title: 'QoS changed in transit, not explained by a policy' };
+  return { ...(f ?? { text: '' }), text: `${f?.text ?? 'The marking differs between hops.'} ${v.text}`.trim(), kind: 'warn', title: 'QoS changed in transit' };
 }
 
 function ttlMessage(d: Detail): { text: string } | null {
@@ -104,10 +117,10 @@ function strip(hops: Hop[], d: Detail, reverse: boolean): VNode {
     items.push(h('div', { key: 'l' + i, class: 'link' + (loss ? ' loss' : slow ? ' slow' : '') },
       h('span', null, i === 0 ? '' : hp.linkMs === null ? '?' : ms(hp.linkMs)), h('i'),
       h('span', { class: 'flag' }, loss ? 'loss' : slow ? 'slow' : '')));
-    items.push(h('div', { key: 'n' + i, class: 'node' + (hp.qosChanged || hp.ttlExpired ? ' remark' : '') },
+    items.push(h('div', { key: 'n' + i, class: 'node' + ((hp.qosChanged && hp.qosVerdict?.kind !== 'policy') || hp.ttlExpired ? ' remark' : '') },
       h('b', null, hp.dev), h('span', null, hp.role), h('span', { class: 'mono' }, `${hp.inIf} → ${hp.outIf}`),
       hp.outNeighbors && hp.outNeighbors.length ? h('span', { title: 'What CDP/LLDP says is connected to the outgoing port' }, '→ ' + hp.outNeighbors.map(n => n.name || n.ip).join(', ')) : null,
-      hp.policy ? h('span', null, 'policy ' + hp.policy) : null, hp.qosChanged ? h('span', { style: 'color:var(--bad)' }, `${hp.dscpInS} → ${hp.dscpOutS}`) : null, hp.ttlExpired ? h('span', { style: 'color:var(--bad)' }, hp.ttlExpired === 'icmp' ? 'TTL exceeded notice' : `TTL ${hp.ttl ?? 1}: expired here`) : null));
+      hp.policy ? h('span', null, 'policy ' + hp.policy) : null, hp.qosChanged ? h('span', { style: `color:var(${hp.qosVerdict?.kind === 'policy' ? '--info' : '--bad'})`, title: hp.qosVerdict?.text }, `${hp.dscpInS} → ${hp.dscpOutS}${hp.qosVerdict?.kind === 'policy' ? ' (policy)' : ''}`) : null, hp.ttlExpired ? h('span', { style: 'color:var(--bad)' }, hp.ttlExpired === 'icmp' ? 'TTL exceeded notice' : `TTL ${hp.ttl ?? 1}: expired here`) : null));
   });
   items.push(h('div', { key: 'lend', class: 'link' }, h('span'), h('i'), h('span')));
   items.push(h('div', { key: 'dst', class: 'node edge' }, h('b', { class: 'mono' }, dst.ip), h('span', null, 'destination host'), h('span', { class: 'mono' }, dst.port ? ':' + dst.port : '')));
@@ -132,13 +145,13 @@ function multicastStrip(hops: Hop[], d: Detail, m: Multicast): VNode {
       h('span', { class: 'eyebrow' }, `Seen by ${hops.length} device${hops.length === 1 ? '' : 's'} (in no particular order)`),
       h('div', { class: 'mcgrid' }, hops.map((hp, i) => {
         const here = !!hp.sourcePort;
-        return h('div', { key: i, class: 'node' + (here ? ' here' : '') + (hp.qosChanged ? ' remark' : '') },
+        return h('div', { key: i, class: 'node' + (here ? ' here' : '') + (hp.qosChanged && hp.qosVerdict?.kind !== 'policy' ? ' remark' : '') },
           h('b', null, hp.dev), h('span', null, hp.role),
           h('span', { class: 'mono' }, `in ${hp.inIf || '—'}`),
           h('span', { class: 'mono' }, hp.outIfs && hp.outIfs.length > 1 ? `out ${hp.outIfs.length} interfaces` : `out ${hp.outIf || '—'}`),
           hp.outIfs && hp.outIfs.length > 1 ? h('span', { class: 'mono', title: hp.outIfs.join(', ') }, hp.outIfs.slice(0, 3).join(', ') + (hp.outIfs.length > 3 ? ', …' : '')) : null,
           here ? h('span', { style: 'color:var(--accent);font-weight:600' }, hp.sourceConfirmed ? `Source host is on ${hp.sourcePort}` : `Source host is on ${hp.sourcePort} (this switch's flow data shows ${hp.inIf})`) : null,
-          hp.qosChanged ? h('span', { style: 'color:var(--bad)' }, `${hp.dscpInS} → ${hp.dscpOutS}`) : null);
+          hp.qosChanged ? h('span', { style: `color:var(${hp.qosVerdict?.kind === 'policy' ? '--info' : '--bad'})`, title: hp.qosVerdict?.text }, `${hp.dscpInS} → ${hp.dscpOutS}${hp.qosVerdict?.kind === 'policy' ? ' (policy)' : ''}`) : null);
       })))));
 }
 
@@ -163,7 +176,7 @@ function multicastTable(hops: Hop[]): VNode {
       h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'src '), hp.frameSrc ?? '—'), h('div', null, h('span', { class: 'dim' }, 'dst '), hp.frameDst ?? '—')),
       h('span', { class: 'mono', style: 'font-size:12px' }, hp.vlan ? String(hp.vlan) : '—', ' ', h('span', { class: 'dim' }, hp.vlanName)),
       h('span', { class: 'mono', style: 'font-size:12px' }, hp.ttl === null ? '—' : String(hp.ttl)),
-      h('span', { style: 'font-size:12px' }, hp.qosChanged ? h('span', { class: 'tag bad' }, `${hp.dscpInS} → ${hp.dscpOutS}`) : hp.dscpInS),
+      h('span', { style: 'font-size:12px' }, hp.qosChanged ? h('span', { class: hp.qosVerdict?.kind === 'policy' ? 'tag info' : 'tag bad', title: hp.qosVerdict?.text }, `${hp.dscpInS} → ${hp.dscpOutS}`) : hp.dscpInS),
       h('span', { class: 'mono', style: 'font-size:12px' }, num(hp.pkts)), h('span', { class: 'mono', style: 'font-size:12px' }, bytes(hp.bytes)),
       h('div', { class: 'obs' }, hp.obs.length ? hp.obs.map((o, k) => h('span', { key: k, class: 'ob ' + o.severity }, o.text)) : h('span', { class: 'dim' }, 'Nominal'))))));
 }
@@ -185,7 +198,7 @@ function hopsTable(hops: Hop[]): VNode {
         h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'src '), hp.frameSrc ?? '—'), h('div', null, h('span', { class: 'dim' }, 'dst '), hp.frameDst ?? '—')),
         h('span', { class: 'mono', style: 'font-size:12px' }, hp.vlan ? String(hp.vlan) : '—', ' ', h('span', { class: 'dim' }, hp.vlanName)),
         h('span', { class: 'mono', style: 'font-size:12px' }, hp.ttl === null ? '—' : String(hp.ttl)),
-        h('span', { style: 'font-size:12px' }, hp.qosChanged || hp.dscpOutS !== 'not reported' && hp.dscpOutS !== hp.dscpInS ? h('span', { class: 'tag bad' }, `${hp.dscpInS} → ${hp.dscpOutS}`) : hp.dscpInS),
+        h('span', { style: 'font-size:12px' }, hp.qosChanged || hp.dscpOutS !== 'not reported' && hp.dscpOutS !== hp.dscpInS ? h('span', { class: hp.qosVerdict?.kind === 'policy' ? 'tag info' : 'tag bad', title: hp.qosVerdict?.text }, `${hp.dscpInS} → ${hp.dscpOutS}`) : hp.dscpInS),
         h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, num(hp.pkts)), lossPct >= 0.5 ? h('div', { style: 'color:var(--bad);font-size:11.5px' }, `−${lossPct.toFixed(1)}%`) : null),
         h('span', { class: 'mono', style: 'font-size:12px' }, bytes(hp.bytes)),
         h('span', { class: 'mono', style: 'font-size:12px' }, i === 0 ? '—' : hp.linkMs === null ? '?' : ms(hp.linkMs)),
@@ -248,9 +261,9 @@ function followed(f: Follower, row: { flags: number } | undefined): VNode | null
           worst ? statusEl(worst.severity === 'bad' ? 'bad' : 'warn', worst.text.length > 70 ? worst.text.slice(0, 68) + '…' : worst.text) : statusEl('ok', 'Healthy'))),
       mc ? null : seg('Path direction', [{ id: 'f', label: 'Initiator → responder', on: !reverse }, { id: 'r', label: 'Responder → initiator', on: reverse, disabled: !d.reverse.length, title: d.reverse.length ? undefined : 'No exporter reported the return direction' }], id => { f.reverse = id === 'r'; f.changed(); })),
     d.note ? note(d.note, 'info') : null,
-    qm ? h('div', { class: 'note bad row', style: 'justify-content:space-between' },
-      h('div', null, h('b', null, 'QoS changed in transit'), h('div', null, qm.text)),
-      qm.dev ? btn('Open egress queue', { kind: 'danger', onclick: () => go('links', { dev: qm.dev, if: qm.ifName }) }) : null) : null,
+    qm ? h('div', { class: `note ${qm.kind} row`, style: 'justify-content:space-between' },
+      h('div', null, h('b', null, qm.title), h('div', null, qm.text)),
+      qm.dev ? btn('Open egress queue', { kind: qm.kind === 'bad' ? 'danger' : 'ghost', onclick: () => go('links', { dev: qm.dev, if: qm.ifName }) }) : null) : null,
     tm ? h('div', { class: 'note bad' }, h('b', null, 'TTL expired before the destination'), h('div', null, tm.text)) : null,
     mc ? multicastExplain(d, mc) : null,
     mc ? (hops.length ? [multicastStrip(hops, d, mc), multicastTable(hops)] : note('No exporter reported this stream.', 'info')) : hops.length ? [strip(hops, d, reverse), hopsTable(hops)] : note('No exporter reported this direction.', 'info'),

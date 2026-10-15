@@ -40,6 +40,11 @@ export const OID = {
   cbQosParentObjectsIndex: '1.3.6.1.4.1.9.9.166.1.5.1.1.4',
   cbQosPolicyMapName: '1.3.6.1.4.1.9.9.166.1.6.1.1.1',
   cbQosCMName: '1.3.6.1.4.1.9.9.166.1.7.1.1.1',
+  cbQosMatchStmtName: '1.3.6.1.4.1.9.9.166.1.8.1.1.1',
+  cbQosSetCfgFeature: '1.3.6.1.4.1.9.9.166.1.14.1.1.1',
+  cbQosSetCfgIpDSCPValue: '1.3.6.1.4.1.9.9.166.1.14.1.1.2',
+  cbQosSetCfgIpPrecedenceValue: '1.3.6.1.4.1.9.9.166.1.14.1.1.3',
+  cbQosSetCfgL2CosValue: '1.3.6.1.4.1.9.9.166.1.14.1.1.5',
   cbQosQueueingCfgBandwidth: '1.3.6.1.4.1.9.9.166.1.9.1.1.1',
   cbQosQueueingCfgBandwidthUnits: '1.3.6.1.4.1.9.9.166.1.9.1.1.2',
   cbQosCMPrePolicyPkt32: '1.3.6.1.4.1.9.9.166.1.15.1.1.2',
@@ -90,6 +95,6 @@ export const OID = {
   cdpCacheCapabilities: '1.3.6.1.4.1.9.9.23.1.2.1.1.9'
 } as const;
 
-export const CBQOS_OBJ = { policymap: 1, classmap: 2, matchStatement: 3, queueing: 4 } as const;
+export const CBQOS_OBJ = { policymap: 1, classmap: 2, matchStatement: 3, queueing: 4, set: 8 } as const;
 /** Interface types that are hidden unless they carry a description. Port-channels (161) are kept: they are the uplinks people watch. */
 export const IF_TYPE_IGNORED = new Set([24 /* softwareLoopback */, 53 /* propVirtual */, 131 /* tunnel */, 135 /* l2vlan */, 136 /* l3ipvlan */]);

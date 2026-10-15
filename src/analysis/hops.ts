@@ -10,10 +10,44 @@ export interface HopContext {
   classDrops?(exporterIp: string, outIf: number, from: number, to: number, dscp: number): { cls: string; dropPct: number; dropPkts: number }[];
   /** Policy name attached to the outgoing interface, if known. */
   policyOf?(exporterIp: string, outIf: number): string | null;
+  /** The QoS policy attached to an interface in one direction, with what its classes match and mark. Null when the device is not one we poll. */
+  policyAt?(exporterIp: string, ifIndex: number, dir: 'in' | 'out'): PolicyView | null;
   vlanName?(id: number): string;
   slowLinkMs?: number;
   /** Addresses of our own routers; traffic addressed to them is never reported as TTL-expired. */
   localIps?: ReadonlySet<string>;
+}
+
+/** What one end of a hop's interface does about marking, taken from the device's service policy. */
+export interface PolicyView {
+  device: string; ifName: string; dir: 'in' | 'out'; policy: string | null;
+  /** The device has service policies somewhere, so an interface without one is a gap in the configuration and not just a device that has no QoS data. */
+  deviceHasQos: boolean;
+  classes: { cls: string; matches: number[]; sets: { dscp: number | null; cos: number | null; precedence: number | null; table: boolean } | null }[];
+}
+/** Whether a DSCP change was configured: 'policy' a service policy marks it, 'unexplained' no policy does (or one marks something else), 'unknown' no policy data for these devices. */
+export interface QosVerdict { kind: 'policy' | 'unexplained' | 'unknown'; text: string }
+
+/**
+ * Looks for a configured reason a stream's DSCP went from `from` to `to`, in the policies on the interfaces where it can have happened.
+ * A "set dscp" with a value is compared with what was seen; a table map (AutoQoS) is accepted as configured marking but cannot be checked, since the
+ * device does not publish its values.
+ */
+export function explainRemark(from: number, to: number, views: (PolicyView | null)[]): QosVerdict {
+  const known = views.filter((v): v is PolicyView => v !== null && v.deviceHasQos);
+  const where = (v: PolicyView) => `${v.device} ${v.dir === 'in' ? 'input' : 'output'} policy ${v.policy} (${v.ifName})`;
+  if (!known.length) return { kind: 'unknown', text: 'No QoS policy information is available for the devices involved, so it cannot be said whether this change is configured.' };
+  const hits: { v: PolicyView; c: PolicyView['classes'][0] }[] = [];
+  for (const v of known) for (const c of v.classes) if (c.sets) hits.push({ v, c });
+  const exact = hits.find(h => h.c.sets!.dscp === to && (h.c.matches.length === 0 || h.c.matches.includes(from))) ?? hits.find(h => h.c.sets!.dscp === to);
+  if (exact) return { kind: 'policy', text: `${where(exact.v)}, class ${exact.c.cls}, sets DSCP ${dscpName(to)}.` };
+  const table = hits.find(h => h.c.sets!.table);
+  if (table) return { kind: 'policy', text: `${where(table.v)}, class ${table.c.cls}, marks with a table map. The values are not published by the device, so the result cannot be checked against what was configured.` };
+  const other = hits.find(h => h.c.sets!.dscp !== null);
+  if (other) return { kind: 'unexplained', text: `${where(other.v)}, class ${other.c.cls}, sets DSCP ${dscpName(other.c.sets!.dscp as number)}, but the stream was seen as ${dscpName(to)}.` };
+  const why = known.map(v => (v.policy ? `${where(v)} has no class that marks DSCP` : `no QoS policy is attached to ${v.ifName} (${v.dir === 'in' ? 'input' : 'output'}) on ${v.device}`)).join('; ');
+  const reset = to === 0 ? ' It was reset to CS0, which is what a port that does not trust the incoming marking does when no policy sets it.' : '';
+  return { kind: 'unexplained', text: `No configured policy explains this: ${why}.${reset}` };
 }
 
 /** An IPv4 group (224.0.0.0/4) or an IPv6 multicast address (ff00::/8). */
@@ -66,6 +100,8 @@ export interface HopView {
   dscpIn: number; dscpOut: number | null;
   dscpInS: string; dscpOutS: string;
   qosChanged: boolean;
+  /** For a hop where the DSCP changed: whether a service policy explains it. */
+  qosVerdict?: QosVerdict | null;
   pkts: number; bytes: number;
   firstSeen: number; lastSeen: number;
   linkMs: number | null; cumMs: number | null;
@@ -86,6 +122,8 @@ export interface StreamDetail {
   forward: HopView[];
   reverse: HopView[];
   qosChanged: boolean;
+  /** Why the stream is flagged: re-marked by a policy, re-marked with nothing configured to do it, the packets carry mixed markings, or unknown. Null when it is not flagged. */
+  qosVerdict: QosVerdict | { kind: 'mixed'; text: string } | null;
   /** Directions whose packets carry more than one DSCP value (marking differs between records, even where no hop re-marks it). */
   marking: Marking[];
   /** The stream ran out of TTL before reaching its destination (or an ICMP Time Exceeded message was seen for it). */
@@ -211,10 +249,25 @@ function buildHops(recs: FlowRecord[], ctx: HopContext, multicast = false): HopV
     const dev = ctx.deviceName(a.exporter);
     const dscpOut = a.tosOut;
     const qosChanged = dscpOut !== null && dscpOut !== a.tosIn;
-    if (qosChanged) obs.push({ kind: 'remark', severity: 'warn', text: `DSCP re-marked ${dscpName(a.tosIn)} → ${dscpName(dscpOut as number)} by the egress policy` });
+    let qosVerdict: QosVerdict | null = null;
+    // a verdict is only worth the policy lookups when the DSCP changed
+    const at = (ip: string, i: number, dir: 'in' | 'out') => (i ? ctx.policyAt?.(ip, i, dir) ?? null : null);
+    const sev = (v: QosVerdict) => (v.kind === 'policy' ? 'info' as const : 'warn' as const);
+    const tag = (v: QosVerdict) => (v.kind === 'policy' ? 'Expected: ' : v.kind === 'unexplained' ? 'Not explained by any policy. ' : '') + v.text;
+    if (qosChanged) {
+      qosVerdict = explainRemark(a.tosIn, dscpOut as number, [at(a.exporter, a.inIf, 'in'), at(a.exporter, a.outIf, 'out')]);
+      obs.push({ kind: 'remark', severity: sev(qosVerdict), text: `DSCP re-marked ${dscpName(a.tosIn)} → ${dscpName(dscpOut as number)} on ${dev}. ${tag(qosVerdict)}` });
+    }
     if (prevHop) {
       const before = prevHop.dscpOut ?? prevHop.dscpIn;
-      if (before !== a.tosIn) obs.push({ kind: 'remark', severity: 'warn', text: `DSCP arrived as ${dscpName(a.tosIn)}; previous hop sent ${dscpName(before)}` });
+      if (before !== a.tosIn) {
+        // when the previous hop did not report its output marking, its own policies are where the change can have happened; otherwise it happened after that device
+        const v = prevHop.dscpOut === null
+          ? explainRemark(before, a.tosIn, [at(prevHop.exporter, prevHop.inIfIndex, 'in'), at(prevHop.exporter, prevHop.outIfIndex, 'out')])
+          : { kind: 'unexplained' as const, text: `${prevHop.dev} sent it as ${dscpName(before)} and it arrived as ${dscpName(a.tosIn)}, so a device or link between them changed it. No device between them reports flows, so there is no policy to check.` };
+        qosVerdict ??= v;
+        obs.push({ kind: 'remark', severity: sev(v), text: `DSCP arrived as ${dscpName(a.tosIn)}; previous hop sent ${dscpName(before)}. ${tag(v)}` });
+      }
     }
     if (linkMs !== null && linkMs >= slow) obs.push({ kind: 'slow', severity: 'warn', text: `Slow link: about ${linkMs.toFixed(0)} ms from ${prevHop!.dev}` });
     if (prev && a.recs.every(r => r.sampling <= 1) && prev.recs.every(r => r.sampling <= 1) && prev.pkts > 20) {
@@ -245,7 +298,7 @@ function buildHops(recs: FlowRecord[], ctx: HopContext, multicast = false): HopV
       n: i + 1, exporter: a.exporter, dev, role: ctx.deviceRole(a.exporter),
       inIf: ctx.ifName(a.exporter, a.inIf), outIf: ctx.ifName(a.exporter, a.outIf), inIfIndex: a.inIf, outIfIndex: a.outIf, outIfs: [...new Set(a.outIfs)].filter(x => x).map(x => ctx.ifName(a.exporter, x)),
       frameSrc: a.macS, frameDst: a.macD, vlan: a.vlan, vlanName: a.vlan && ctx.vlanName ? ctx.vlanName(a.vlan) : '',
-      ttl: a.ttl, ttlExpired: a.ttlWhy, dscpIn: a.tosIn, dscpOut, dscpInS: dscpName(a.tosIn), dscpOutS: dscpOut === null ? 'not reported' : dscpName(dscpOut), qosChanged,
+      ttl: a.ttl, ttlExpired: a.ttlWhy, dscpIn: a.tosIn, dscpOut, dscpInS: dscpName(a.tosIn), dscpOutS: dscpOut === null ? 'not reported' : dscpName(dscpOut), qosChanged, qosVerdict,
       pkts: a.pkts, bytes: a.bytes, firstSeen: a.t0, lastSeen: a.t1, linkMs, cumMs,
       policy: ctx.policyOf?.(a.exporter, a.outIf) ?? null, obs
     });
@@ -266,6 +319,14 @@ function markingOf(recs: FlowRecord[], direction: 'forward' | 'reverse', ctx: Ho
   const values = [...by].map(([dscp, e]) => ({ dscp, name: dscpName(dscp), pkts: Math.max(...[...e.per.values()].map(v => v.pkts)), bytes: Math.max(...[...e.per.values()].map(v => v.bytes)), where: [...e.where].slice(0, 6) }))
     .sort((a, b) => b.pkts - a.pkts);
   return { direction, values };
+}
+
+/** The one verdict that stands for a stream: an unexplained change outweighs an unknown one, which outweighs one a policy explains. */
+function streamVerdict(hops: HopView[], marking: Marking[]): StreamDetail['qosVerdict'] {
+  const vs = hops.map(h => h.qosVerdict).filter((v): v is QosVerdict => !!v);
+  for (const k of ['unexplained', 'unknown', 'policy'] as const) { const v = vs.find(x => x.kind === k); if (v) return v; }
+  if (marking.length) return { kind: 'mixed', text: 'The packets of this stream carry more than one DSCP value; no device re-marked them.' };
+  return null;
 }
 
 /** Works out the path a stream took from the flow records reported by each exporter. */
@@ -290,7 +351,7 @@ export function analyzeStream(skey: string, recs: (FlowRecord & { primary?: bool
     skey, initiator: { ip: first.srcIp, port: first.sport }, responder: { ip: first.dstIp, port: first.dport },
     proto: first.proto, protoName: protoName(first.proto), app: appName(first.proto, first.sport, first.dport), appPort: service(first.proto, first.sport, first.dport).port,
     t0: Math.min(...recs.map(r => r.ts0)), t1: Math.max(...recs.map(r => r.ts1)),
-    forward, reverse, qosChanged: all.some(h => h.qosChanged || h.obs.some(o => o.kind === 'remark')) || marking.length > 0, marking,
+    forward, reverse, qosChanged: all.some(h => h.qosChanged || h.obs.some(o => o.kind === 'remark')) || marking.length > 0, qosVerdict: streamVerdict(all, marking), marking,
     ttlExpired: all.some(h => h.ttlExpired !== null),
     totals: { fwdBytes: sum(fwdRecs, 'bytes'), revBytes: sum(revRecs, 'bytes'), fwdPkts: sum(fwdRecs, 'pkts'), revPkts: sum(revRecs, 'pkts') },
     note, multicast: mcast ? { group: first.dstIp, source: first.srcIp } : null

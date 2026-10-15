@@ -26,7 +26,7 @@ export interface InterfaceView {
   /** Policy applied to incoming traffic; `policy` is the one for outgoing traffic. */
   policyIn: string | null;
   ifType: number; portMode: string; vlan: number; voiceVlan: number; vlanList: string;
-  classes: { cls: string; queue: string | null; dscps: number[]; bw: string | null }[];
+  classes: { cls: string; queue: string | null; dscps: number[]; bw: string | null; matched: number[]; sets: { dscp: number | null; cos: number | null; precedence: number | null; table: boolean } | null }[];
 }
 
 export function guessRole(descr: string, name: string, objectId = ''): string {
@@ -106,11 +106,11 @@ export class DeviceService {
 
   interfaces(devId: number): InterfaceView[] {
     const ifs = this.cdb.db.prepare('SELECT * FROM interfaces WHERE dev_id = ? ORDER BY if_index').all(devId) as unknown as { dev_id: number; if_index: number; name: string; descr: string | null; alias: string | null; speed_mbps: number; oper_status: number; policy: string | null; policy_in: string | null; if_type: number; port_mode: string; vlan: number; voice_vlan: number; vlan_list: string }[];
-    const cls = this.cdb.db.prepare('SELECT * FROM class_defs WHERE dev_id = ? ORDER BY if_index, rowid').all(devId) as unknown as { if_index: number; cls: string; queue: string | null; dscps: string; bw: string | null }[];
+    const cls = this.cdb.db.prepare('SELECT * FROM class_defs WHERE dev_id = ? ORDER BY if_index, rowid').all(devId) as unknown as { if_index: number; cls: string; queue: string | null; dscps: string; bw: string | null; matched: string; sets: string | null }[];
     return ifs.map(i => ({
       devId, ifIndex: i.if_index, name: i.name, descr: i.descr ?? '', alias: i.alias ?? '', speedMbps: i.speed_mbps, oper: i.oper_status, policy: i.policy, policyIn: i.policy_in, direction: i.policy ? 'output' : null,
       ifType: i.if_type, portMode: i.port_mode, vlan: i.vlan, voiceVlan: i.voice_vlan, vlanList: i.vlan_list,
-      classes: cls.filter(c => c.if_index === i.if_index).map(c => ({ cls: c.cls, queue: c.queue, dscps: JSON.parse(c.dscps) as number[], bw: c.bw }))
+      classes: cls.filter(c => c.if_index === i.if_index).map(c => ({ cls: c.cls, queue: c.queue, dscps: JSON.parse(c.dscps) as number[], bw: c.bw, matched: JSON.parse(c.matched || '[]') as number[], sets: c.sets ? JSON.parse(c.sets) : null }))
     }));
   }
 
@@ -145,9 +145,9 @@ export class DeviceService {
         for (const c of q.classes) {
           const label = classLabel(q, c.name);
           const key = `${q.ifIndex}/${label}`; keep.add(key);
-          db.prepare(`INSERT INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)
-            ON CONFLICT(dev_id, if_index, cls) DO UPDATE SET queue=excluded.queue, bw=excluded.bw`)
-            .run(id, q.ifIndex, label, null, JSON.stringify(guessDscps(c.name)), c.bandwidth);
+          db.prepare(`INSERT INTO class_defs(dev_id, if_index, cls, queue, dscps, bw, matched, sets) VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(dev_id, if_index, cls) DO UPDATE SET queue=excluded.queue, bw=excluded.bw, matched=excluded.matched, sets=excluded.sets`)
+            .run(id, q.ifIndex, label, null, JSON.stringify(guessDscps(c.name)), c.bandwidth, JSON.stringify(c.matched), c.sets ? JSON.stringify(c.sets) : null);
         }
       }
       for (const r of db.prepare('SELECT if_index, cls FROM class_defs WHERE dev_id = ?').all(id) as unknown as { if_index: number; cls: string }[]) {
