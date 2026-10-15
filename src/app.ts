@@ -24,6 +24,7 @@ import { WebServer } from './server/http.js';
 import type { Resolver } from './query/tokens.js';
 import { SamlState } from './auth/saml/saml.js';
 import { registerRoutes } from './routes/index.js';
+import { describeVersion } from './buildinfo.js';
 
 export const VERSION = '0.1.0';
 
@@ -210,7 +211,7 @@ export class App {
     every(3600_000, () => this.auth.sweep());
     every(6 * 3600_000, () => { const a = this.certs.status().active; if (a && a.daysLeft < 30) this.log.warn('cert', `The HTTPS certificate expires in ${a.daysLeft} days`); });
     void this.store.maintain(this.settings.get('retention')).catch(() => undefined);
-    this.log.info('app', `FlowScope ${VERSION} started. Web: ${this.ports.https ? 'https://:' + this.ports.https : ''} ${this.ports.http ? 'http://:' + this.ports.http : ''}; flow ports: ${this.collector.boundPorts.join(', ')}; data: ${cfg.dataDir}`);
+    this.log.info('app', `FlowScope ${describeVersion(VERSION)} started. Web: ${this.ports.https ? 'https://:' + this.ports.https : ''} ${this.ports.http ? 'http://:' + this.ports.http : ''}; flow ports: ${this.collector.boundPorts.join(', ')}; data: ${cfg.dataDir}`);
   }
 
   async stop(): Promise<void> {

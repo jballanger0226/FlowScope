@@ -122,7 +122,7 @@ All settings are environment variables.
 | `FLOWSCOPE_KEEP_DATA_PERMS` | off | `1` stops FlowScope from removing group and other access from the data folder and `config.db` at start-up (Unix) |
 | `FLOWSCOPE_SCRYPT_LOG2N` | `17` | Cost of new password hashes, as a power of two (4 to 18). The default takes about half a second and 128 MiB per hash, two at a time; lower it on very small machines |
 
-Other commands: `flowscope reset-password <user>`, `flowscope healthcheck`, `flowscope version`.
+Other commands: `flowscope reset-password <user>`, `flowscope healthcheck`, `flowscope version` (prints the version and the git revision it was built from; see [Which version is running](docs/deployment.md#which-version-is-running)).
 
 ## Storage
 

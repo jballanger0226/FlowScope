@@ -2,7 +2,7 @@
 
 export interface Caps { flows: boolean; links: boolean; reports: boolean; storage: boolean; devices: boolean; storageEdit: boolean; admin: boolean }
 export interface Me { username: string; role: 'ro' | 'snmp' | 'admin'; source: string; csrf: string | null; mustChange: boolean; caps: Caps; collect: { flow: boolean; snmp: boolean; flowAt: number; snmpAt: number }; demo: boolean; idleMinutes: number }
-export interface Status { version: string; uptimeSec: number; demo: boolean; collect: Me['collect']; collecting: boolean; flow: { packets: number; records: number; errors: number; dropped: number; exporters: number }; snmp: { devices: number; ok: number; failing: number; paused: number }; storeNote: string | null }
+export interface Status { version: string; revision: string; uptimeSec: number; demo: boolean; collect: Me['collect']; collecting: boolean; flow: { packets: number; records: number; errors: number; dropped: number; exporters: number }; snmp: { devices: number; ok: number; failing: number; paused: number }; storeNote: string | null }
 
 export type View = 'explorer' | 'links' | 'devices' | 'storage' | 'reports' | 'admin' | 'account';
 

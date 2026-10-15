@@ -315,6 +315,18 @@ For a machine where you do not want containers:
 
 These need Node.js 22.13 or newer. Step-by-step Windows instructions, including how to avoid the `Could not read package.json` error you get when you run `npm` in the wrong folder after unzipping a download, are in the README under "Getting the files" and "Windows".
 
+## Which version is running
+
+Every build records the git commit it was made from. Any of these shows it:
+
+* **Web console:** Admin, System, "This installation" lists Version, Revision (the commit) and when it was built.
+* **Command line:** `flowscope version` prints, for example, `0.1.0 (revision a1b2c3d)`. In a Docker container: `docker exec flowscope node dist/src/cli.js version`. In a Proxmox container: `flowscope-ctl version`. On a plain Linux or macOS install, run `node dist/src/cli.js version` in the install folder (`/opt/flowscope` on Linux).
+* **Log:** the start-up line, `FlowScope 0.1.0 (revision a1b2c3d) started.` (`docker logs flowscope`, `flowscope-ctl logs`).
+* **API:** `GET /api/status` returns `version` and `revision` (short), and `GET /api/admin/system` the full commit and build time.
+* **Docker image, without starting it:** `docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' <image or container>`. Images published by this repository's workflow carry the commit; an image you build yourself gets it with `docker build --build-arg GIT_SHA=$(git rev-parse HEAD) .` (otherwise it reads `unknown`).
+
+Compare the revision with the commit list on GitHub (`https://github.com/jballanger0226/flowscope/commit/<revision>`). A revision ending in `-dirty` was built from a checkout with uncommitted changes; `unknown` means the build had no git information (a source tarball built by hand: set `FLOWSCOPE_REVISION=<commit>` when you run `npm run build`).
+
 ## After installing
 
 1. Open the web console, sign in as `admin` and change the password (or create your own administrator).

@@ -10,10 +10,15 @@ COPY tsconfig.*.json ./
 COPY tools ./tools
 COPY src ./src
 COPY web ./web
-RUN node tools/build.mjs && npm prune --omit=dev
+# The commit this image is built from (CI passes the commit; a local build can pass --build-arg GIT_SHA=$(git rev-parse HEAD)).
+# tools/build.mjs records it in the build, so `flowscope version` and Admin > System show it.
+ARG GIT_SHA=unknown
+RUN FLOWSCOPE_REVISION="$GIT_SHA" node tools/build.mjs && npm prune --omit=dev
 
 FROM node:22-slim
-LABEL org.opencontainers.image.title="FlowScope" \
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.revision="$GIT_SHA" \
+      org.opencontainers.image.title="FlowScope" \
       org.opencontainers.image.description="NetFlow / IPFIX collector with SNMP link and QoS monitoring" \
       org.opencontainers.image.source="https://github.com/jballanger0226/flowscope" \
       org.opencontainers.image.licenses="MIT"

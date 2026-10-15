@@ -29,7 +29,7 @@ function openTab(): void {
 
 /* ------------------------------------------------------------------ data collection */
 
-interface Sys { version: string; node: string; platform: string; os: string; container: boolean; dataDir: string; freeBytes: number | null; ports: { https?: number; http?: number }; flowPorts: number[]; tls: string; store: { backend: string; bytesOnDisk: number }; uptimeSec: number; memoryMb: number; demo: boolean }
+interface Sys { version: string; revision: string; builtAt: string | null; node: string; platform: string; os: string; container: boolean; dataDir: string; freeBytes: number | null; ports: { https?: number; http?: number }; flowPorts: number[]; tls: string; store: { backend: string; bytesOnDisk: number }; uptimeSec: number; memoryMb: number; demo: boolean }
 let sys: Sys | null = null; let col = { flow: true, snmp: true, flowAt: 0, snmpAt: 0 }; let colErr = ''; let confirming: '' | 'flow' | 'snmp' = ''; let colBusy = false; let colMsg = '';
 
 async function loadCollect(): Promise<void> {
@@ -64,7 +64,7 @@ function collectTab(): VNode {
         : btn(r.on ? `Turn off ${r.name.toLowerCase()}` : `Turn on ${r.name.toLowerCase()}`, { kind: r.on ? 'warn' : 'primary', disabled: colBusy, onclick: () => { if (r.on) { confirming = r.k; redraw(); } else void setCollect(r.k, true); } })))),
     msg(colMsg, colMsg.includes('turned') ? 'ok' : 'bad'),
     h('div', { class: 'panel col', style: 'gap:8px' }, h('h3', null, 'This installation'),
-      kv([['Version', sys.version], ['Running for', dur(sys.uptimeSec * 1000)], ['Platform', `${sys.platform} (${sys.os})${sys.container ? ', in a container' : ''}`], ['Node.js', sys.node], ['Memory in use', `${sys.memoryMb} MB`],
+      kv([['Version', sys.version], ['Revision', sys.revision], ['Built', sys.builtAt ? new Date(sys.builtAt).toLocaleString() : 'unknown'], ['Running for', dur(sys.uptimeSec * 1000)], ['Platform', `${sys.platform} (${sys.os})${sys.container ? ', in a container' : ''}`], ['Node.js', sys.node], ['Memory in use', `${sys.memoryMb} MB`],
         ['Data folder', sys.dataDir], ['Free disk space', sys.freeBytes === null ? 'unknown' : bytes(sys.freeBytes)], ['Store', `${sys.store.backend}, ${bytes(sys.store.bytesOnDisk)} used`],
         ['Web ports', [sys.ports.https ? 'HTTPS ' + sys.ports.https : '', sys.ports.http ? 'HTTP ' + sys.ports.http : ''].filter(Boolean).join(' · ') || '—'], ['Flow ports (UDP)', sys.flowPorts.join(', ') || 'none open']])));
 }

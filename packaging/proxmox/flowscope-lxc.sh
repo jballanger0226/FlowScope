@@ -68,6 +68,11 @@ push_and_install() {
   pct push "$id" "$here/install.sh" /root/flowscope-install.sh --perms 755
   say "Installing inside container $id (downloads Node.js and the npm packages; takes a few minutes)"
   local env=(FLOWSCOPE_SRC=/root/flowscope-src.tgz)
+  local rev; rev="$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)"
+  if [ -n "$rev" ]; then
+    [ -n "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ] && rev="$rev-dirty"
+    env+=("FLOWSCOPE_REVISION=$rev")
+  fi
   [ -n "$pw" ] && env+=("FLOWSCOPE_ADMIN_PASSWORD=$pw")
   [ -n "${STORAGE_BACKEND:-}" ] && env+=("FLOWSCOPE_STORAGE=$STORAGE_BACKEND")
   local args=(); [ "$mode" = update ] && args=(--update)

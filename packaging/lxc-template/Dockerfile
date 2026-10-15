@@ -48,7 +48,9 @@ RUN if [ "$STORAGE_BACKEND" = clickhouse ]; then \
 
 # FlowScope itself. FLOWSCOPE_TEMPLATE_BUILD keeps a password out of the template; the first-boot service makes one per container.
 COPY . /tmp/flowscope-src
-RUN FLOWSCOPE_TEMPLATE_BUILD=1 FLOWSCOPE_STORAGE=$STORAGE_BACKEND FLOWSCOPE_NODE=system FLOWSCOPE_SKIP_APT=1 FLOWSCOPE_SKIP_SYSTEMD=1 FLOWSCOPE_LXC=1 \
+# the commit the template is built from (build.sh passes it; the source copy has no .git folder)
+ARG GIT_SHA=unknown
+RUN FLOWSCOPE_REVISION=$GIT_SHA FLOWSCOPE_TEMPLATE_BUILD=1 FLOWSCOPE_STORAGE=$STORAGE_BACKEND FLOWSCOPE_NODE=system FLOWSCOPE_SKIP_APT=1 FLOWSCOPE_SKIP_SYSTEMD=1 FLOWSCOPE_LXC=1 \
     FLOWSCOPE_SRC=/tmp/flowscope-src bash /tmp/flowscope-src/packaging/proxmox/install.sh \
  && rm -rf /tmp/flowscope-src /root/.npm
 
