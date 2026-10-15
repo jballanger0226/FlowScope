@@ -422,7 +422,8 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
 
 function streamsPanel(dev: Dev, itf: Iface): VNode {
   return h('div', { class: 'col', style: 'gap:8px' },
-    h('b', null, `Streams leaving ${dev.name} · ${itf.name}`),
+    h('div', { class: 'row', style: 'justify-content:space-between' }, h('b', null, `Streams leaving ${dev.name} · ${itf.name}`),
+      btn('All flows through this port', { small: true, kind: 'ghost', title: 'List the busiest flows entering or leaving this port, 25 to 500 of them', onclick: () => go('ports', { dev: dev.id, if: itf.ifIndex }) })),
     streamsLoading && !streams.length ? spinner('Looking for streams…') : null,
     !streamsLoading && !streams.length ? h('span', { class: 'dim' }, 'No sampled streams leave through this interface in the current data.') : null,
     h('div', { class: 'cards' }, streams.map(x => h('button', { key: x.id, type: 'button', class: 'cardbtn', onclick: () => go('explorer', { s: x.id, q: `ip:${x.srcIp} ip:${x.dstIp}`, range: '24h' }) },

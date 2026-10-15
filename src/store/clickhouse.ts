@@ -175,6 +175,14 @@ function recordPred(c: Cond, t: Cm, local?: readonly string[]): string {
     case 'outif':
       if (!t.outIf) return '1';
       return c.ips.length ? `(${t.exporter} IN (${c.ips.map(S).join(',')}) AND ${t.outIf} = ${N(c.ifIndex)})` : '0';
+    case 'ifport': {
+      if (!c.ips.length) return '0';
+      const exp = `${t.exporter} IN (${c.ips.map(S).join(',')})`;
+      if (!c.ifIndex || !t.outIf) return exp;
+      if (c.dir === 'in') return `(${exp} AND ${t.inIf} = ${N(c.ifIndex)})`;
+      if (c.dir === 'out') return `(${exp} AND ${t.outIf} = ${N(c.ifIndex)})`;
+      return `(${exp} AND (${t.inIf} = ${N(c.ifIndex)} OR ${t.outIf} = ${N(c.ifIndex)}))`;
+    }
     case 'qos': return '1';
     case 'ttl': {
       if (!t.rawTtl) throw new Error('The TTL filter needs flow records. Pick the raw data tier.');
