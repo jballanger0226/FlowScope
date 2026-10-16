@@ -186,6 +186,18 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, interfaces, names, down, truncated };
 }
 
+/** The last host to report each group on each interface (igmpCacheLastReporter), read on its own so it can be sampled often. */
+export async function readIgmpReporters(c: SnmpClient): Promise<{ group: string; ifIndex: number; reporter: string }[]> {
+  const rep = await col(c, `${IGMP_CACHE}.4`);
+  const out: { group: string; ifIndex: number; reporter: string }[] = [];
+  for (const [idx, v] of rep) {
+    const p = idx.split('.'); if (p.length < 5) continue;
+    const r = ipOf(v); if (!r || r === '0.0.0.0') continue;
+    out.push({ group: ip4(p, 0), ifIndex: Number(p[4]), reporter: r });
+  }
+  return out;
+}
+
 /** ifName (or ifDescr) of each interface the multicast tables refer to, read with a few GETs. A device that will not answer just gives no names. */
 export async function interfaceNames(c: SnmpClient, ifIndexes: number[]): Promise<Record<number, string>> {
   const want = [...new Set(ifIndexes.filter(n => Number.isInteger(n) && n > 0))].slice(0, 400);

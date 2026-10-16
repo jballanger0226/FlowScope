@@ -115,3 +115,33 @@ test('Multicast API: device list, one device\'s routes with names, and the plan 
     assert.equal(ud.json.plan, null);
   });
 });
+
+test('Multicast members: reporters are collected over time and cleared when they leave', { timeout: 60_000 }, async () => {
+  await withApp(async (app, base, admin) => {
+    const now = Date.now(), MIN = 60_000;
+    const credId = app.creds.create({ name: 'test', version: 'v2c', community: 'public' }, true);
+    const sw = Number(app.cdb.db.prepare('INSERT INTO devices(name, ip, port, cred_id, interval_sec, polling, added_at, role, last_poll, last_ok, last_error) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run('core-sw', '10.255.0.1', 161, credId, 3600, 1, now - HOUR, 'switch', now, now, null).lastInsertRowid);
+    app.devices.invalidate();
+    app.devices.saveMulticast(sw, (await readMulticast(agent, now))!);
+    const G = '224.0.1.129', V = 104;
+    const ips = () => app.devices.mcastMembers(sw).map(m => m.ip).sort();
+    app.devices.noteIgmp(sw, [{ group: G, ifIndex: V, reporter: '10.1.1.1' }], now - 20 * MIN);
+    app.devices.noteIgmp(sw, [{ group: G, ifIndex: V, reporter: '10.1.1.2' }], now - 10 * MIN);
+    assert.deepEqual(ips(), ['10.1.1.1', '10.1.1.2'], 'each reporter is kept, not just the last one');
+    const dev = await call(base, admin.cookie, '/api/multicast/device?id=' + sw);
+    const out = dev.json.routes.find((x: any) => x.group === G && x.out.some((o: any) => o.ifIndex === V)).out.find((o: any) => o.ifIndex === V);
+    assert.deepEqual(out.members.map((m: any) => m.ip).sort(), ['10.1.1.1', '10.1.1.2']);
+    assert.ok(dev.json.hosts['10.1.1.1'] !== undefined, 'members are looked up in host tracking');
+    // a host not heard from for 30 minutes and not on the network is dropped; the one that just reported stays
+    app.devices.noteIgmp(sw, [{ group: G, ifIndex: V, reporter: '10.1.1.2' }], now + 25 * MIN);
+    assert.deepEqual(ips(), ['10.1.1.2']);
+    // a quiet host that host tracking still sees is kept
+    app.devices.noteIgmp(sw, [{ group: G, ifIndex: V, reporter: '10.1.1.3' }], now + 26 * MIN);
+    app.cdb.db.prepare('INSERT INTO arp(dev_id, ip, mac, if_index, last_seen) VALUES (?,?,?,?,?)').run(sw, '10.1.1.2', 'aa:bb:cc:00:00:02', V, now + 70 * MIN);
+    app.devices.noteIgmp(sw, [{ group: G, ifIndex: V, reporter: '10.1.1.3' }], now + 80 * MIN);
+    assert.deepEqual(ips(), ['10.1.1.2', '10.1.1.3'], 'still on the network, so still counted');
+    // nothing from 12 hours, or the group gone from the cache, clears them
+    app.devices.noteIgmp(sw, [], now + 81 * MIN);
+    assert.deepEqual(ips(), [], 'the group is no longer in the router\'s cache');
+  });
+});

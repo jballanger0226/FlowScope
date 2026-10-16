@@ -266,6 +266,10 @@ const MIGRATIONS: string[] = [
   `
   -- names of the interfaces that are not listed (loopbacks, VLAN and tunnel interfaces on a switch), so a flow, a route or a host on one of them is not shown as ifNN
   CREATE TABLE interface_names (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (dev_id, if_index)) WITHOUT ROWID;
+  `,
+  `
+  -- hosts seen reporting membership of a multicast group on a VLAN interface, collected over time from the IGMP cache (it only holds the last reporter)
+  CREATE TABLE mcast_members (dev_id INTEGER NOT NULL, grp TEXT NOT NULL, if_index INTEGER NOT NULL, ip TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, grp, if_index, ip)) WITHOUT ROWID;
   `
 
 ];

@@ -12,7 +12,8 @@ import { ago, bps, num, stamp } from '../util.js';
 interface DevSummary { id: number; name: string; ip: string; role: string; readAt: number; stale: boolean; source: 'cisco' | 'standard'; routes: number; groups: number; receivers: number; forwarding: number; truncated: boolean }
 interface HostAt { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null }
 interface Join { reporter: string | null; expirySec: number | null; self: boolean }
-interface Out { ifIndex: number; name: string; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
+interface Member { ip: string; ageSec: number; sinceSec: number }
+interface Out { ifIndex: number; name: string; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
 interface Route {
   group: string; source: string; sharedTree: boolean; inIf: string | null; upstream: string | null; rp: string | null; bps: number | null; pkts: number | null; flags: string[]; protocol: number | null; expirySec: number | null; out: Out[];
 }
@@ -27,6 +28,7 @@ let devs: DevSummary[] | null = null; let devError = '';
 let devId = 0; let detail: Detail | null = null; let detailError = ''; let loading = false;
 let query = ''; let onlyForwarding = false; let hideIdle = false;
 const open = new Set<string>();            // routes whose details are shown (group|source)
+const openHosts = new Set<string>();       // outgoing interfaces whose host list is open
 const openGroups = new Set<string>();      // groups whose sources are listed
 const closedWhileSearching = new Set<string>();
 const SIZES = [25, 50, 100, 250, 500];
@@ -59,14 +61,14 @@ async function loadDetail(): Promise<void> {
   if (my === seq) { loading = false; redraw(); }
 }
 
-function pickDevice(v: string): void { page = 0; devId = Number(v); detail = null; open.clear(); openGroups.clear(); closedWhileSearching.clear(); void loadDetail(); }
+function pickDevice(v: string): void { page = 0; devId = Number(v); detail = null; open.clear(); openGroups.clear(); openHosts.clear(); closedWhileSearching.clear(); void loadDetail(); }
 
 const rate = (r: Route): string => (r.bps === null ? '—' : r.bps === 0 ? '0' : bps(r.bps));
 const sec = (s: number | null): string => (s === null ? '—' : s < 90 ? `${s}s` : `${Math.round(s / 60)}m`);
 
 function matches(r: Route, q: string): boolean {
   if (!q) return true;
-  const hay = [r.group, r.source === '0.0.0.0' ? '* shared' : r.source, at(r.source), r.inIf ?? '', r.rp ?? '', r.upstream ?? '', ...r.out.map(o => o.name), ...r.out.flatMap(o => o.joins.flatMap(j => [j.reporter ?? '', at(j.reporter)]))].join(' ').toLowerCase();
+  const hay = [r.group, r.source === '0.0.0.0' ? '* shared' : r.source, at(r.source), r.inIf ?? '', r.rp ?? '', r.upstream ?? '', ...r.out.map(o => o.name), ...r.out.flatMap(o => [...o.joins.flatMap(j => [j.reporter ?? '', at(j.reporter)]), ...(o.members ?? []).flatMap(m => [m.ip, at(m.ip)])])].join(' ').toLowerCase();
   return q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t));
 }
 
@@ -76,6 +78,34 @@ function outChips(r: Route): VNode {
   const fwd = r.out.filter(o => o.forwarding), pruned = r.out.length - fwd.length;
   if (!r.out.length) return h('span', { class: 'dim', title: 'The router has the route but nothing downstream has asked for the group, so it is not sent anywhere.' }, 'nowhere');
   return h('span', { class: 'mono', style: 'font-size:12px' }, fwd.slice(0, 4).map(o => o.name).join(', '), fwd.length > 4 ? ` +${fwd.length - 4}` : '', pruned ? h('span', { class: 'dim', title: 'Pruned: in the list but no one downstream wants the group' }, ` (${pruned} pruned)`) : null);
+}
+
+const ageText = (s: number): string => (s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129_600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`);
+
+/** One outgoing interface. The hosts that joined are every reporter seen over time, so a VLAN with many receivers is a collapsible list. */
+function oilRow(r: Route, o: Out): VNode {
+  const hk = `${keyOf(r)}|${o.ifIndex}`, members = o.members ?? [], many = members.length > 1, on = openHosts.has(hk);
+  const joined = (): VNode | string => {
+    if (o.loopback && !o.joins.some(j => j.reporter)) return 'the router joined the group itself';
+    if (many) return h('button', { type: 'button', class: 'rowbtn', 'aria-expanded': on, title: 'Hosts seen reporting this group on this interface. The router remembers only the last reporter, so FlowScope collects them over time.', onclick: () => toggleSet(openHosts, hk) }, `${on ? '▾' : '▸'} ${num(members.length)} hosts`);
+    if (o.joins.length) return o.joins.slice(0, 4).map(j => (j.self ? 'this router' : (j.reporter ?? '?') + (at(j.reporter) ? ` on ${at(j.reporter)}` : '')) + (j.expirySec !== null ? ` (${sec(j.expirySec)})` : '')).join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : '');
+    return h('span', { class: 'dim' }, o.neighbor ? 'via the neighbour' : 'none seen');
+  };
+  return h('div', { key: o.ifIndex },
+    h('div', { class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, o.name),
+        h('span', null, o.linkDown ? chip('link down', 'bad', 'The route lists this interface' + (o.forwarding ? ' as forwarding' : '') + ', but the port is not up, so nothing is arriving over it') : o.forwarding ? chip('forwarding', 'ok') : chip('pruned', 'default', 'Listed, but no one downstream wants the group')),
+        h('span', { class: 'mono dim', style: 'font-size:12px' }, o.neighbor ? `PIM neighbour ${o.neighbor}` : o.loopback ? 'this router (loopback)' : o.joins.length ? 'hosts on this segment' : '—'),
+        h('span', { class: 'mono', style: 'font-size:12px' }, joined()),
+        h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts))),
+    many && on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
+      h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 120px 110px;--w:560px' },
+        h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Last reported', 'Known for'].map(t => h('span', null, t))),
+        members.map(m => h('div', { key: m.ip, class: 'tr' },
+          h('span', { class: 'mono', style: 'font-size:12px' }, m.ip),
+          h('span', { class: 'mono', style: 'font-size:12px' }, at(m.ip) || h('span', { class: 'dim' }, 'not located')),
+          h('span', { style: 'font-size:12px' }, m.ageSec < 150 ? chip('now', 'ok', 'Reported in the last two minutes') : h('span', { class: 'dim' }, ageText(m.ageSec))),
+          h('span', { class: 'dim', style: 'font-size:12px' }, ageText(m.sinceSec).replace(' ago', ''))))))) : null);
 }
 
 function expanded(r: Route): VNode {
@@ -91,12 +121,7 @@ function expanded(r: Route): VNode {
       r.flags.length ? h('span', null, 'Flags: ', r.flags.join(', ')) : null),
     r.out.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:780px` },
       h('div', { class: 'tr head' }, ...['Sent out of', 'State', 'Reaches', 'Hosts that joined (IGMP)', 'Packets'].map(t => h('span', null, t))),
-      r.out.map(o => h('div', { key: o.ifIndex, class: 'tr' },
-        h('span', { class: 'mono', style: 'font-size:12px' }, o.name),
-        h('span', null, o.linkDown ? chip('link down', 'bad', 'The route lists this interface' + (o.forwarding ? ' as forwarding' : '') + ', but the port is not up, so nothing is arriving over it') : o.forwarding ? chip('forwarding', 'ok') : chip('pruned', 'default', 'Listed, but no one downstream wants the group')),
-        h('span', { class: 'mono dim', style: 'font-size:12px' }, o.neighbor ? `PIM neighbour ${o.neighbor}` : o.loopback ? 'this router (loopback)' : o.joins.length ? 'hosts on this segment' : '—'),
-        h('span', { class: 'mono', style: 'font-size:12px' }, o.loopback && !o.joins.some(j => j.reporter) ? 'the router joined the group itself' : o.joins.length ? o.joins.slice(0, 4).map(j => (j.self ? 'this router' : (j.reporter ?? '?') + (at(j.reporter) ? ` on ${at(j.reporter)}` : '')) + (j.expirySec !== null ? ` (${sec(j.expirySec)})` : '')).join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : '') : h('span', { class: 'dim' }, o.neighbor ? 'via the neighbour' : 'none seen')),
-        h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts)))))) : note('Nothing is joined downstream of this router, so it forwards this group nowhere.', 'info'));
+      r.out.map(o => oilRow(r, o)))) : note('Nothing is joined downstream of this router, so it forwards this group nowhere.', 'info'));
 }
 
 interface Grp { group: string; routes: Route[] }

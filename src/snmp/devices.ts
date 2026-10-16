@@ -210,6 +210,29 @@ export class DeviceService {
     return r ? JSON.parse(r.data) as T : null;
   }
 
+  /**
+   * Hosts that reported membership of a group, kept over time. The IGMP cache holds one reporter per group and VLAN, so each read adds
+   * whoever reported last. A group that has left the cache drops all its hosts. A host not heard from for 30 minutes goes unless
+   * host tracking still has it on the network (ARP), and none is kept past 12 hours.
+   */
+  noteIgmp(devId: number, rows: { group: string; ifIndex: number; reporter: string }[], now: number, complete = true): void {
+    const db = this.cdb.db;
+    this.cdb.tx(() => {
+      const up = db.prepare('INSERT INTO mcast_members(dev_id, grp, if_index, ip, first_seen, last_seen) VALUES (?,?,?,?,?,?) ON CONFLICT(dev_id, grp, if_index, ip) DO UPDATE SET last_seen = excluded.last_seen');
+      const mine = new Set(((db.prepare('SELECT ip FROM device_ips WHERE dev_id = ?').all(devId) as unknown as { ip: string }[]).map(r => r.ip)));
+      const live = new Set<string>();
+      for (const r of rows) { live.add(r.group + '|' + r.ifIndex); if (!mine.has(r.reporter)) up.run(devId, r.group, r.ifIndex, r.reporter, now, now); }
+      if (complete) for (const m of db.prepare('SELECT DISTINCT grp, if_index FROM mcast_members WHERE dev_id = ?').all(devId) as unknown as { grp: string; if_index: number }[]) {
+        if (!live.has(m.grp + '|' + m.if_index)) db.prepare('DELETE FROM mcast_members WHERE dev_id = ? AND grp = ? AND if_index = ?').run(devId, m.grp, m.if_index);
+      }
+      db.prepare('DELETE FROM mcast_members WHERE dev_id = ? AND (last_seen < ? OR (last_seen < ? AND ip NOT IN (SELECT ip FROM arp WHERE last_seen >= ?)))').run(devId, now - 12 * 3600_000, now - 30 * 60_000, now - 30 * 60_000);
+    });
+  }
+  mcastMembers(devId: number): { group: string; ifIndex: number; ip: string; firstSeen: number; lastSeen: number }[] {
+    return (this.cdb.db.prepare('SELECT grp, if_index, ip, first_seen, last_seen FROM mcast_members WHERE dev_id = ? ORDER BY last_seen DESC').all(devId) as unknown as { grp: string; if_index: number; ip: string; first_seen: number; last_seen: number }[])
+      .map(r => ({ group: r.grp, ifIndex: r.if_index, ip: r.ip, firstSeen: r.first_seen, lastSeen: r.last_seen }));
+  }
+
   multicast(id: number): Multicast | null {
     const r = this.cdb.db.prepare('SELECT data FROM device_mcast WHERE dev_id = ?').get(id) as { data: string } | undefined;
     return r ? JSON.parse(r.data) as Multicast : null;
@@ -343,7 +366,7 @@ export class DeviceService {
     const d = this.row(id);
     if (!d) throw new DeviceError('No such device', 404);
     this.cdb.tx(() => {
-      for (const t of ['interfaces', 'interface_names', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
+      for (const t of ['interfaces', 'interface_names', 'mcast_members', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
       this.cdb.db.prepare('UPDATE exporters SET device_id = NULL WHERE device_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_resources WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_health WHERE dev_id = ?').run(id);

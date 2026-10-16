@@ -66,8 +66,10 @@ export function registerMulticast(app: App): void {
     const ips = new Set<string>();
     for (const r of m.routes) if (r.source !== '0.0.0.0') ips.add(r.source);
     for (const r of m.receivers) if (r.lastReporter && !r.self) ips.add(r.lastReporter);
+    const members = new Map<string, { ip: string; lastSeen: number; firstSeen: number }[]>();
+    for (const x of app.devices.mcastMembers(id)) { ips.add(x.ip); const k = x.group + '|' + x.ifIndex; const a = members.get(k) ?? []; a.push({ ip: x.ip, lastSeen: x.lastSeen, firstSeen: x.firstSeen }); members.set(k, a); }
     const hosts: Record<string, { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null } | null> = {};
-    for (const ip of [...ips].slice(0, 800)) {
+    for (const ip of [...ips].slice(0, 2500)) {
       const a = app.hosts.locate(ip).attach;
       hosts[ip] = a && a.edge ? { dev: a.dev, port: a.ifName, vlan: a.vlan, confidence: a.confidence, neighbor: a.neighbor } : null;
     }
@@ -77,6 +79,7 @@ export function registerMulticast(app: App): void {
         group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
           ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null,
+          members: (members.get(r.group + '|' + o.ifIndex) ?? []).map(x => ({ ip: x.ip, ageSec: Math.max(0, Math.round((now - x.lastSeen) / 1000)), sinceSec: Math.round((now - x.firstSeen) / 1000) })),
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))
       })),

@@ -531,6 +531,8 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
       if (g % 3 === 0) receivers.push({ group, ifIndex: e9, lastReporter: `10.1.4.${20 + (g % 40)}`, expirySec: 200, self: false });
     }
     app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], truncated: false, interfaces: [{ ifIndex: e9, inOctets: null, outOctets: null, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: null, outOctets: null, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
+    // hosts collected over time from the IGMP cache: several per group on the downlink
+    for (const r of receivers) app.devices.noteIgmp(id, Array.from({ length: 6 }, (_, k) => ({ group: r.group, ifIndex: r.ifIndex, reporter: `10.1.4.${20 + ((Number(r.group.split('.')[3]) + k * 7) % 40)}` })), now, false);
   }
   if (d.name === 'dc-spine-01') {
     const m = (n: number, role: string) => ({ index: n * 1000, number: n, role, state: 'ready', level: 'ok', mac: `00:1c:73:01:0${n}:00` });
