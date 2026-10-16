@@ -60,6 +60,8 @@ export interface Multicast {
   interfaces?: McIfLoad[];
   /** Names of the interfaces the tables mention, asked of the device by ifIndex. VLAN, tunnel and loopback interfaces are not in the stored interface list, so their names come from here. */
   names?: Record<number, string>;
+  /** Interfaces the tables mention whose link is not up (ifOperStatus other than 1). A route can list a down interface as forwarding. */
+  down?: number[];
   /** The tables held more rows than were kept */
   truncated: boolean;
 }
@@ -178,8 +180,10 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
 
   if (!routes.size && !receivers.length) return null;
   const names = await interfaceNames(c, [...routes.values()].flatMap(r => [r.inIfIndex ?? 0, ...r.oifs.map(o => o.ifIndex)]).concat(receivers.map(r => r.ifIndex), pimInterfaces.map(p => p.ifIndex), neighbors.map(n => n.ifIndex), interfaces.map(i => i.ifIndex)));
+  const used = [...routes.values()].flatMap(r => r.oifs.map(o => o.ifIndex)).concat(receivers.map(r => r.ifIndex));
+  const down = await interfacesDown(c, used);
   const list = [...routes.values()].sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.source.localeCompare(b.source, undefined, { numeric: true }));
-  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, interfaces, names, truncated };
+  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, interfaces, names, down, truncated };
 }
 
 /** ifName (or ifDescr) of each interface the multicast tables refer to, read with a few GETs. A device that will not answer just gives no names. */
@@ -196,6 +200,20 @@ export async function interfaceNames(c: SnmpClient, ifIndexes: number[]): Promis
       } catch { break; }
     }
     if (want.every(n => out[n])) break;
+  }
+  return out;
+}
+
+/** Which of these interfaces are not up, read as ifOperStatus. An interface the device does not answer for is not reported. */
+export async function interfacesDown(c: SnmpClient, ifIndexes: number[]): Promise<number[]> {
+  const want = [...new Set(ifIndexes.filter(n => Number.isInteger(n) && n > 0))].slice(0, 400);
+  const col = '1.3.6.1.2.1.2.2.1.8', out: number[] = [];
+  if (!want.length || typeof c.get !== 'function') return out;
+  for (let i = 0; i < want.length; i += 40) {
+    try {
+      const r = await c.get(want.slice(i, i + 40).map(n => `${col}.${n}`));
+      for (const [oid, vb] of r) { const v = toNum(vb.value as SnmpValue); if (v !== null && v !== 1) out.push(Number(oid.slice(col.length + 1))); }
+    } catch { break; }
   }
   return out;
 }

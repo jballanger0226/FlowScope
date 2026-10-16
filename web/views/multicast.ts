@@ -12,7 +12,7 @@ import { ago, bps, num, stamp } from '../util.js';
 interface DevSummary { id: number; name: string; ip: string; role: string; readAt: number; stale: boolean; source: 'cisco' | 'standard'; routes: number; groups: number; receivers: number; forwarding: number; truncated: boolean }
 interface HostAt { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null }
 interface Join { reporter: string | null; expirySec: number | null; self: boolean }
-interface Out { ifIndex: number; name: string; forwarding: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
+interface Out { ifIndex: number; name: string; forwarding: boolean; linkDown?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
 interface Route {
   group: string; source: string; sharedTree: boolean; inIf: string | null; upstream: string | null; rp: string | null; bps: number | null; pkts: number | null; flags: string[]; protocol: number | null; expirySec: number | null; out: Out[];
 }
@@ -91,7 +91,7 @@ function expanded(r: Route): VNode {
       h('div', { class: 'tr head' }, ...['Sent out of', 'State', 'Reaches', 'Hosts that joined (IGMP)', 'Packets'].map(t => h('span', null, t))),
       r.out.map(o => h('div', { key: o.ifIndex, class: 'tr' },
         h('span', { class: 'mono', style: 'font-size:12px' }, o.name),
-        h('span', null, o.forwarding ? chip('forwarding', 'ok') : chip('pruned', 'default', 'Listed, but no one downstream wants the group')),
+        h('span', null, o.linkDown ? chip('link down', 'bad', 'The route lists this interface' + (o.forwarding ? ' as forwarding' : '') + ', but the port is not up, so nothing is arriving over it') : o.forwarding ? chip('forwarding', 'ok') : chip('pruned', 'default', 'Listed, but no one downstream wants the group')),
         h('span', { class: 'mono dim', style: 'font-size:12px' }, o.neighbor ? `PIM neighbour ${o.neighbor}` : o.joins.length ? 'hosts on this segment' : '—'),
         h('span', { class: 'mono', style: 'font-size:12px' }, o.joins.length ? o.joins.slice(0, 4).map(j => (j.self ? 'this router' : (j.reporter ?? '?') + (at(j.reporter) ? ` on ${at(j.reporter)}` : '')) + (j.expirySec !== null ? ` (${sec(j.expirySec)})` : '')).join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : '') : h('span', { class: 'dim' }, o.neighbor ? 'via the neighbour' : 'none seen')),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts)))))) : note('Nothing is joined downstream of this router, so it forwards this group nowhere.', 'info'));

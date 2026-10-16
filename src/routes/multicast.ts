@@ -55,6 +55,8 @@ export function registerMulticast(app: App): void {
     const m = app.devices.multicast(id);
     if (!m) throw new HttpError(404, 'This device has not published multicast routing state. It may not route multicast, or SNMP has not read it yet.');
     const name = namer(app, id, m);
+    const ifs = new Map(app.devices.interfaces(id).map(i => [i.ifIndex, i.oper] as const)), downSet = new Set(m.down ?? []);
+    const isDown = (ix: number): boolean => ifs.has(ix) ? ifs.get(ix) !== 1 : downSet.has(ix);
     const nbr = new Map(m.neighbors.map(n => [n.ifIndex, n.address]));
     const joins = new Map<string, typeof m.receivers>();
     for (const r of m.receivers) { const k = r.group + '|' + r.ifIndex; const a = joins.get(k) ?? []; a.push(r); joins.set(k, a); }
@@ -74,7 +76,7 @@ export function registerMulticast(app: App): void {
       routes: m.routes.map(r => ({
         group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
-          ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null,
+          ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null,
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))
       })),

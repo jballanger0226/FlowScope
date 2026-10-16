@@ -228,3 +228,10 @@ test('names of interfaces the multicast tables mention are asked of the device',
   assert.ok(asked.every(o => !o.endsWith('.0')), 'ifIndex 0 is never asked for');
   assert.deepEqual(await interfaceNames({} as SnmpClient, [78]), {}, 'a client without get gives no names');
 });
+
+test('interfaces whose link is not up are found, so a route is not shown as forwarding out of a dead port', async () => {
+  const c = { get: async (oids: string[]) => new Map(oids.map(o => [o, { oid: o, type: 2, value: (o.endsWith('.78') ? 2 : 1) as unknown as SnmpValue }])) } as unknown as SnmpClient;
+  const { interfacesDown } = await import('../src/snmp/multicast.js');
+  assert.deepEqual(await interfacesDown(c, [78, 80, 0]), [78]);
+  assert.deepEqual(await interfacesDown({} as SnmpClient, [78]), []);
+});
