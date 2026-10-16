@@ -1,6 +1,6 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
-import { redraw } from '../state.js';
+import { go, redraw } from '../state.js';
 import { btn, chip, empty, heading, note, select, spinner, stat, status as statusEl, textInput, toggle } from '../components.js';
 import { ago, bps, num, stamp } from '../util.js';
 
@@ -15,7 +15,8 @@ interface Join { reporter: string | null; expirySec: number | null; self: boolea
 interface IgmpHint { vendor: string; platform: string; command: string | null }
 interface Member { ip: string; ageSec: number; sinceSec: number }
 interface Out { ifIndex: number; name: string; pimMode?: string | null; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
-interface Rpf { inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null }
+interface RpfPeer { id: number; name: string; ifIndex: number; ifName: string; forwarding: boolean | null }
+interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null }
 interface IgmpIf { name: string; querier: string | null; who: string | null; self: boolean; version: number | null; intervalSec: number | null; upSec: number | null; expirySec: number | null; hosts: number }
 interface RpMap { range: string; rp: string; who: string | null; self: boolean; holdSec: number | null; expirySec: number | null }
 interface Route {
@@ -26,7 +27,7 @@ interface Detail {
   igmpHint?: IgmpHint;
   device: { id: number; name: string; ip: string; role: string; model?: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
   igmp?: IgmpIf[];
-  rps?: { map: RpMap[]; candidate: { range: string; rp: string; self: boolean }[] };
+  rps?: { inUse?: { rp: string; who: string | null; self: boolean; up: boolean; groups: string[]; sinceSec: number | null }[]; map: RpMap[]; candidate: { range: string; rp: string; self: boolean }[] };
   pimIssues?: { level: 'warn' | 'info'; kind: string; text: string }[];
   pim: { interfaces: { name: string; mode: string; dr: string | null }[]; neighbors: { address: string; ifName: string }[] };
   hosts?: Record<string, HostAt | null>;
@@ -51,7 +52,7 @@ export function enter(p: URLSearchParams): void {
   const d = Number(p.get('dev'));
   if (Number.isInteger(d) && d > 0 && d !== devId) { devId = d; detail = null; }
   if (p.has('q')) query = p.get('q') ?? '';
-  const g = p.get('g'); if (g) { openGroups.add(g); query = query || g; }
+  const g = p.get('g'); if (g) { openGroups.add(g); query = g; }
   void loadDevices().then(() => { if (devId) void loadDetail(); });
 }
 
@@ -155,9 +156,7 @@ function expanded(r: Route): VNode {
       h('span', null, r.sharedTree ? 'Shared tree (*,G)' : `Source ${r.source}`, !r.sharedTree && at(r.source) ? h('span', null, ' · plugged in at ', h('b', { class: 'mono' }, at(r.source))) : null),
       r.mode === 'dense' ? pimChip('dense') : r.mode === 'sparse' ? chip('PIM sparse', 'default', 'The route runs in PIM sparse mode: it is sent only where a receiver has joined.') : null,
       r.inIf ? h('span', null, 'Arrives on ', h('b', { class: 'mono' }, r.inIf)) : null,
-      r.upstream ? h('span', null, 'Upstream ', h('b', { class: 'mono' }, r.upstream), r.rpf?.who ? ` (${r.rpf.who})` : '') : null,
-      r.rpf?.route ? h('span', { title: 'Reverse path forwarding: the unicast route back to the source (or to the rendezvous point for a shared tree) decides which interface the router accepts this group on. Traffic on any other interface is dropped.' }, 'RPF route ', h('b', { class: 'mono' }, r.rpf.route), r.rpf.proto ? ` via ${r.rpf.proto}` : '') : null,
-      r.rpf?.failures ? chip(`${num(r.rpf.failures)} RPF drops`, 'warn', 'Packets for this route that arrived on an interface other than the RPF interface and were dropped. A counter since the route was created, so it shows that it happened, not that it is happening now.') : null,
+      r.rpf ? rpfLine(r.rpf, r.group) : r.upstream ? h('span', null, 'Upstream ', h('b', { class: 'mono' }, r.upstream)) : null,
       r.rp ? h('span', null, 'Rendezvous point ', h('b', { class: 'mono' }, r.rp)) : null,
       r.pkts !== null ? h('span', null, `${num(r.pkts)} packets`) : null,
       r.expirySec !== null ? h('span', null, r.expirySec === 0 ? 'route does not age out' : `route expires in ${sec(r.expirySec)}`) : null,
@@ -185,6 +184,48 @@ function routeRow(r: Route, cols: string, lead: VNode[]): VNode {
 }
 const sourceCell = (r: Route): VNode => h('span', { class: 'mono', style: 'font-size:12px' }, r.sharedTree ? h('span', { class: 'dim', title: 'Any source: the shared tree (*,G)' }, '* (any source)') : r.source, !r.sharedTree && at(r.source) ? h('span', { class: 'dim' }, ` · ${at(r.source)}`) : null);
 
+/** What is wrong with the RPF link of a route: drops, a neighbour that does not forward the group to this router, or multicast lost on the link. */
+function rpfProblems(x: Rpf | null | undefined): { key: string; text: string; title: string }[] {
+  if (!x) return [];
+  const out: { key: string; text: string; title: string }[] = [];
+  if (x.failures) out.push({ key: 'drops', text: `${num(x.failures)} RPF drops`, title: 'Packets for this route that arrived on an interface other than the RPF interface and were dropped. A counter since the route was created, so it shows that it happened, not that it is happening now.' });
+  if (x.peer && x.peer.forwarding === false) out.push({ key: 'nofwd', text: 'neighbour not forwarding', title: `${x.peer.name} does not list ${x.peer.ifName} as an outgoing interface for this group that is forwarding, so nothing is sent to this router` });
+  if (x.loss) out.push({ key: 'loss', text: 'multicast lost on link', title: 'The neighbour sends more multicast out of its end of this link than this router receives' });
+  return out;
+}
+const rpfFlags = (x: Rpf | null | undefined): VNode[] => rpfProblems(x).map(p => chip(p.text, 'warn', p.title));
+const linkBtn = (text: string, title: string, onclick: () => void): VNode => h('button', { type: 'button', class: 'lnk', title, onclick: (e: Event) => { e.stopPropagation(); onclick(); } }, text);
+/** The RPF interface and neighbour of a route, with links to the neighbour's multicast table and to the interface statistics on both switches. */
+function rpfLine(x: Rpf, group: string): VNode | null {
+  if (!x.inIf && !x.neighbor) return null;
+  const me = detail?.device;
+  return h('span', { class: 'row', style: 'gap:6px 10px;flex-wrap:wrap;align-items:center' },
+    x.inIf ? h('span', null, 'RPF interface ', me ? linkBtn(x.inIf, `Open ${x.inIf} on ${me.name} in Interfaces`, () => go('links', { dev: me.id, if: x.inIf ?? undefined })) : h('b', { class: 'mono' }, x.inIf)) : null,
+    x.neighbor ? h('span', null, 'neighbour ', h('b', { class: 'mono' }, x.neighbor), x.who ? ` (${x.who})` : '') : null,
+    x.peer ? [
+      linkBtn(`${x.peer.name} multicast table`, `Open ${group} on ${x.peer.name}`, () => go('multicast', { dev: x.peer!.id, g: group })),
+      linkBtn(`${x.peer.ifName} on ${x.peer.name}`, `Open ${x.peer.ifName} on ${x.peer.name} in Interfaces`, () => go('links', { dev: x.peer!.id, if: x.peer!.ifName }))
+    ] : null,
+    x.route ? h('span', { title: 'Reverse path forwarding: the unicast route back to the source (or to the rendezvous point for a shared tree) decides which interface the router accepts this group on. Traffic on any other interface is dropped.' }, 'via route ', h('b', { class: 'mono' }, x.route), x.proto ? ` (${x.proto})` : '') : null,
+    ...rpfFlags(x));
+}
+/** One line per distinct RPF interface and neighbour in a group. */
+function groupRpf(list: Route[], group: string): VNode | null {
+  const by = new Map<string, { x: Rpf; n: number }>();
+  for (const r of list) { if (!r.rpf) continue; const k = `${r.rpf.inIf}|${r.rpf.neighbor}`; const e = by.get(k); if (e) { e.n++; if (r.rpf.failures) e.x = { ...e.x, failures: (e.x.failures ?? 0) + r.rpf.failures }; if (r.rpf.peer?.forwarding === false && e.x.peer) e.x = { ...e.x, peer: { ...e.x.peer, forwarding: false } }; } else by.set(k, { x: { ...r.rpf }, n: 1 }); }
+  if (!by.size) return null;
+  return h('div', { class: 'col', style: 'gap:4px;margin:4px 0 8px;font-size:12.5px' }, [...by.values()].slice(0, 6).map(e => h('div', { key: e.x.inIf + '|' + e.x.neighbor, class: 'row', style: 'gap:8px;align-items:center;flex-wrap:wrap' }, rpfLine({ ...e.x, route: by.size === 1 ? e.x.route : null }, group), by.size > 1 ? h('span', { class: 'dim' }, `${num(e.n)} source${e.n === 1 ? '' : 's'}`) : null)));
+}
+
+/** One chip per kind of RPF problem across a group's routes, so a collapsed group still shows that something is wrong. */
+function flagsOf(list: Route[]): (VNode | string)[] {
+  const by = new Map<string, { p: { key: string; text: string; title: string }; n: number }>();
+  for (const r of list) for (const p of rpfProblems(r.rpf)) { const e = by.get(p.key); if (e) e.n++; else by.set(p.key, { p, n: 1 }); }
+  if (!by.size) return [];
+  const all = [...by.values()], what = all.map(e => e.p.key === 'drops' ? 'RPF drops' : e.p.text).join(', ');
+  return [' ', chip(all.length === 1 ? what : `${all.length} RPF problems`, 'warn', `${what}${list.length > 1 ? ` (open the group for which sources)` : ''}`)];
+}
+
 function groupRows(g: Grp): VNode {
   const cols = '28px minmax(120px,1fr) minmax(110px,1fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
   const list = g.routes;
@@ -202,11 +243,12 @@ function groupRows(g: Grp): VNode {
       h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾' : '▸'),
       h('span', { class: 'mono', style: 'font-weight:600' }, g.group),
       h('span', { class: 'mono', style: 'font-size:12px' }, chip(`${num(list.length)} sources`, 'default', 'Click to list the sources of this group')),
-      h('span', { class: 'mono', style: 'font-size:12px' }, arrives.slice(0, 2).join(', ') + (arrives.length > 2 ? ` +${arrives.length - 2}` : '') || '—'),
+      h('span', { class: 'mono', style: 'font-size:12px' }, arrives.slice(0, 2).join(', ') + (arrives.length > 2 ? ` +${arrives.length - 2}` : '') || '—', ...(flagsOf(list))),
       h('span', { class: 'mono', style: 'font-size:12px' }, [...fwd].slice(0, 4).join(', ') || h('span', { class: 'dim' }, 'nowhere'), fwd.size > 4 ? ` +${fwd.size - 4}` : ''),
       h('span', { class: 'mono', style: 'font-size:12px' }, total === null ? '—' : total === 0 ? '0' : bps(total)),
       h('span', { class: 'mono dim', style: 'font-size:12px' }, rps.length ? rps[0] + (rps.length > 1 ? ` +${rps.length - 1}` : '') : '—')),
     on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 28px;border-left:2px solid var(--line);padding-left:10px' },
+      groupRpf(list, g.group),
       h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:28px ${sub};--w:760px` },
         h('div', { class: 'tr head' }, ...['', 'Source', 'Arrives on', 'Sent out of', 'Rate', 'Rendezvous point'].map(t => h('span', null, t))),
         sorted.map(r => routeRow(r, cols, [sourceCell(r)]))))) : null);
@@ -264,7 +306,7 @@ export function render(): VNode {
       detail ? table(detail) : null,
       detail?.load?.length ? loadTable(detail.load) : null,
       detail?.igmp?.length ? igmpTable(detail.igmp) : null,
-      detail?.rps && (detail.rps.map.length || detail.rps.candidate.length) ? rpTable(detail.rps) : null,
+      detail?.rps && (detail.rps.map.length || detail.rps.candidate.length || detail.rps.inUse?.length) ? rpTable(detail.rps) : null,
       detail && detail.pim.neighbors.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'PIM neighbours: ', detail.pim.neighbors.map(n => `${n.address} on ${n.ifName}`).join(', ')) : null) : null);
 }
 
@@ -285,6 +327,12 @@ function igmpTable(list: IgmpIf[]): VNode {
 function rpTable(rps: NonNullable<Detail['rps']>): VNode {
   return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Rendezvous points'),
     h('span', { class: 'dim', style: 'font-size:11.5px' }, 'SNMP does not say whether a mapping is configured by hand or learned from Auto-RP or a bootstrap router')),
+    rps.inUse?.length && !rps.map.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(200px,1.4fr) 90px 80px minmax(220px,2.4fr);--w:640px' },
+      h('div', { class: 'tr head' }, ...['Rendezvous point in use', 'State', 'Groups', 'Example groups'].map(t => h('span', null, t))),
+      rps.inUse.map(x => h('div', { key: x.rp, class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.rp, ' ', x.self ? chip('this router', 'ok') : x.who ? chip(x.who, 'default') : null),
+        h('span', null, x.up ? chip('up', 'ok') : chip('down', 'bad')), h('span', { class: 'mono', style: 'font-size:12px' }, num(x.groups.length)),
+        h('span', { class: 'mono dim', style: 'font-size:12px' }, x.groups.slice(0, 3).join(', ') + (x.groups.length > 3 ? ` +${x.groups.length - 3}` : '')))))) : null,
     rps.map.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1fr) minmax(200px,1.6fr) 110px 110px;--w:600px' },
       h('div', { class: 'tr head' }, ...['Group range', 'Rendezvous point', 'Hold time', 'Expires in'].map(t => h('span', null, t))),
       rps.map.map(x => h('div', { key: x.range + x.rp, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.range),

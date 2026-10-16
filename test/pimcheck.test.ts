@@ -39,3 +39,16 @@ test('no querier where hosts joined, RPF failures and a missing RP are reported'
   assert.match(x.find(i => i.kind === 'no-querier')!.text, /Eth2/); assert.ok(!/Eth3/.test(x.find(i => i.kind === 'no-querier')!.text));
   assert.match(x.find(i => i.kind === 'rpf')!.text, /1,234/);
 });
+
+test('multicast lost on a link: the neighbour sends clearly more than this router receives', async () => {
+  const { multicastLoss } = await import('../src/snmp/pimcheck.js');
+  const load = (ifIndex: number, inBps: number | null, outBps: number | null) => ({ ifIndex, inOctets: null, outOctets: null, inBps, outBps, ttl: null, rateLimit: null });
+  const me = (inBps: number) => mc([{ ifIndex: 1, mode: 'sparse', dr: null }], { neighbors: [{ address: '10.0.0.2', ifIndex: 1 }], interfaces: [load(1, inBps, 0)] });
+  const peerSending = (outBps: number): PimPeer => ({ name: 'leaf', mc: mc([{ ifIndex: 5, mode: 'sparse', dr: null }], { interfaces: [load(5, 0, outBps)] }), ips: new Map([['10.0.0.2', 5]]), ifName: nm });
+  const lost = multicastLoss(me(2_000_000), [peerSending(10_000_000)]);
+  assert.equal(lost.length, 1); assert.equal(lost[0]!.peer, 'leaf'); assert.equal(lost[0]!.peerIf, 'Eth5');
+  assert.equal(pimIssues(me(2_000_000), nm, [peerSending(10_000_000)]).filter(i => i.kind === 'link-loss').length, 1);
+  assert.deepEqual(multicastLoss(me(9_800_000), [peerSending(10_000_000)]), [], 'a small gap is two reads taken at different moments');
+  assert.deepEqual(multicastLoss(me(0), [peerSending(100_000)]), [], 'a trickle is ignored');
+  assert.deepEqual(multicastLoss(me(0), []), [], 'an unpolled neighbour is not guessed at');
+});

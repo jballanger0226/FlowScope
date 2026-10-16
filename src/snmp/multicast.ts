@@ -65,6 +65,8 @@ export interface Multicast {
   pimInterfaces: McPimIf[];
   neighbors: McNeighbor[];
   igmpInterfaces?: McIgmpIf[];
+  /** The rendezvous point each group is using and whether it is up (pimRPTable, index group.rp). The Catalyst 9300 and 3850 walks publish this and leave pimRPSetTable empty. */
+  rpGroups?: { group: string; rp: string; up: boolean; sinceSec: number | null }[];
   rpSet?: McRpMap[];
   /** Group ranges this router is itself a candidate rendezvous point for */
   candidateRps?: { group: string; mask: string; rp: string }[];
@@ -169,9 +171,14 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   }
 
   // the rendezvous point of each group: PIM-MIB pimRPTable is indexed group.rpAddress
-  const rpCol = await col(c, `${PIM_RP}.3`);
+  const [rpCol, rpSince] = await Promise.all([3, 5].map(n => col(c, `${PIM_RP}.${n}`)));
   const rpOf = new Map<string, string>();
-  for (const [idx] of rpCol) { const p = idx.split('.'); if (p.length >= 8) rpOf.set(ip4(p, 0), ip4(p, 4)); }
+  const rpGroups: NonNullable<Multicast['rpGroups']> = [];
+  for (const [idx, v] of rpCol) {
+    const p = idx.split('.'); if (p.length < 8) continue;
+    rpOf.set(ip4(p, 0), ip4(p, 4));
+    rpGroups.push({ group: ip4(p, 0), rp: ip4(p, 4), up: num(v) === 1, sinceSec: secs(rpSince.get(idx)) });
+  }
   for (const r of routes.values()) r.rp = rpOf.get(r.group) ?? null;
 
   // IGMP: who joined which group on which interface. Indexed group.ifIndex
@@ -219,7 +226,7 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   const used = [...routes.values()].flatMap(r => r.oifs.map(o => o.ifIndex)).concat(receivers.map(r => r.ifIndex));
   const down = await interfacesDown(c, used);
   const list = [...routes.values()].sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.source.localeCompare(b.source, undefined, { numeric: true }));
-  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, igmpInterfaces, rpSet, candidateRps, interfaces, names, down, truncated };
+  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, igmpInterfaces, rpGroups, rpSet, candidateRps, interfaces, names, down, truncated };
 }
 
 /** The last host to report each group on each interface (igmpCacheLastReporter), read on its own so it can be sampled often. */

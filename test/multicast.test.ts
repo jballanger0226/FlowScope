@@ -259,3 +259,17 @@ test('reads the IGMP querier per interface and the rendezvous point mappings', a
   assert.deepEqual(m.rpSet, [{ group: '224.0.0.0', mask: '240.0.0.0', rp: '10.10.30.1', holdSec: 150, expirySec: 120 }]);
   assert.deepEqual(m.candidateRps, [{ group: '239.0.0.0', mask: '255.0.0.0', rp: '10.1.1.1' }]);
 });
+
+test('reads the IGMP querier of every interface from real walks of a Catalyst 9300 stack and a second switch', async () => {
+  const { readIgmpInterfaces } = await import('../src/snmp/multicast.js');
+  for (const [file, n] of [['igmpif-c9300.json', 19], ['igmpif-c3850.json', 11]] as const) {
+    const rows = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'test', 'fixtures', file), 'utf8')) as Record<string, SnmpValue>;
+    const list = await readIgmpInterfaces(agent(rows));
+    assert.equal(list.length, n, file);
+    assert.ok(list.every(i => i.version === 2 || i.version === 3), 'version is column 4');
+    assert.ok(list.every(i => i.queryIntervalSec === 60), 'the query interval is column 2, in seconds');
+    assert.ok(list.some(i => i.querier && i.querierUpSec !== null && i.querierUpSec > 0), 'querier uptime is column 7, in timeticks');
+    assert.ok(list.some(i => i.querier === null), 'a querier of 0.0.0.0 is no querier');
+    assert.ok(list.some(i => (i.querierExpirySec ?? 0) > 0) && list.some(i => i.querierExpirySec === 0), 'expiry is 0 where this router is the querier, and counts down where another router is');
+  }
+});

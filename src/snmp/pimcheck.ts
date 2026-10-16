@@ -1,12 +1,28 @@
 import type { Multicast } from './multicast.js';
 
 /** One finding about the PIM setup of a device. `warn` can stop traffic, `info` is worth knowing. */
-export interface PimIssue { level: 'warn' | 'info'; kind: 'mismatch' | 'mixed' | 'no-rp' | 'no-querier' | 'rpf' | 'rp-unknown'; text: string }
+export interface PimIssue { level: 'warn' | 'info'; kind: 'rp-down' | 'mismatch' | 'link-loss' | 'mixed' | 'no-rp' | 'no-querier' | 'rpf' | 'rp-unknown'; text: string }
 
 /** A device FlowScope also polls, so the far end of a PIM link can be looked up. `ips` maps each of its addresses to the interface it sits on. */
 export interface PimPeer { name: string; mc: Multicast; ips: Map<string, number>; ifName: (ix: number) => string }
 
 const known = (m: string | undefined): m is 'dense' | 'sparse' | 'sparse-dense' => m === 'dense' || m === 'sparse' || m === 'sparse-dense';
+
+/** Multicast that one end of a PIM link sends and the other end does not receive. Both ends count multicast per interface, so on a routed link the two rates should agree. */
+export interface McLoss { ifIndex: number; peer: string; peerIf: string; inBps: number; outBps: number }
+export function multicastLoss(mc: Multicast, peers: PimPeer[]): McLoss[] {
+  const out: McLoss[] = [];
+  for (const n of mc.neighbors) {
+    const peer = peers.find(p => p.ips.has(n.address)); if (!peer) continue;
+    const theirIf = peer.ips.get(n.address)!;
+    const ours = mc.interfaces?.find(i => i.ifIndex === n.ifIndex)?.inBps, theirs = peer.mc.interfaces?.find(i => i.ifIndex === theirIf)?.outBps;
+    if (ours == null || theirs == null) continue;
+    // the two reads are not taken at the same moment, so small differences are ignored
+    if (theirs >= 500_000 && theirs - ours >= 250_000 && ours < theirs * 0.9 && !out.some(o => o.ifIndex === n.ifIndex)) out.push({ ifIndex: n.ifIndex, peer: peer.name, peerIf: peer.ifName(theirIf), inBps: ours, outBps: theirs });
+  }
+  return out;
+}
+const mbps = (b: number): string => (b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' : b >= 1e6 ? (b / 1e6).toFixed(1) + ' Mbps' : Math.round(b / 1e3) + ' kbps');
 
 /**
  * Checks that explain why multicast is flooded, missing or half working:
@@ -36,6 +52,8 @@ export function pimIssues(mc: Multicast, ifName: (ix: number) => string, peers: 
     });
   }
 
+  for (const l of multicastLoss(mc, peers)) out.push({ level: 'warn', kind: 'link-loss', text: `Multicast is lost between ${l.peer} ${l.peerIf} and ${ifName(l.ifIndex)}: ${l.peer} sends ${mbps(l.outBps)} out of it and this router receives ${mbps(l.inBps)}. Look at errors, discards and multicast limits on both interfaces.` });
+
   // loopbacks are the router's own addresses, so only interfaces that carry traffic count towards a mix
   const modes = new Set(mc.pimInterfaces.filter(p => !/^(lo|loopback)\d+$/i.test(ifName(p.ifIndex))).map(p => p.mode).filter(known));
   if (modes.size > 1) {
@@ -59,7 +77,10 @@ export function pimIssues(mc: Multicast, ifName: (ix: number) => string, peers: 
   const failing = mc.routes.filter(r => (r.rpfFail ?? 0) > 0).sort((a, b) => (b.rpfFail ?? 0) - (a.rpfFail ?? 0));
   if (failing.length) out.push({ level: 'warn', kind: 'rpf', text: `${failing.length} route${failing.length === 1 ? '' : 's'} dropped packets that arrived on the wrong interface (RPF check failed), most on ${failing[0]!.source === '0.0.0.0' ? failing[0]!.group : failing[0]!.source + ', ' + failing[0]!.group} (${failing[0]!.rpfFail!.toLocaleString('en-US')}). The unicast route back to the source points out a different interface than the one the traffic uses.` });
 
+  const rpDown = [...new Set((mc.rpGroups ?? []).filter(g => !g.up).map(g => g.rp))];
+  if (rpDown.length) out.push({ level: 'warn', kind: 'rp-down', text: `The router marks ${rpDown.length === 1 ? 'rendezvous point ' + rpDown[0] : rpDown.length + ' rendezvous points (' + rpDown.slice(0, 3).join(', ') + ')'} as down. Sparse-mode groups that use ${rpDown.length === 1 ? 'it' : 'them'} cannot build their shared tree.` });
+
   // sparse mode with no rendezvous point mapped at all
-  if (mc.rpSet && !mc.rpSet.length && !(mc.candidateRps ?? []).length && mc.pimInterfaces.some(p => p.mode === 'sparse') && !mc.routes.some(r => r.rp)) out.push({ level: 'info', kind: 'rp-unknown', text: 'PIM sparse mode is on, but this router lists no rendezvous point. That is normal when only source-specific multicast is used. Otherwise check the RP configuration.' });
+  if (mc.rpSet && !mc.rpSet.length && !(mc.rpGroups ?? []).length && !(mc.candidateRps ?? []).length && mc.pimInterfaces.some(p => p.mode === 'sparse') && !mc.routes.some(r => r.rp)) out.push({ level: 'info', kind: 'rp-unknown', text: 'PIM sparse mode is on, but this router lists no rendezvous point. That is normal when only source-specific multicast is used. Otherwise check the RP configuration.' });
   return out;
 }

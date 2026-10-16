@@ -525,8 +525,14 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
   if (d.name === 'dc-leaf-07') {
     // the far end of the spine's downlink, running dense where the spine runs sparse
     const up = ifIdx('Eth1/52') ?? 0;
+    // the same streams as the spine sees them, sent up the link; every thirteenth is not forwarded towards the spine
+    const leafRoutes = [] as any[];
+    for (let g = 0; g < 130; g++) {
+      const gi = Math.floor(g / 5), group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`;
+      leafRoutes.push({ group, source: `10.9.0.${30 + (g % 9)}`, inIfIndex: ifIdx('Eth1/12') ?? 0, upstream: null, protocol: 9, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: [], rp: null, oifs: [{ ifIndex: up, forwarding: g % 13 !== 0, pkts: 80_000 * (g + 1) }] });
+    }
     app.cdb.db.prepare('UPDATE device_ips SET if_index = ? WHERE dev_id = ? AND ip = ?').run(up, id, d.ip);
-    app.devices.saveMulticast(id, { readAt: now, source: 'standard', routes: [], receivers: [], pimInterfaces: [{ ifIndex: up, mode: 'dense', dr: '10.255.1.7' }], neighbors: [{ address: '10.255.1.1', ifIndex: up }], truncated: false });
+    app.devices.saveMulticast(id, { readAt: now, source: 'standard', routes: leafRoutes, receivers: [], pimInterfaces: [{ ifIndex: up, mode: 'dense', dr: '10.255.1.7' }], neighbors: [{ address: '10.255.1.1', ifIndex: up }], interfaces: [{ ifIndex: up, inOctets: null, outOctets: null, inBps: 800_000_000, outBps: 30_000_000_000, ttl: null, rateLimit: null }], truncated: false });
   }
   if (d.name === 'dc-spine-01') {
     // multicast state: video and market-data groups from a handful of encoders, receivers on both downlinks
@@ -538,7 +544,7 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
         oifs: [{ ifIndex: e9, forwarding: g % 5 !== 0, pkts: 80_000 * (g + 1) }] });
       if (g % 3 === 0) receivers.push({ group, ifIndex: e9, lastReporter: `10.1.4.${20 + (g % 40)}`, expirySec: 200, self: false });
     }
-    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }, { ifIndex: e9, mode: 'sparse-dense', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], igmpInterfaces: [{ ifIndex: e9, querier: '10.255.1.11', version: 2, queryIntervalSec: 125, querierUpSec: 5 * 86400, querierExpirySec: 240 }, { ifIndex: e7, querier: null, version: 2, queryIntervalSec: 125, querierUpSec: null, querierExpirySec: null }], rpSet: [{ group: '224.0.0.0', mask: '240.0.0.0', rp: '10.255.0.1', holdSec: 150, expirySec: 120 }, { group: '239.12.0.0', mask: '255.255.0.0', rp: '10.255.1.7', holdSec: 150, expirySec: 90 }], candidateRps: [], truncated: false, interfaces: [{ ifIndex: e9, inOctets: null, outOctets: null, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: null, outOctets: null, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
+    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }, { ifIndex: e9, mode: 'sparse-dense', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], igmpInterfaces: [{ ifIndex: e9, querier: '10.255.1.11', version: 2, queryIntervalSec: 125, querierUpSec: 5 * 86400, querierExpirySec: 240 }, { ifIndex: e7, querier: null, version: 2, queryIntervalSec: 125, querierUpSec: null, querierExpirySec: null }], rpGroups: [...new Set(routes.map((r: any) => r.group))].map((g: any, i: number) => ({ group: g, rp: i % 9 === 0 ? '10.255.1.7' : '10.255.0.1', up: true, sinceSec: 86400 })), rpSet: [], candidateRps: [], truncated: false, interfaces: [{ ifIndex: e9, inOctets: null, outOctets: null, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: null, outOctets: null, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
     // hosts collected over time from the IGMP cache: several per group on the downlink
     for (const r of receivers) app.devices.noteIgmp(id, Array.from({ length: 6 }, (_, k) => ({ group: r.group, ifIndex: r.ifIndex, reporter: `10.1.4.${20 + ((Number(r.group.split('.')[3]) + k * 7) % 40)}` })), now, false);
   }
