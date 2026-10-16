@@ -187,7 +187,7 @@ test('Cisco tables: a switch with them passes each check with counts, and the ch
   for (const [id, group] of [['fib', 'routing'], ['eigrp', 'routing'], ['bfd', 'routing'], ['dhcp', 'hosts'], ['dai', 'hosts'], ['stack', 'hardware'], ['procs', 'hardware'], ['nbar', 'quality']] as const) {
     assert.equal(c[id]!.state, 'ok', id); assert.equal(c[id]!.group, group, id);
   }
-  assert.equal(c.fib!.count, 34); assert.equal(c.eigrp!.count, 2); assert.equal(c.bfd!.count, 4); assert.equal(c.dhcp!.count, 12); assert.equal(c.stack!.count, 8);
+  assert.equal(c.fib!.count, 34); assert.equal(c.eigrp!.count, 2); assert.equal(c.bfd!.count, 2); assert.equal(c.dhcp!.count, 12); assert.equal(c.stack!.count, 8);
   assert.match(c.dai!.detail, /1 VLAN/);
 });
 

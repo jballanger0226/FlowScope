@@ -24,7 +24,7 @@ export interface BgpPeer { address: string; as: number | null; state: string; le
 /** An EIGRP neighbour (CISCO-EIGRP-MIB). The table lists only neighbours that have formed, so a lost one is absent, not shown down. */
 export interface EigrpPeer { as: number; address: string; ifIndex: number; holdSec: number | null; upText: string; srttMs: number | null; retrans: number | null; retries: number | null; level: Level }
 /** A BFD session (CISCO-IETF-BFD-MIB): the fast failure detector that routing protocols are often tied to. */
-export interface BfdSession { id: number; address: string; ifIndex: number | null; state: string; level: Level; upSec: number | null; upCount: number | null; diag: string | null; detectMs: number | null }
+export interface BfdSession { id: number; /** The neighbour when it can be worked out, otherwise this device's own address */ address: string; local?: string; peerKnown?: boolean; ifIndex: number | null; state: string; level: Level; upSec: number | null; upCount: number | null; diag: string | null; detectMs: number | null }
 /** `eigrp` and `bfd` are absent from health stored before they were read */
 export interface Health { readAt: number; sensors: Sensor[]; poe: Poe[]; stp: Stp | null; ospf: OspfNeighbor[]; bgp: BgpPeer[]; bgpLocalAs: number | null; eigrp?: EigrpPeer[]; bfd?: BfdSession[] }
 export const EMPTY_HEALTH = (readAt: number): Health => ({ readAt, sensors: [], poe: [], stp: null, ospf: [], bgp: [], bgpLocalAs: null, eigrp: [], bfd: [] });
@@ -299,18 +299,45 @@ export async function readEigrp(c: SnmpClient): Promise<EigrpPeer[]> {
 const BFD = '1.3.6.1.4.1.9.10.137.1';
 const BFD_STATE: Record<number, [string, Level]> = { 1: ['admin down', 'off'], 2: ['down', 'bad'], 3: ['init', 'warn'], 4: ['up', 'ok'] };
 const BFD_DIAG: Record<number, string> = { 1: 'control detection time expired', 2: 'echo function failed', 3: 'neighbour signalled session down', 4: 'forwarding plane reset', 5: 'path down', 6: 'concatenated path down', 7: 'administratively down', 8: 'reverse concatenated path down' };
+const IP_ADDR = '1.3.6.1.2.1.4.20.1';
+
+/** The other end of a point-to-point subnet: a /30 has two usable addresses, a /31 two. Anything wider has no single answer. */
+export function p2pPeer(local: string, mask: string | null): string | null {
+  const l = local.split('.').map(Number), m = (mask ?? '').split('.').map(Number);
+  if (l.length !== 4 || m.length !== 4 || l.some(x => !(x >= 0 && x <= 255)) || m.some(x => !(x >= 0 && x <= 255))) return null;
+  const ln = ((l[0]! << 24) | (l[1]! << 16) | (l[2]! << 8) | l[3]!) >>> 0, mn = ((m[0]! << 24) | (m[1]! << 16) | (m[2]! << 8) | m[3]!) >>> 0;
+  const host = ~mn >>> 0;
+  let peer: number;
+  if (host === 1) peer = (ln ^ 1) >>> 0;                           // /31
+  else if (host === 3 && (ln & 3) !== 0 && (ln & 3) !== 3) peer = (ln & 3) === 1 ? ln + 1 : ln - 1;   // /30
+  else return null;
+  return [peer >>> 24, (peer >>> 16) & 255, (peer >>> 8) & 255, peer & 255].join('.');
+}
+
+/**
+ * ciscoBfdSessAddr is this device's own address on the session, and ciscoBfdSessInterface is not the interface the neighbour is on (checked against `show bfd neighbors`
+ * of a Catalyst 9300 stack). The interface comes from the interface that owns that address (IP-MIB), and the neighbour is the other end of its /30 or /31.
+ * One session is listed once for each client that registered it (for example a routing protocol and a static route), so sessions with the same address and
+ * discriminators are shown once.
+ */
 export async function readBfd(c: SnmpClient): Promise<BfdSession[]> {
   const col = colsOf(c);
-  const [state, addr, ifx, txi, mult, upTime, upCount, diag] = await Promise.all([
-    col(`${BFD}.2.1.6`), col(`${BFD}.2.1.14`), col(`${BFD}.2.1.25`), col(`${BFD}.2.1.15`), col(`${BFD}.2.1.18`), col(`${BFD}.3.1.3`), col(`${BFD}.3.1.6`), col(`${BFD}.3.1.5`)]);
-  const out: BfdSession[] = [];
+  const [state, addr, txi, mult, upTime, upCount, diag, ld, rd, ipIf, ipMask] = await Promise.all([
+    col(`${BFD}.2.1.6`), col(`${BFD}.2.1.14`), col(`${BFD}.2.1.15`), col(`${BFD}.2.1.18`), col(`${BFD}.3.1.3`), col(`${BFD}.3.1.6`), col(`${BFD}.3.1.5`), col(`${BFD}.2.1.3`), col(`${BFD}.2.1.4`),
+    col(`${IP_ADDR}.2`), col(`${IP_ADDR}.3`)]);
+  const seen = new Map<string, BfdSession>();
   for (const [k, v] of state) {
     const [st, level] = BFD_STATE[num(v) ?? 0] ?? ['unknown', 'off' as Level];
+    const local = ipOf(addr.get(k) ?? null); if (!local) continue;
     const tx = num(txi.get(k)), m = num(mult.get(k)), d = num(diag.get(k)), ut = num(upTime.get(k));
-    out.push({ id: Number(k), address: ipOf(addr.get(k) ?? null) ?? '', ifIndex: num(ifx.get(k)) || null, state: st, level, upSec: level === 'ok' && ut !== null ? Math.round(ut / 100) : null, upCount: num(upCount.get(k)),
-      diag: d ? BFD_DIAG[d] ?? null : null, detectMs: tx !== null && m !== null ? Math.round((tx * m) / 1000) : null });
+    const peer = p2pPeer(local, ipOf(ipMask.get(local) ?? null));
+    const s: BfdSession = { id: Number(k), address: peer ?? local, local, peerKnown: !!peer, ifIndex: num(ipIf.get(local)) || null, state: st, level, upSec: level === 'ok' && ut !== null ? Math.round(ut / 100) : null, upCount: num(upCount.get(k)),
+      diag: d ? BFD_DIAG[d] ?? null : null, detectMs: tx !== null && m !== null ? Math.round((tx * m) / 1000) : null };
+    const key = `${local}|${num(ld.get(k))}|${num(rd.get(k))}`;
+    const have = seen.get(key);
+    if (!have || (s.level !== 'ok' && have.level === 'ok') || (s.level === have.level && (s.upSec ?? 0) > (have.upSec ?? 0))) seen.set(key, s);
   }
-  return out.filter(x => x.address).sort((a, b) => a.address.localeCompare(b.address, undefined, { numeric: true }) || a.id - b.id);
+  return [...seen.values()].sort((a, b) => a.address.localeCompare(b.address, undefined, { numeric: true }) || a.id - b.id);
 }
 
 /* ------------------------------------------------------------------ everything slow, in one read */

@@ -10,7 +10,7 @@ export interface Stp { rootId: string; isRoot: boolean; rootPort: number; rootCo
 export interface OspfNeighbor { id: string; address: string; state: string; level: Level }
 export interface BgpPeer { address: string; as: number | null; state: string; level: Level; admin: string; upSec: number | null; updatesIn: number | null; updatesOut: number | null }
 export interface EigrpPeer { as: number; address: string; ifIndex: number; holdSec: number | null; upText: string; srttMs: number | null; retrans: number | null; retries: number | null; level: Level }
-export interface BfdSession { id: number; address: string; ifIndex: number | null; state: string; level: Level; upSec: number | null; upCount: number | null; diag: string | null; detectMs: number | null }
+export interface BfdSession { id: number; address: string; local?: string; peerKnown?: boolean; ifIndex: number | null; state: string; level: Level; upSec: number | null; upCount: number | null; diag: string | null; detectMs: number | null }
 export interface Health { readAt: number; sensors: Sensor[]; poe: Poe[]; stp: Stp | null; ospf: OspfNeighbor[]; bgp: BgpPeer[]; bgpLocalAs: number | null; eigrp?: EigrpPeer[]; bfd?: BfdSession[] }
 export interface IfExtra {
   ifIndex: number; duplex: 'full' | 'half' | 'unknown' | null; admin: number | null; totals: Record<string, number | undefined>; delta: Record<string, number | undefined> | null; dtSec: number | null; readAt: number;
@@ -211,7 +211,7 @@ export function protocolsPanel(o: { data: HealthRes | null; ifName?: (ifIndex: n
   if (hl.bfd?.length) sections.push(h('div', { key: 'bfd', class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'BFD sessions'),
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) 100px 100px 90px minmax(160px,1fr);--w:760px' },
       h('div', { class: 'tr head' }, ...['Peer', 'Interface', 'State', 'Up for', 'Detects in', 'Last failure'].map(t => h('span', null, t))),
-      hl.bfd.map(b => h('div', { key: b.id, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, b.address), h('span', { class: 'mono', style: 'font-size:12px' }, nm(b.ifIndex)), statusEl(b.level, b.state),
+      hl.bfd.map(b => h('div', { key: b.id, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px', title: b.peerKnown === false ? 'The neighbour could not be worked out from the subnet, so this is the address of this device on the session' : undefined }, b.peerKnown === false ? `${b.address} (this end)` : b.address), h('span', { class: 'mono', style: 'font-size:12px' }, nm(b.ifIndex)), statusEl(b.level, b.state),
         h('span', { class: 'muted' }, b.upSec !== null ? dur(b.upSec * 1000) : '—'), h('span', { class: 'mono', style: 'font-size:12px' }, b.detectMs === null ? '—' : `${b.detectMs} ms`),
         h('span', { class: 'muted' }, b.diag ? `${b.diag}${b.upCount && b.upCount > 1 ? ` (${b.upCount - 1} earlier)` : ''}` : b.upCount && b.upCount > 1 ? `${b.upCount - 1} earlier` : 'none')))))));
   if (o.data?.extras?.dai?.vlans.length) sections.push(daiSection(o.data.extras.dai));
