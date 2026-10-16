@@ -2,6 +2,7 @@ import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import type { FlowRecord } from '../collector/types.js';
 import { int } from './util.js';
+import { modelText, type Entity } from '../snmp/entity.js';
 import { igmpHint, vendorOf } from '../snmp/diagnose.js';
 import { buildPlan, type Plan } from '../snmp/multicast_plan.js';
 
@@ -58,6 +59,7 @@ export function registerMulticast(app: App): void {
     const name = namer(app, id, m);
     const ifs = new Map(app.devices.interfaces(id).map(i => [i.ifIndex, i.oper] as const)), downSet = new Set(m.down ?? []);
     const isDown = (ix: number): boolean => ifs.has(ix) ? ifs.get(ix) !== 1 : downSet.has(ix);
+    const pimMode = new Map(m.pimInterfaces.map(p => [p.ifIndex, p.mode] as const));
     const nbr = new Map(m.neighbors.map(n => [n.ifIndex, n.address]));
     const joins = new Map<string, typeof m.receivers>();
     for (const r of m.receivers) { const k = r.group + '|' + r.ifIndex; const a = joins.get(k) ?? []; a.push(r); joins.set(k, a); }
@@ -75,11 +77,11 @@ export function registerMulticast(app: App): void {
       hosts[ip] = a && a.edge ? { dev: a.dev, port: a.ifName, vlan: a.vlan, confidence: a.confidence, neighbor: a.neighbor } : null;
     }
     c.json({
-      device: { id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device' }, readAt: m.readAt, stale: now - m.readAt > STALE_MS, source: m.source, truncated: m.truncated,
+      device: { id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device', model: modelText(app.devices.data<Entity>(id, 'entity')) }, readAt: m.readAt, stale: now - m.readAt > STALE_MS, source: m.source, truncated: m.truncated,
       routes: m.routes.map(r => ({
-        group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
+        group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
-          ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null,
+          ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null, pimMode: pimMode.get(o.ifIndex) ?? null,
           members: (members.get(r.group + '|' + o.ifIndex) ?? []).map(x => ({ ip: x.ip, ageSec: Math.max(0, Math.round((now - x.lastSeen) / 1000)), sinceSec: Math.round((now - x.firstSeen) / 1000) })),
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))

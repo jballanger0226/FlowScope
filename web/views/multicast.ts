@@ -14,13 +14,13 @@ interface HostAt { dev: string; port: string; vlan: number; confidence: string; 
 interface Join { reporter: string | null; expirySec: number | null; self: boolean }
 interface IgmpHint { vendor: string; platform: string; command: string | null }
 interface Member { ip: string; ageSec: number; sinceSec: number }
-interface Out { ifIndex: number; name: string; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
+interface Out { ifIndex: number; name: string; pimMode?: string | null; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
 interface Route {
-  group: string; source: string; sharedTree: boolean; inIf: string | null; upstream: string | null; rp: string | null; bps: number | null; pkts: number | null; flags: string[]; protocol: number | null; expirySec: number | null; out: Out[];
+  group: string; source: string; sharedTree: boolean; inIf: string | null; upstream: string | null; rp: string | null; bps: number | null; pkts: number | null; flags: string[]; protocol: number | null; mode?: 'sparse' | 'dense' | null; expirySec: number | null; out: Out[];
 }
 interface Detail {
   igmpHint?: IgmpHint;
-  device: { id: number; name: string; ip: string; role: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
+  device: { id: number; name: string; ip: string; role: string; model?: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
   pim: { interfaces: { name: string; mode: string; dr: string | null }[]; neighbors: { address: string; ifName: string }[] };
   hosts?: Record<string, HostAt | null>;
   load?: { name: string; inBps: number | null; outBps: number | null; inOctets: number | null; outOctets: number | null; ttl: number | null; rateLimit: number | null }[];
@@ -83,12 +83,32 @@ function outChips(r: Route): VNode {
 }
 
 /** Shown wherever hosts that joined are listed: the router does not keep a full membership list for SNMP to read. */
+/** How PIM mode changes what a router does with receivers. Dense floods and prunes; sparse waits for a join. */
+const DENSE_WHY = 'PIM dense mode sends the group out of every PIM interface and then prunes the ones with no receiver, and floods again about every three minutes. An interface can show as forwarding with nobody behind it until it is pruned.';
+const SPARSE_DENSE_WHY = 'PIM sparse-dense mode: a group with a rendezvous point runs sparse, and a group without one falls back to dense and is flooded to every PIM interface.';
+const pimChip = (mode: string | null | undefined): VNode | null => (mode === 'dense' ? chip('PIM dense', 'warn', DENSE_WHY) : mode === 'sparse-dense' ? chip('PIM sparse-dense', 'warn', SPARSE_DENSE_WHY) : null);
+
+/** The PIM modes the router runs, as a line above the table; dense and sparse-dense are flagged, since they change what a receiver gets. */
+function pimSummary(d: Detail): VNode | null {
+  const n = new Map<string, number>(); for (const p of d.pim.interfaces) n.set(p.mode, (n.get(p.mode) ?? 0) + 1);
+  if (!n.size) return null;
+  const flagged = (n.get('dense') ?? 0) + (n.get('sparse-dense') ?? 0) > 0;
+  const text = [...n].map(([m, k]) => `${num(k)} ${m}`).join(', ');
+  const dense = d.routes.filter(r => r.mode === 'dense').length;
+  return h('div', { class: 'row', style: 'gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px' },
+    h('span', { class: 'dim' }, 'PIM interfaces:'), h('span', { class: 'mono' }, text),
+    n.get('dense') ? pimChip('dense') : null, n.get('sparse-dense') ? pimChip('sparse-dense') : null,
+    dense ? h('span', { class: 'dim' }, `${num(dense)} route${dense === 1 ? ' runs' : 's run'} in dense mode`) : null,
+    flagged ? h('span', { class: 'dim' }, 'Receivers behave differently here: hover a flag for how.') : null);
+}
+
 const VENDOR_NAME: Record<string, string> = { cisco: 'Cisco', juniper: 'Juniper', arista: 'Arista', h3c: 'H3C / HPE Comware' };
 /** Where to look for the full list, by the switch's vendor. A vendor without a known command is pointed at its IGMP snooping table. */
 function whereToLook(): string {
   const hint = detail?.igmpHint;
   if (!hint?.command) return 'check the switch\'s IGMP snooping table';
-  return `check the switch (on ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}: ${hint.command})`;
+  const model = detail?.device.model ? ` (${detail.device.model})` : '';
+  return `check the switch${model}: on ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run ${hint.command}`;
 }
 const incomplete = (): string => `Not a complete list. The router keeps only the last host to report each group, so FlowScope collects reporters as they answer queries and can miss hosts that have not been the last to report. For the full membership, ${whereToLook()}.`;
 
@@ -107,7 +127,7 @@ function oilRow(r: Route, o: Out): VNode {
     h('div', { class: 'tr' },
         h('span', { class: 'mono', style: 'font-size:12px' }, o.name),
         h('span', null, o.linkDown ? chip('link down', 'bad', 'The route lists this interface' + (o.forwarding ? ' as forwarding' : '') + ', but the port is not up, so nothing is arriving over it') : o.forwarding ? chip('forwarding', 'ok') : chip('pruned', 'default', 'Listed, but no one downstream wants the group')),
-        h('span', { class: 'mono dim', style: 'font-size:12px' }, o.neighbor ? `PIM neighbour ${o.neighbor}` : o.loopback ? 'this router (loopback)' : o.joins.length ? 'hosts on this segment' : '—'),
+        h('span', { class: 'mono dim', style: 'font-size:12px' }, o.neighbor ? `PIM neighbour ${o.neighbor}` : o.loopback ? 'this router (loopback)' : o.joins.length ? 'hosts on this segment' : '—', ' ', pimChip(o.pimMode)),
         h('span', { class: 'mono', style: 'font-size:12px' }, joined()),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts))),
     many && on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
@@ -126,6 +146,7 @@ function expanded(r: Route): VNode {
   return h('div', { class: 'mcdetail', style: 'padding:6px 12px 14px' },
     h('div', { class: 'row', style: 'gap:8px 18px;flex-wrap:wrap;color:var(--muted);font-size:12.5px;margin-bottom:8px' },
       h('span', null, r.sharedTree ? 'Shared tree (*,G)' : `Source ${r.source}`, !r.sharedTree && at(r.source) ? h('span', null, ' · plugged in at ', h('b', { class: 'mono' }, at(r.source))) : null),
+      r.mode === 'dense' ? pimChip('dense') : r.mode === 'sparse' ? chip('PIM sparse', 'default', 'The route runs in PIM sparse mode: it is sent only where a receiver has joined.') : null,
       r.inIf ? h('span', null, 'Arrives on ', h('b', { class: 'mono' }, r.inIf)) : null,
       r.upstream ? h('span', null, 'Upstream ', h('b', { class: 'mono' }, r.upstream)) : null,
       r.rp ? h('span', null, 'Rendezvous point ', h('b', { class: 'mono' }, r.rp)) : null,
@@ -221,6 +242,7 @@ export function render(): VNode {
         cur ? chip(cur.source === 'cisco' ? 'IPMROUTE + Cisco rates' : 'IPMROUTE standard', 'default', cur.source === 'cisco' ? 'Rates and route flags come from CISCO-IPMROUTE-MIB' : 'The device does not publish rates; only the standard table was read') : null,
         btn('Refresh', { small: true, onclick: () => { void loadDevices().then(() => loadDetail()); } })),
       cur ? summary(cur) : null,
+      detail ? pimSummary(detail) : null,
       cur ? h('div', { class: 'dim', style: 'font-size:12.5px' }, `Hosts that joined come from the router's IGMP cache over SNMP and are not a complete list. For the full membership, ${whereToLook()}.`) : null,
       cur?.truncated ? note('This device holds more routes than FlowScope keeps. The list is cut off.', 'warn') : null,
       h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },

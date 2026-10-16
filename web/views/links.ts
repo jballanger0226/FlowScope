@@ -20,7 +20,7 @@ interface Iface {
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
-interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; resources: Resources | null; interfaces: Iface[] }
+interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; model?: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; resources: Resources | null; interfaces: Iface[] }
 interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number; mcast: number; priority: number }; mibs: { name: string; what: string }[] }
 interface SeriesRes {
   util: { step: number; points: { ts: number; utilIn: number; utilOut: number; inBps: number; outBps: number; disc: number; err: number }[] };
@@ -912,7 +912,7 @@ export function render(): VNode {
     h('div', { class: 'mainp' },
       dev ? h('section', { 'aria-label': 'Selected device', class: 'panel col', style: 'gap:14px' },
         h('div', { class: 'row', style: 'justify-content:space-between' },
-          h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, dev.name), h('span', { class: 'muted' }, `${roleLabel(dev.role)} · ${dev.ip} · ${dev.profile || 'generic'} · last answered ${ago(dev.lastOk)}`)),
+          h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, dev.name), h('span', { class: 'muted' }, `${roleLabel(dev.role)} · ${dev.ip} · ${dev.model ? dev.model + ' · ' : ''}${dev.profile || 'generic'} · last answered ${ago(dev.lastOk)}`)),
           btn('Edit in SNMP devices', { kind: 'ghost', small: true, onclick: () => go('devices', { id: dev.id }) })),
         dev.status !== 'ok' && dev.lastError ? note(`The last poll failed: ${dev.lastError}`, 'warn') : null,
         devTabs(dev, tab),

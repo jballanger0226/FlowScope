@@ -8,6 +8,7 @@ import { streamView } from './flows.js';
 import { isVlanInterface } from '../snmp/ports.js';
 import { DEFAULTS } from '../settings.js';
 import { linkWarnings } from '../snmp/health.js';
+import { modelText, type Entity } from '../snmp/entity.js';
 import { daiReason, type Dai, type Nbar, type Processes, type Stack } from '../snmp/cisco_extra.js';
 
 export const MIBS = [
@@ -57,7 +58,7 @@ export async function linkDevices(app: App, minutes: number) {
   const counts = app.hosts.portCounts();
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
-    qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
+    model: modelText(app.devices.data<Entity>(d.id, 'entity')), qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
     interfaces: app.devices.interfaces(d.id).map(i => {
       const mload = mcastLoad.get(d.id)?.get(i.ifIndex);
       const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];

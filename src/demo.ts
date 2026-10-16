@@ -516,6 +516,8 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
   const h = demoHealth(d, now);
   app.devices.saveHealth(id, h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length || h.eigrp?.length || h.bfd?.length ? h : null);
   // Cisco extras: busiest processes on the switches and routers, a stack, ARP inspection drops and application statistics
+  const MODELS: Record<string, string> = { 'dist-sw-01': 'C9300-48UXM', 'dc-spine-01': 'C9300-48UXM', 'dc-leaf-07': 'N9K-C93180YC-FX3', 'dc-leaf-11': 'N9K-C93180YC-FX3', 'core-rtr-01': 'ASR1001-X', 'wan-rtr-01': 'ISR4451-X/K9', 'br-rtr-02': 'ISR4331/K9' };
+  if (MODELS[d.name]) app.devices.saveData(id, 'entity', { readAt: now, chassis: Array.from({ length: d.name === 'dc-spine-01' ? 3 : 1 }, (_, i) => ({ index: i + 1, name: 'Switch ' + (i + 1), model: MODELS[d.name]!, descr: '', serial: 'FDO2' + (1000 + i), sw: '' })), modules: [] }, now);
   if (d.role === 'switch' || d.role === 'router') {
     const wob = Math.round(((Math.sin(now / 600_000 + id) + 1) / 2) * 3);
     app.devices.saveData(id, 'procs', { readAt: now, top: [{ name: 'linux_iosd-imag', pid: 7813, five: 9 + wob, one: 8, fiveMin: 7 }, { name: 'fed main event', pid: 6121, five: 6, one: 5, fiveMin: 5 }, { name: 'SNMP ENGINE', pid: 4172, five: 3 + wob, one: 4, fiveMin: 3 }, { name: 'IP Input', pid: 220, five: 1, one: 1, fiveMin: 1 }], snmpFive: 3 + wob, snmpOne: 4 }, now);
@@ -526,11 +528,11 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
     const routes = [] as any[]; const receivers = [] as any[];
     for (let g = 0; g < 130; g++) {
       const gi = Math.floor(g / 5), group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`; const src = `10.9.0.${30 + (g % 9)}`;
-      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: '10.255.0.1',
+      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: g % 11 === 0 ? 9 : 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: '10.255.0.1',
         oifs: [{ ifIndex: e9, forwarding: g % 5 !== 0, pkts: 80_000 * (g + 1) }] });
       if (g % 3 === 0) receivers.push({ group, ifIndex: e9, lastReporter: `10.1.4.${20 + (g % 40)}`, expirySec: 200, self: false });
     }
-    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], truncated: false, interfaces: [{ ifIndex: e9, inOctets: null, outOctets: null, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: null, outOctets: null, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
+    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }, { ifIndex: e9, mode: 'sparse-dense', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], truncated: false, interfaces: [{ ifIndex: e9, inOctets: null, outOctets: null, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: null, outOctets: null, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
     // hosts collected over time from the IGMP cache: several per group on the downlink
     for (const r of receivers) app.devices.noteIgmp(id, Array.from({ length: 6 }, (_, k) => ({ group: r.group, ifIndex: r.ifIndex, reporter: `10.1.4.${20 + ((Number(r.group.split('.')[3]) + k * 7) % 40)}` })), now, false);
   }
