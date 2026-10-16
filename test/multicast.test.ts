@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { SnmpClient, SnmpValue } from '../src/snmp/client.js';
-import { compareOut, expectationFor, readMulticast } from '../src/snmp/multicast.js';
+import { compareOut, expectationFor, readMulticast, withLoadRates } from '../src/snmp/multicast.js';
 import { ConfigDb } from '../src/db/configdb.js';
 import { DeviceService } from '../src/snmp/devices.js';
 
@@ -192,4 +192,23 @@ test('state older than ten minutes is marked out of date', async () => {
   const p = await planFor('224.0.1.129', '10.13.192.136', new Map(), undefined, 15 * 60_000);
   assert.equal(p.devices[0]!.stale, true);
   assert.match(p.devices[0]!.findings.map(f => f.text).join(' '), /15 minutes ago/);
+});
+
+/** ipMRouteInterfaceTable rows from the same walk: 19 interfaces with multicast byte counters. */
+const IFLOAD = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'test', 'fixtures', 'mcast-if-c9300.json'), 'utf8')) as Record<string, SnmpValue>;
+
+test('per-interface multicast bytes are read, using the 64-bit counters', async () => {
+  const m = (await readMulticast(agent({ ...FIX, ...IFLOAD }), 1000))!;
+  assert.equal(m.interfaces!.length, 19);
+  const i = m.interfaces!.find(x => x.ifIndex === 110)!;
+  assert.equal(i.inOctets, 67536405); assert.equal(i.inBps, null, 'no earlier read yet');
+});
+
+test('rates come from the difference to the previous read, and a counter that went back gives none', async () => {
+  const a = (await readMulticast(agent({ ...FIX, ...IFLOAD }), 1_000_000))!;
+  const rows = { ...FIX, ...IFLOAD, '1.3.6.1.2.1.83.1.1.4.1.7.110': 67536405 + 7_500_000, '1.3.6.1.2.1.83.1.1.4.1.7.81': 100 };
+  const b = withLoadRates((await readMulticast(agent(rows), 1_060_000))!, a);
+  assert.equal(b.interfaces!.find(x => x.ifIndex === 110)!.inBps, 1_000_000, '7.5 MB in 60 s is 1 Mbit/s');
+  assert.equal(b.interfaces!.find(x => x.ifIndex === 81)!.inBps, null);
+  assert.equal(withLoadRates(b, { ...a, readAt: 1_060_000 }).interfaces!.find(x => x.ifIndex === 110)!.inBps, 1_000_000, 'an identical timestamp leaves the rates alone');
 });

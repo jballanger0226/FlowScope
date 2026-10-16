@@ -512,6 +512,22 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
   app.devices.saveIfExtra(id, demoIfExtra(d, ifIdx, now));
   const h = demoHealth(d, now);
   app.devices.saveHealth(id, h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length || h.eigrp?.length || h.bfd?.length ? h : null);
+  // Cisco extras: busiest processes on the switches and routers, a stack, ARP inspection drops and application statistics
+  if (d.role === 'switch' || d.role === 'router') {
+    const wob = Math.round(((Math.sin(now / 600_000 + id) + 1) / 2) * 3);
+    app.devices.saveData(id, 'procs', { readAt: now, top: [{ name: 'linux_iosd-imag', pid: 7813, five: 9 + wob, one: 8, fiveMin: 7 }, { name: 'fed main event', pid: 6121, five: 6, one: 5, fiveMin: 5 }, { name: 'SNMP ENGINE', pid: 4172, five: 3 + wob, one: 4, fiveMin: 3 }, { name: 'IP Input', pid: 220, five: 1, one: 1, fiveMin: 1 }], snmpFive: 3 + wob, snmpOne: 4 }, now);
+  }
+  if (d.name === 'dc-spine-01') {
+    const m = (n: number, role: string) => ({ index: n * 1000, number: n, role, state: 'ready', level: 'ok', mac: `00:1c:73:01:0${n}:00` });
+    app.devices.saveData(id, 'stack', { readAt: now, members: [m(1, 'master'), m(2, 'standby'), m(3, 'member')], ports: [88, 89, 191, 192, 272, 273].map((ifIndex, i) => ({ ifIndex, status: 'up', level: 'ok', neighbor: ((i + 1) % 3 + 1) * 1000 })), problems: [] }, now);
+  }
+  if (d.name === 'dist-sw-01') {
+    app.devices.saveData(id, 'dai', { readAt: now, dtSec: 300, vlans: [{ vlan: 140, forwarded: 290_344, dropped: 555_705, dhcpDenied: 555_705, aclDenied: 0, srcMac: 0, dstMac: 0, ip: 0, invalid: 0, droppedNow: 41 }] }, now);
+    const gi = ifIdx('Gi1/0/12');
+    if (gi) app.devices.saveData(id, 'nbar', { readAt: now, interfaces: { [gi]: [
+      { name: 'ms-office-365', inBps: 2_400_000, outBps: 640_000, inBytes: 9_100_000_000, outBytes: 2_300_000_000 }, { name: 'ssl', inBps: 1_100_000, outBps: 300_000, inBytes: 4_800_000_000, outBytes: 1_200_000_000 },
+      { name: 'dns', inBps: 12_000, outBps: 9_000, inBytes: 180_000_000, outBytes: 90_000_000 }, { name: 'ntp', inBps: 120, outBps: 120, inBytes: 4_000_000, outBytes: 4_000_000 }] } }, now);
+  }
 }
 
 function seedHosts(app: App, net: Net): void {

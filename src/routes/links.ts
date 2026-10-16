@@ -23,6 +23,10 @@ export const MIBS = [
   { name: 'CISCO-CLASS-BASED-QOS-MIB', what: 'Input and output service policies, per-class packets, bytes and drops, and queue depth (64-bit counters, or 32-bit where a device has no others). Used for devices that implement it.' },
   { name: 'JUNIPER-COS-MIB · DIFFSERV-MIB', what: 'Queue statistics per forwarding class on Juniper devices, and the standard DiffServ data path (classifier, meter, counter and drop elements) on devices that publish it. Cisco\'s MIB is tried first.' },
   { name: 'CISCO-VLAN-MEMBERSHIP-MIB · CISCO-VTP-MIB · Q-BRIDGE-MIB', what: 'The VLAN of each port: access and voice VLAN, trunk native and allowed VLANs, or the standard port VLAN id.' },
+  { name: 'CISCO-CEF-MIB · CISCO-DHCP-SNOOPING-MIB', what: 'Cisco only. The forwarding table (checks which interface a flow should have left) and DHCP snooping leases (MAC, IP, VLAN and port of each client), read every few minutes.' },
+  { name: 'CISCO-EIGRP-MIB · CISCO-IETF-BFD-MIB', what: 'Cisco only. EIGRP neighbours with retransmissions, and BFD sessions with their state and last failure.' },
+  { name: 'CISCO-IF-EXTENSION-MIB · CISCO-PORT-STORM-CONTROL-MIB · CISCO-PORT-SECURITY-MIB', what: 'Cisco only. Per interface: output and input queue drops, resets, packets suppressed by storm control and port security violations.' },
+  { name: 'CISCO-PROCESS-MIB · CISCO-STACKWISE-MIB · CISCO-DYNAMIC-ARP-INSPECTION-MIB · CISCO-NBAR-PROTOCOL-DISCOVERY-MIB', what: 'Cisco only. The busiest processes (including the SNMP engine), stack members and stack ports, ARP packets dropped per VLAN, and the applications NBAR2 recognised on each interface.' },
   { name: 'Aruba AI-AP-MIB (Instant access points)', what: 'Radios (channel, power, noise, how busy the channel is), SSIDs, and the wireless clients with their name, IP address, signal and traffic, read with the host tables.' },
   { name: 'BRIDGE-MIB · Q-BRIDGE-MIB · IP-MIB · LLDP-MIB · CISCO-CDP-MIB', what: 'MAC address tables, ARP, and LLDP/CDP neighbours every few minutes, to show which port a host is plugged into. Cisco switches are read one VLAN at a time.' }
 ];

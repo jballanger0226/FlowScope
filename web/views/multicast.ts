@@ -18,6 +18,7 @@ interface Route {
 interface Detail {
   device: { id: number; name: string; ip: string; role: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
   pim: { interfaces: { name: string; mode: string; dr: string | null }[]; neighbors: { address: string; ifName: string }[] };
+  load?: { name: string; inBps: number | null; outBps: number | null; inOctets: number | null; outOctets: number | null; ttl: number | null; rateLimit: number | null }[];
 }
 
 let devs: DevSummary[] | null = null; let devError = '';
@@ -146,5 +147,20 @@ export function render(): VNode {
       loading && !detail ? spinner('Loading routes…') : null,
       detailError ? note(detailError, 'warn', true) : null,
       detail ? table(detail) : null,
+      detail?.load?.length ? loadTable(detail.load) : null,
       detail && detail.pim.neighbors.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'PIM neighbours: ', detail.pim.neighbors.map(n => `${n.address} on ${n.ifName}`).join(', ')) : null) : null);
+}
+
+/** Multicast bytes through each interface: replication multiplies it, so an interface can carry far more multicast out than came in. */
+function loadTable(list: NonNullable<Detail['load']>): VNode {
+  const shown = list.slice(0, 20);
+  return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Multicast load by interface'),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'rate since the previous read, and the total since the counters started')),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(140px,1fr) 110px 110px 130px 130px 90px;--w:700px' },
+      h('div', { class: 'tr head' }, ...['Interface', 'Rate in', 'Rate out', 'Bytes in', 'Bytes out', 'Limit'].map(t => h('span', null, t))),
+      shown.map(x => h('div', { key: x.name, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.name),
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.inBps === null ? '—' : bps(x.inBps)), h('span', { class: 'mono', style: 'font-size:12px' }, x.outBps === null ? '—' : bps(x.outBps)),
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.inOctets === null ? '—' : num(x.inOctets)), h('span', { class: 'mono', style: 'font-size:12px' }, x.outOctets === null ? '—' : num(x.outOctets)),
+        h('span', { class: 'dim', style: 'font-size:12px' }, x.rateLimit ? `${num(x.rateLimit)} kbps` : x.ttl ? `TTL ${x.ttl}` : 'none'))))),
+    list.length > shown.length ? h('span', { class: 'dim', style: 'font-size:12px' }, `${list.length - shown.length} quieter interfaces not shown`) : null);
 }

@@ -6,7 +6,10 @@ import type { SnmpClient } from './client.js';
 import { ciscoSource } from './collect.js';
 import { juniperSource, diffservSource, type QosSource } from './qos_vendors.js';
 import { readResources } from './resources.js';
-import { readIfExtra, readSensors, readPoe, readStp, readOspf, readBgp } from './health.js';
+import { readIfExtra, readSensors, readPoe, readStp, readOspf, readBgp, readEigrp, readBfd } from './health.js';
+import { readFib } from './fib.js';
+import { readDhcpBindings } from './dhcp_snooping.js';
+import { readDai, readNbar, readProcesses, readStack } from './cisco_extra.js';
 import { readWlanFor, wlanVendor } from './wlan_vendors.js';
 
 /*
@@ -42,6 +45,8 @@ export interface Expect {
   cdp: boolean; mac: boolean; arp: boolean; vlans: boolean;
   /** 'must' when the vendor's boxes always have sensors, 'maybe' when the standard MIB may be there */
   sensors: 'must' | 'maybe' | null; poe: boolean; stp: boolean; ospf: boolean; bgp: boolean; mcast: boolean;
+  /** Cisco-only tables: forwarding table, EIGRP and BFD (routing devices and L3 switches), and for switches DHCP snooping, stack, ARP inspection */
+  cRouting: boolean; cSwitch: boolean; cAny: boolean;
   qos: 'cisco-cbqos' | 'juniper-cos' | 'diffserv' | null; wifi: boolean;
 }
 export function expectFor(f: CheckFacts): Expect {
@@ -56,6 +61,7 @@ export function expectFor(f: CheckFacts): Expect {
     sensors: ap || vendor === 'netsnmp' ? null : strong && (l2 || l3) ? 'must' : capable || l2 || f.role === 'router' ? 'maybe' : null,
     poe: l2, stp: l2, ospf: l3 || (l2 && (strong || vendor === 'arista')), bgp: l3 || (l2 && (strong || vendor === 'arista')),
     mcast: l3 || (l2 && (strong || vendor === 'arista')),
+    cRouting: vendor === 'cisco' && (l3 || l2), cSwitch: vendor === 'cisco' && l2, cAny: vendor === 'cisco' && (l2 || l3),
     qos: ap ? null : vendor === 'cisco' ? 'cisco-cbqos' : vendor === 'juniper' ? 'juniper-cos' : 'diffserv', wifi: ap || wl
   };
 }
@@ -101,7 +107,7 @@ const WIFI_HINT: Record<string, string> = {
   cisco: 'Cisco wireless controllers publish access points and clients in CISCO-LWAPP-AP-MIB (.1.3.6.1.4.1.9.9.513) and CISCO-LWAPP-DOT11-CLIENT-MIB (.1.3.6.1.4.1.9.9.599).'
 };
 const GROUP: Record<string, CheckGroup> = { interfaces: 'basics', counters: 'basics', resources: 'basics', lldp: 'neighbours', cdp: 'neighbours', mac: 'hosts', arp: 'hosts', vlans: 'hosts',
-  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', quality: 'quality', qos: 'quality', wifi: 'wifi' };
+  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', dai: 'hosts', stack: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
 const GROUP_ORDER: CheckGroup[] = ['basics', 'neighbours', 'hosts', 'hardware', 'routing', 'quality', 'wifi'];
 
 async function attempt<T>(fn: () => Promise<T>, empty: T): Promise<{ v: T; error: string | null }> {
@@ -187,7 +193,7 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
     ex.ospf ? attempt(() => readOspf(cl), []) : none([] as Awaited<ReturnType<typeof readOspf>>),
     ex.bgp ? attempt(() => readBgp(cl), { peers: [], localAs: null }) : none({ peers: [], localAs: null as number | null }),
     ex.mcast ? attempt(() => readMulticast(cl, Date.now(), ex.vendor === 'cisco'), null) : none(null as Awaited<ReturnType<typeof readMulticast>>),
-    attempt(() => readIfExtra(cl), new Map<number, never>() as unknown as Awaited<ReturnType<typeof readIfExtra>>),
+    attempt(() => readIfExtra(cl, Date.now(), ex.vendor === 'cisco'), new Map<number, never>() as unknown as Awaited<ReturnType<typeof readIfExtra>>),
     ex.wifi ? attempt(() => readWlanFor(c, f.ifaces ?? [], oid, descr), null) : none(null as Awaited<ReturnType<typeof readWlanFor>>)
   ]);
   const hdOf = (r: NonNullable<typeof res.v>) => [
@@ -228,13 +234,45 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
         hint: mcast.error ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83). Check the SNMP view of this credential includes them.' : undefined });
   }
 
+  // Cisco-only tables, read with the readers the poller uses. Each is "not applicable" when empty: a table appears only when the feature is in use.
+  if (ex.cAny) {
+    const [fib, eigrp, bfd, dhcp, stack, dai, procs, nbar] = await Promise.all([
+      ex.cRouting ? attempt(() => readFib(cl), null) : none(null as Awaited<ReturnType<typeof readFib>>),
+      ex.cRouting ? attempt(() => readEigrp(cl), []) : none([] as Awaited<ReturnType<typeof readEigrp>>),
+      ex.cRouting ? attempt(() => readBfd(cl), []) : none([] as Awaited<ReturnType<typeof readBfd>>),
+      ex.cSwitch ? attempt(() => readDhcpBindings(cl), []) : none([] as Awaited<ReturnType<typeof readDhcpBindings>>),
+      ex.cSwitch ? attempt(() => readStack(cl), null) : none(null as Awaited<ReturnType<typeof readStack>>),
+      ex.cSwitch ? attempt(() => readDai(cl, null), null) : none(null as Awaited<ReturnType<typeof readDai>>),
+      attempt(() => readProcesses(cl), null),
+      attempt(() => readNbar(cl), null)
+    ]);
+    const view = 'Check the SNMP view of this credential includes it.';
+    const row = (id: string, title: string, count: number, okText: string, naText: string, error: string | null, hint: string): void => {
+      out.push(count ? { id, title, group: GROUP[id], state: 'ok', count, detail: okText } : { id, title, group: GROUP[id], state: 'na', count: 0, detail: error ?? naText, hint: error ? `${hint} ${view}` : undefined });
+    };
+    if (ex.cRouting) {
+      row('fib', 'Forwarding table (CEF)', fib.v?.entries.length ?? 0, `${plural(fib.v?.entries.length ?? 0, 'prefix', 'prefixes')} with their outgoing interfaces${fib.v?.truncated ? ' (cut off at the most that FlowScope keeps)' : ''}. Used to check that a flow left the interface the routing table says it should.`,
+        'No forwarding table (CISCO-CEF-MIB). It needs CEF, which is on by default on routers and Layer 3 switches.', fib.error, 'CISCO-CEF-MIB is .1.3.6.1.4.1.9.9.492.');
+      row('eigrp', 'EIGRP neighbours', eigrp.v.length, `${plural(eigrp.v.length, 'neighbour')}, ${eigrp.v.filter(p => p.level === 'ok').length} without retransmissions.`, 'No EIGRP neighbours (CISCO-EIGRP-MIB). Normal when this device does not run EIGRP.', eigrp.error, 'CISCO-EIGRP-MIB is .1.3.6.1.4.1.9.9.449.');
+      row('bfd', 'BFD sessions', bfd.v.length, `${plural(bfd.v.length, 'session')}, ${bfd.v.filter(b => b.level === 'ok').length} up.`, 'No BFD sessions (CISCO-IETF-BFD-MIB). Normal when BFD is not configured.', bfd.error, 'CISCO-IETF-BFD-MIB is .1.3.6.1.4.1.9.10.137.');
+    }
+    if (ex.cSwitch) {
+      row('dhcp', 'DHCP snooping bindings', dhcp.v.length, `${plural(dhcp.v.length, 'binding')}: each gives a host's MAC address, IP address, VLAN and port without needing an ARP entry.`, 'No DHCP snooping bindings (CISCO-DHCP-SNOOPING-MIB). Normal when DHCP snooping is off.', dhcp.error, 'CISCO-DHCP-SNOOPING-MIB is .1.3.6.1.4.1.9.9.380.');
+      row('stack', 'Stack members and ports', stack.v?.members.length ?? 0, `${plural(stack.v?.members.length ?? 0, 'member')}, ${stack.v?.ports.filter(p => p.level === 'ok').length ?? 0} of ${stack.v?.ports.length ?? 0} stack ports up${stack.v?.problems.length ? '. ' + stack.v.problems[0] : ''}.`, 'No stack information (CISCO-STACKWISE-MIB). Normal for a switch that is not stacked.', stack.error, 'CISCO-STACKWISE-MIB is .1.3.6.1.4.1.9.9.500.');
+      row('dai', 'ARP inspection drops', dai.v ? 1 : 0, dai.v && dai.v.vlans.length ? `ARP packets were dropped on ${plural(dai.v.vlans.length, 'VLAN')}.` : 'The statistics are published and no VLAN has dropped an ARP packet.', 'No ARP inspection statistics (CISCO-DYNAMIC-ARP-INSPECTION-MIB). Normal when it is not configured.', dai.error, 'CISCO-DYNAMIC-ARP-INSPECTION-MIB is .1.3.6.1.4.1.9.9.374.');
+    }
+    row('procs', 'Process CPU', procs.v?.top.length ?? 0, `The busiest of the device's processes${procs.v?.snmpOne !== null && procs.v?.snmpOne !== undefined ? `; the SNMP engine uses ${procs.v.snmpOne}% over a minute` : ''}.`, 'No per-process CPU (CISCO-PROCESS-MIB).', procs.error, 'CISCO-PROCESS-MIB is .1.3.6.1.4.1.9.9.109.');
+    row('nbar', 'Application statistics (NBAR2)', nbar.v ? Object.keys(nbar.v.interfaces).length : 0, `Recognised applications on ${plural(Object.keys(nbar.v?.interfaces ?? {}).length, 'interface')}.`, 'No NBAR2 statistics (CISCO-NBAR-PROTOCOL-DISCOVERY-MIB). Normal when protocol discovery is not switched on.', nbar.error, 'CISCO-NBAR-PROTOCOL-DISCOVERY-MIB is .1.3.6.1.4.1.9.9.244.');
+  }
+
   // Link quality: IF-MIB errors and discards, broadcast and multicast, and the EtherLike-MIB frame errors
   const ifx = [...extra.v.values()];
   const nErr = ifx.filter(x => x.totals.inErr !== undefined).length, nCast = ifx.filter(x => x.totals.inBc !== undefined).length, nDot3 = ifx.filter(x => x.totals.fcs !== undefined).length;
+  const nQ = ifx.filter(x => x.totals.outQDrops !== undefined).length;
   const wantDot3 = (ex.l2 || ex.l3) && ex.vendor !== 'netsnmp';
   out.push(!ifx.length ? { id: 'quality', title: 'Interface errors and link quality', group: 'quality', state: 'fail', count: 0, detail: extra.error ?? 'No error, discard or broadcast counters were returned.', hint: 'Errors and discards come from IF-MIB (.1.3.6.1.2.1.2.2), broadcast and multicast from ifXTable (.1.3.6.1.2.1.31.1.1) and frame errors from EtherLike-MIB (.1.3.6.1.2.1.10.7).' }
     : wantDot3 && !nDot3 ? { id: 'quality', title: 'Interface errors and link quality', group: 'quality', state: 'warn', count: nErr, detail: `Errors and discards on ${plural(nErr, 'interface')}${nCast ? `, broadcast and multicast on ${nCast}` : ''}, but no EtherLike-MIB: CRC, alignment and collision counts and duplex are not available.`, hint: 'EtherLike-MIB is .1.3.6.1.2.1.10.7. Some devices publish it only for physical ports, or leave it out of the SNMP view.' }
-      : { id: 'quality', title: 'Interface errors and link quality', group: 'quality', state: 'ok', count: nErr, detail: `Errors and discards on ${plural(nErr, 'interface')}${nCast ? `, broadcast and multicast on ${nCast}` : ''}${nDot3 ? `, frame errors and duplex on ${nDot3}` : ''}.` });
+      : { id: 'quality', title: 'Interface errors and link quality', group: 'quality', state: 'ok', count: nErr, detail: `Errors and discards on ${plural(nErr, 'interface')}${nCast ? `, broadcast and multicast on ${nCast}` : ''}${nDot3 ? `, frame errors and duplex on ${nDot3}` : ''}${nQ ? `, queue drops, resets, storm control and port security on ${nQ}` : ''}.` });
 
   // Queue statistics, from the one MIB this kind of device uses
   if (ex.qos) {

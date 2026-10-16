@@ -13,7 +13,7 @@
  *
  * The column numbers and index layouts were checked against a full walk of a Catalyst 9300 stack running IOS XE 17.18.
  */
-import { toNum, type SnmpClient, type SnmpValue } from './client.js';
+import { toBigInt, toNum, type SnmpClient, type SnmpValue } from './client.js';
 
 export interface McOif {
   ifIndex: number;
@@ -40,6 +40,14 @@ export interface McRoute {
 export interface McReceiver { group: string; ifIndex: number; lastReporter: string | null; expirySec: number | null; self: boolean }
 export interface McPimIf { ifIndex: number; mode: 'dense' | 'sparse' | 'sparse-dense' | 'other'; dr: string | null }
 export interface McNeighbor { address: string; ifIndex: number }
+export interface McIfLoad {
+  ifIndex: number;
+  /** Octet totals as read, and the rate in bits per second since the previous read when there was one */
+  inOctets: number | null; outOctets: number | null; inBps: number | null; outBps: number | null;
+  /** Multicast boundary TTL threshold and rate limit (kbps) configured on the interface; 0 means none */
+  ttl: number | null; rateLimit: number | null;
+}
+
 export interface Multicast {
   readAt: number;
   /** 'cisco' when the Cisco table (rates, flags) was available, otherwise 'standard' */
@@ -48,6 +56,8 @@ export interface Multicast {
   receivers: McReceiver[];
   pimInterfaces: McPimIf[];
   neighbors: McNeighbor[];
+  /** Multicast bytes in and out of each interface (IPMROUTE-STD-MIB). Absent in reads stored before it was collected */
+  interfaces?: McIfLoad[];
   /** The tables held more rows than were kept */
   truncated: boolean;
 }
@@ -57,6 +67,7 @@ export const MAX_ROUTES = 20_000;
 const ROUTE = '1.3.6.1.2.1.83.1.1.2.1';
 const NEXTHOP = '1.3.6.1.2.1.83.1.1.3.1';
 const CROUTE = '1.3.6.1.4.1.9.10.2.1.1.2.1';
+const MC_IF = '1.3.6.1.2.1.83.1.1.4.1';
 const IGMP_CACHE = '1.3.6.1.2.1.85.1.2.1';
 const PIM_IF = '1.3.6.1.3.61.1.1.2.1';
 const PIM_NBR = '1.3.6.1.3.61.1.1.3.1';
@@ -153,9 +164,19 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   const nbrIf = await col(c, `${PIM_NBR}.2`);
   const neighbors: McNeighbor[] = [...nbrIf].map(([idx, v]) => ({ address: idx, ifIndex: num(v) ?? 0 })).filter(n => isIp(n.address));
 
+  // per-interface multicast bytes: HC counters when the device has them
+  const [hcIn, hcOut, lIn, lOut, ttl, lim] = await Promise.all([7, 8, 5, 6, 2, 4].map(n => col(c, `${MC_IF}.${n}`)));
+  const big = (v: SnmpValue | undefined): number | null => { if (v === undefined || v === null) return null; const b = toBigInt(v); return b === null ? null : Number(b); };
+  const interfaces: McIfLoad[] = [];
+  for (const k of new Set([...hcIn.keys(), ...lIn.keys()])) {
+    const ifIndex = Number(k); if (!Number.isInteger(ifIndex) || ifIndex <= 0) continue;
+    interfaces.push({ ifIndex, inOctets: big(hcIn.get(k)) ?? big(lIn.get(k)), outOctets: big(hcOut.get(k)) ?? big(lOut.get(k)), inBps: null, outBps: null, ttl: num(ttl.get(k)), rateLimit: num(lim.get(k)) });
+  }
+  interfaces.sort((a, b) => a.ifIndex - b.ifIndex);
+
   if (!routes.size && !receivers.length) return null;
   const list = [...routes.values()].sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.source.localeCompare(b.source, undefined, { numeric: true }));
-  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, truncated };
+  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, interfaces, truncated };
 }
 
 /** What a device's multicast state says about one group: the routes for it and the interfaces its receivers sit behind. */
@@ -204,4 +225,15 @@ export function compareOut(e: GroupExpectation, flowIn: number | null, flowOut: 
     unexpected: [...seen].filter(x => !exp.has(x)).sort((a, b) => a - b),
     inMismatch: flowIn && inRoute && flowIn !== inRoute ? { flow: flowIn, route: inRoute } : null
   };
+}
+
+/** Fills in the bits per second of each interface from the previous read. A counter that went backwards, or an interval that is too long to mean anything, gives no figure. */
+export function withLoadRates(m: Multicast, prev: Multicast | null): Multicast {
+  if (!m.interfaces || !prev?.interfaces) return m;
+  const dt = (m.readAt - prev.readAt) / 1000;
+  if (dt <= 0 || dt > 3600) return m;
+  const old = new Map(prev.interfaces.map(i => [i.ifIndex, i]));
+  const rate = (a: number | null, b: number | null | undefined) => (a === null || b === null || b === undefined || a < b ? null : Math.round(((a - b) * 8) / dt));
+  for (const i of m.interfaces) { const o = old.get(i.ifIndex); if (o) { i.inBps = rate(i.inOctets, o.inOctets); i.outBps = rate(i.outOctets, o.outOctets); } }
+  return m;
 }

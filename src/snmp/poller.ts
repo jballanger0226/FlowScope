@@ -7,13 +7,13 @@ import type { ClsPoint, IfPoint, TsStore } from '../store/types.js';
 import type { AppLog } from '../logger.js';
 import type { SnmpClient } from './client.js';
 import { readResources } from './resources.js';
-import { readMulticast } from './multicast.js';
+import { readMulticast, withLoadRates } from './multicast.js';
 import { readFib } from './fib.js';
 
 /** The slow optional readers. `run` returns whether the device had the table. */
 interface SlowReader { name: string; cisco: boolean; every: number; emptyEvery: number; errorEvery: number; run(c: SnmpClient, d: DeviceRow, devs: DeviceService, now: number, cisco: boolean): Promise<boolean> }
 const SLOW: SlowReader[] = [
-  { name: 'mcast', cisco: false, every: 115_000, emptyEvery: 3600_000, errorEvery: 600_000, run: async (c, d, devs, now, cisco) => { const m = await readMulticast(c, now, cisco); devs.saveMulticast(d.id, m); return !!m; } },
+  { name: 'mcast', cisco: false, every: 115_000, emptyEvery: 3600_000, errorEvery: 600_000, run: async (c, d, devs, now, cisco) => { const m0 = await readMulticast(c, now, cisco); const m = m0 ? withLoadRates(m0, devs.multicast(d.id)) : null; devs.saveMulticast(d.id, m); return !!m; } },
   { name: 'fib', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs) => { const f = await readFib(c); devs.saveData(d.id, 'fib', f, f?.readAt); return !!f; } },
   // Cisco extras: the busiest processes, stack health, ARP inspection drops and the applications NBAR2 recognised
   { name: 'procs', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readProcesses(c, now); devs.saveData(d.id, 'procs', x, now); return !!x; } },
