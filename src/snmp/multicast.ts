@@ -13,7 +13,7 @@
  *
  * The column numbers and index layouts were checked against a full walk of a Catalyst 9300 stack running IOS XE 17.18.
  */
-import { toBigInt, toNum, type SnmpClient, type SnmpValue } from './client.js';
+import { toBigInt, toNum, toStr, type SnmpClient, type SnmpValue } from './client.js';
 
 export interface McOif {
   ifIndex: number;
@@ -58,6 +58,8 @@ export interface Multicast {
   neighbors: McNeighbor[];
   /** Multicast bytes in and out of each interface (IPMROUTE-STD-MIB). Absent in reads stored before it was collected */
   interfaces?: McIfLoad[];
+  /** Names of the interfaces the tables mention, asked of the device by ifIndex. VLAN, tunnel and loopback interfaces are not in the stored interface list, so their names come from here. */
+  names?: Record<number, string>;
   /** The tables held more rows than were kept */
   truncated: boolean;
 }
@@ -175,8 +177,27 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   interfaces.sort((a, b) => a.ifIndex - b.ifIndex);
 
   if (!routes.size && !receivers.length) return null;
+  const names = await interfaceNames(c, [...routes.values()].flatMap(r => [r.inIfIndex ?? 0, ...r.oifs.map(o => o.ifIndex)]).concat(receivers.map(r => r.ifIndex), pimInterfaces.map(p => p.ifIndex), neighbors.map(n => n.ifIndex), interfaces.map(i => i.ifIndex)));
   const list = [...routes.values()].sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.source.localeCompare(b.source, undefined, { numeric: true }));
-  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, interfaces, truncated };
+  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, interfaces, names, truncated };
+}
+
+/** ifName (or ifDescr) of each interface the multicast tables refer to, read with a few GETs. A device that will not answer just gives no names. */
+export async function interfaceNames(c: SnmpClient, ifIndexes: number[]): Promise<Record<number, string>> {
+  const want = [...new Set(ifIndexes.filter(n => Number.isInteger(n) && n > 0))].slice(0, 400);
+  const out: Record<number, string> = {};
+  if (!want.length || typeof c.get !== 'function') return out;
+  for (const col of ['1.3.6.1.2.1.31.1.1.1.1', '1.3.6.1.2.1.2.2.1.2']) {
+    const todo = want.filter(n => !out[n]);
+    for (let i = 0; i < todo.length; i += 40) {
+      try {
+        const r = await c.get(todo.slice(i, i + 40).map(n => `${col}.${n}`));
+        for (const [oid, vb] of r) { const n = Number(oid.slice(col.length + 1)); const s = vb.value === null || vb.value === undefined ? '' : toStr(vb.value as SnmpValue); if (n && s) out[n] = s; }
+      } catch { break; }
+    }
+    if (want.every(n => out[n])) break;
+  }
+  return out;
 }
 
 /** What a device's multicast state says about one group: the routes for it and the interfaces its receivers sit behind. */

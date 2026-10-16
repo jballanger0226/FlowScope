@@ -8,9 +8,9 @@ import { buildPlan, type Plan } from '../snmp/multicast_plan.js';
 const STALE_MS = 10 * 60_000;
 
 /** The names of a device's interfaces, falling back to "if<number>". */
-function namer(app: App, devId: number): (ifIndex: number) => string {
+function namer(app: App, devId: number, mc?: { names?: Record<number, string> } | null): (ifIndex: number) => string {
   const m = new Map(app.devices.interfaces(devId).map(i => [i.ifIndex, i.name || i.descr] as const));
-  return ix => m.get(ix) || `if${ix}`;
+  return ix => m.get(ix) || mc?.names?.[ix] || `if${ix}`;
 }
 
 /** Where a multicast stream is expected to go, from the routers' own multicast state set beside what the exporters reported. */
@@ -25,7 +25,7 @@ export function multicastPlan(app: App, group: string, source: string, recs: Flo
   const devices = [];
   for (const d of app.devices.rows()) {
     const mc = app.devices.multicast(d.id); if (!mc) continue;
-    devices.push({ devId: d.id, name: d.name, role: d.role ?? 'device', mc, ifName: namer(app, d.id) });
+    devices.push({ devId: d.id, name: d.name, role: d.role ?? 'device', mc, ifName: namer(app, d.id, mc) });
   }
   return buildPlan({ group, source, firstSeen, lastSeen, now: Date.now(), devices, flows });
 }
@@ -54,7 +54,7 @@ export function registerMulticast(app: App): void {
     if (!d) throw new HttpError(404, 'No such device');
     const m = app.devices.multicast(id);
     if (!m) throw new HttpError(404, 'This device has not published multicast routing state. It may not route multicast, or SNMP has not read it yet.');
-    const name = namer(app, id);
+    const name = namer(app, id, m);
     const nbr = new Map(m.neighbors.map(n => [n.ifIndex, n.address]));
     const joins = new Map<string, typeof m.receivers>();
     for (const r of m.receivers) { const k = r.group + '|' + r.ifIndex; const a = joins.get(k) ?? []; a.push(r); joins.set(k, a); }

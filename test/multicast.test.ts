@@ -212,3 +212,19 @@ test('rates come from the difference to the previous read, and a counter that we
   assert.equal(b.interfaces!.find(x => x.ifIndex === 81)!.inBps, null);
   assert.equal(withLoadRates(b, { ...a, readAt: 1_060_000 }).interfaces!.find(x => x.ifIndex === 110)!.inBps, 1_000_000, 'an identical timestamp leaves the rates alone');
 });
+
+test('names of interfaces the multicast tables mention are asked of the device', async () => {
+  const asked: string[] = [];
+  const c = { get: async (oids: string[]) => {
+    asked.push(...oids);
+    const m = new Map<string, { oid: string; type: number; value: SnmpValue }>();
+    for (const o of oids) if (o === '1.3.6.1.2.1.31.1.1.1.1.78') m.set(o, { oid: o, type: 4, value: 'Vl78' as unknown as SnmpValue });
+    return m;
+  } } as unknown as SnmpClient;
+  const { interfaceNames } = await import('../src/snmp/multicast.js');
+  const n = await interfaceNames(c, [78, 78, 0, 79]);
+  assert.equal(n[78], 'Vl78');
+  assert.equal(n[79], undefined, 'an interface the device does not name is left out');
+  assert.ok(asked.every(o => !o.endsWith('.0')), 'ifIndex 0 is never asked for');
+  assert.deepEqual(await interfaceNames({} as SnmpClient, [78]), {}, 'a client without get gives no names');
+});
