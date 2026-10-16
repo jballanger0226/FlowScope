@@ -76,7 +76,7 @@ test('HTTP API: VLAN columns, SVIs left out of needs-attention, host tracking, m
     assert.equal(add.status, 201, add.text);
     const devId = add.json.device.id;
 
-    app.settings.set('alerts', { util: 60, drop: 1 });
+    app.settings.set('alerts', { util: 60, drop: 1, mcast: 50, priority: 80 });
     // rates need two polls a little apart
     await app.poller.pollNow(devId); await sleep(2200); await app.poller.pollNow(devId);
 

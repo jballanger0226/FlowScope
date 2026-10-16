@@ -75,6 +75,14 @@ export type PortSource = 'flow' | 'reverse' | 'neighbor' | 'host';
 /** A class that dropped at least this share of its packets in some poll is flagged on the stream. Below it the drops are only mentioned. */
 const DROP_FLAG_PCT = 0.1;
 
+/** The forwarding table's answer for the destination of a stream at one hop. */
+export interface RouteView {
+  prefix: string; len: number; readAt: number;
+  paths: { ifIndex: number; ifName: string; nextHop: string | null; kind: string }[];
+  /** 'ok' the flow left through an interface the table uses; 'mismatch' it did not; 'local' the address belongs to the device; 'unknown' no interface was reported or the table has no route */
+  state: 'ok' | 'mismatch' | 'local' | 'unknown';
+}
+
 export interface HopView {
   n: number;
   exporter: string;
@@ -88,6 +96,8 @@ export interface HopView {
   inNeighbors?: NeighborView[]; outNeighbors?: NeighborView[];
   /** Details this exporter does not send at all (MAC addresses, VLAN, TTL), so a blank means "not exported" and not "lost". Set by the route from the exporter's templates. */
   notExported?: string[];
+  /** What the device's forwarding table says about the destination (see route_check.ts). Set only for devices whose table was read. */
+  route?: RouteView | null;
   /** Every interface the traffic left through, busiest first. More than one on a multicast stream means the device replicated it. */
   outIfs: string[];
   /** Set on a multicast stream when SNMP data says the source host is plugged into this device: the port it is on, and whether the flow's ingress interface agrees. */

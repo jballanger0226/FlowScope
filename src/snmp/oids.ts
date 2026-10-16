@@ -73,6 +73,7 @@ export const OID = {
   cbQosSetCfgL2CosValue: '1.3.6.1.4.1.9.9.166.1.14.1.1.5',
   cbQosQueueingCfgBandwidth: '1.3.6.1.4.1.9.9.166.1.9.1.1.1',
   cbQosQueueingCfgBandwidthUnits: '1.3.6.1.4.1.9.9.166.1.9.1.1.2',
+  cbQosQueueingCfgPriorityEnabled: '1.3.6.1.4.1.9.9.166.1.9.1.1.4',
   cbQosCMPrePolicyPkt32: '1.3.6.1.4.1.9.9.166.1.15.1.1.2',
   cbQosCMPrePolicyPkt64: '1.3.6.1.4.1.9.9.166.1.15.1.1.3',
   cbQosCMPrePolicyByte32: '1.3.6.1.4.1.9.9.166.1.15.1.1.5',

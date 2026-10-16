@@ -13,7 +13,7 @@
  *
  * The column numbers and index layouts were checked against a full walk of a Catalyst 9300 stack running IOS XE 17.18.
  */
-import { toNum, type SnmpClient, type SnmpValue } from './client.js';
+import { toBigInt, toNum, toStr, type SnmpClient, type SnmpValue } from './client.js';
 
 export interface McOif {
   ifIndex: number;
@@ -40,6 +40,14 @@ export interface McRoute {
 export interface McReceiver { group: string; ifIndex: number; lastReporter: string | null; expirySec: number | null; self: boolean }
 export interface McPimIf { ifIndex: number; mode: 'dense' | 'sparse' | 'sparse-dense' | 'other'; dr: string | null }
 export interface McNeighbor { address: string; ifIndex: number }
+export interface McIfLoad {
+  ifIndex: number;
+  /** Octet totals as read, and the rate in bits per second since the previous read when there was one */
+  inOctets: number | null; outOctets: number | null; inBps: number | null; outBps: number | null;
+  /** Multicast boundary TTL threshold and rate limit (kbps) configured on the interface; 0 means none */
+  ttl: number | null; rateLimit: number | null;
+}
+
 export interface Multicast {
   readAt: number;
   /** 'cisco' when the Cisco table (rates, flags) was available, otherwise 'standard' */
@@ -48,6 +56,12 @@ export interface Multicast {
   receivers: McReceiver[];
   pimInterfaces: McPimIf[];
   neighbors: McNeighbor[];
+  /** Multicast bytes in and out of each interface (IPMROUTE-STD-MIB). Absent in reads stored before it was collected */
+  interfaces?: McIfLoad[];
+  /** Names of the interfaces the tables mention, asked of the device by ifIndex. VLAN, tunnel and loopback interfaces are not in the stored interface list, so their names come from here. */
+  names?: Record<number, string>;
+  /** Interfaces the tables mention whose link is not up (ifOperStatus other than 1). A route can list a down interface as forwarding. */
+  down?: number[];
   /** The tables held more rows than were kept */
   truncated: boolean;
 }
@@ -57,6 +71,7 @@ export const MAX_ROUTES = 20_000;
 const ROUTE = '1.3.6.1.2.1.83.1.1.2.1';
 const NEXTHOP = '1.3.6.1.2.1.83.1.1.3.1';
 const CROUTE = '1.3.6.1.4.1.9.10.2.1.1.2.1';
+const MC_IF = '1.3.6.1.2.1.83.1.1.4.1';
 const IGMP_CACHE = '1.3.6.1.2.1.85.1.2.1';
 const PIM_IF = '1.3.6.1.3.61.1.1.2.1';
 const PIM_NBR = '1.3.6.1.3.61.1.1.3.1';
@@ -67,11 +82,13 @@ const CFLAGS: [number, string][] = [[12, 'prune'], [13, 'sparse'], [14, 'connect
 
 const ip4 = (p: string[], at: number): string => p.slice(at, at + 4).join('.');
 /** An IpAddress value: net-snmp hands back dotted text, but four raw bytes are accepted too. */
-const ipOf = (v: SnmpValue | undefined): string | null => {
+export const ipOf = (v: SnmpValue | undefined): string | null => {
   if (v === undefined || v === null) return null;
   const t = Buffer.isBuffer(v) ? (v.length === 4 ? [...v].join('.') : '') : String(v);
   return isIp(t) && t !== '0.0.0.0' ? t : null;
 };
+/** An IPv4 address as a number (NaN when it is not one). */
+export const ipv4Int = (ip: string): number => { const p = ip.split('.'); return p.length === 4 && p.every(x => /^\d{1,3}$/.test(x) && Number(x) < 256) ? ((Number(p[0]) << 24) | (Number(p[1]) << 16) | (Number(p[2]) << 8) | Number(p[3])) >>> 0 : NaN; };
 const num = (v: SnmpValue | undefined): number | null => (v === undefined || v === null ? null : toNum(v));
 const EMPTY = new Map<string, SnmpValue>();
 const col = (c: SnmpClient, oid: string) => c.column(oid, 50).catch(() => EMPTY);
@@ -151,9 +168,66 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   const nbrIf = await col(c, `${PIM_NBR}.2`);
   const neighbors: McNeighbor[] = [...nbrIf].map(([idx, v]) => ({ address: idx, ifIndex: num(v) ?? 0 })).filter(n => isIp(n.address));
 
+  // per-interface multicast bytes: HC counters when the device has them
+  const [hcIn, hcOut, lIn, lOut, ttl, lim] = await Promise.all([7, 8, 5, 6, 2, 4].map(n => col(c, `${MC_IF}.${n}`)));
+  const big = (v: SnmpValue | undefined): number | null => { if (v === undefined || v === null) return null; const b = toBigInt(v); return b === null ? null : Number(b); };
+  const interfaces: McIfLoad[] = [];
+  for (const k of new Set([...hcIn.keys(), ...lIn.keys()])) {
+    const ifIndex = Number(k); if (!Number.isInteger(ifIndex) || ifIndex <= 0) continue;
+    interfaces.push({ ifIndex, inOctets: big(hcIn.get(k)) ?? big(lIn.get(k)), outOctets: big(hcOut.get(k)) ?? big(lOut.get(k)), inBps: null, outBps: null, ttl: num(ttl.get(k)), rateLimit: num(lim.get(k)) });
+  }
+  interfaces.sort((a, b) => a.ifIndex - b.ifIndex);
+
   if (!routes.size && !receivers.length) return null;
+  const names = await interfaceNames(c, [...routes.values()].flatMap(r => [r.inIfIndex ?? 0, ...r.oifs.map(o => o.ifIndex)]).concat(receivers.map(r => r.ifIndex), pimInterfaces.map(p => p.ifIndex), neighbors.map(n => n.ifIndex), interfaces.map(i => i.ifIndex)));
+  const used = [...routes.values()].flatMap(r => r.oifs.map(o => o.ifIndex)).concat(receivers.map(r => r.ifIndex));
+  const down = await interfacesDown(c, used);
   const list = [...routes.values()].sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.source.localeCompare(b.source, undefined, { numeric: true }));
-  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, truncated };
+  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, interfaces, names, down, truncated };
+}
+
+/** The last host to report each group on each interface (igmpCacheLastReporter), read on its own so it can be sampled often. */
+export async function readIgmpReporters(c: SnmpClient): Promise<{ group: string; ifIndex: number; reporter: string }[]> {
+  const rep = await col(c, `${IGMP_CACHE}.4`);
+  const out: { group: string; ifIndex: number; reporter: string }[] = [];
+  for (const [idx, v] of rep) {
+    const p = idx.split('.'); if (p.length < 5) continue;
+    const r = ipOf(v); if (!r || r === '0.0.0.0') continue;
+    out.push({ group: ip4(p, 0), ifIndex: Number(p[4]), reporter: r });
+  }
+  return out;
+}
+
+/** ifName (or ifDescr) of each interface the multicast tables refer to, read with a few GETs. A device that will not answer just gives no names. */
+export async function interfaceNames(c: SnmpClient, ifIndexes: number[]): Promise<Record<number, string>> {
+  const want = [...new Set(ifIndexes.filter(n => Number.isInteger(n) && n > 0))].slice(0, 400);
+  const out: Record<number, string> = {};
+  if (!want.length || typeof c.get !== 'function') return out;
+  for (const col of ['1.3.6.1.2.1.31.1.1.1.1', '1.3.6.1.2.1.2.2.1.2']) {
+    const todo = want.filter(n => !out[n]);
+    for (let i = 0; i < todo.length; i += 40) {
+      try {
+        const r = await c.get(todo.slice(i, i + 40).map(n => `${col}.${n}`));
+        for (const [oid, vb] of r) { const n = Number(oid.slice(col.length + 1)); const s = vb.value === null || vb.value === undefined ? '' : toStr(vb.value as SnmpValue); if (n && s) out[n] = s; }
+      } catch { break; }
+    }
+    if (want.every(n => out[n])) break;
+  }
+  return out;
+}
+
+/** Which of these interfaces are not up, read as ifOperStatus. An interface the device does not answer for is not reported. */
+export async function interfacesDown(c: SnmpClient, ifIndexes: number[]): Promise<number[]> {
+  const want = [...new Set(ifIndexes.filter(n => Number.isInteger(n) && n > 0))].slice(0, 400);
+  const col = '1.3.6.1.2.1.2.2.1.8', out: number[] = [];
+  if (!want.length || typeof c.get !== 'function') return out;
+  for (let i = 0; i < want.length; i += 40) {
+    try {
+      const r = await c.get(want.slice(i, i + 40).map(n => `${col}.${n}`));
+      for (const [oid, vb] of r) { const v = toNum(vb.value as SnmpValue); if (v !== null && v !== 1) out.push(Number(oid.slice(col.length + 1))); }
+    } catch { break; }
+  }
+  return out;
 }
 
 /** What a device's multicast state says about one group: the routes for it and the interfaces its receivers sit behind. */
@@ -202,4 +276,15 @@ export function compareOut(e: GroupExpectation, flowIn: number | null, flowOut: 
     unexpected: [...seen].filter(x => !exp.has(x)).sort((a, b) => a - b),
     inMismatch: flowIn && inRoute && flowIn !== inRoute ? { flow: flowIn, route: inRoute } : null
   };
+}
+
+/** Fills in the bits per second of each interface from the previous read. A counter that went backwards, or an interval that is too long to mean anything, gives no figure. */
+export function withLoadRates(m: Multicast, prev: Multicast | null): Multicast {
+  if (!m.interfaces || !prev?.interfaces) return m;
+  const dt = (m.readAt - prev.readAt) / 1000;
+  if (dt <= 0 || dt > 3600) return m;
+  const old = new Map(prev.interfaces.map(i => [i.ifIndex, i]));
+  const rate = (a: number | null, b: number | null | undefined) => (a === null || b === null || b === undefined || a < b ? null : Math.round(((a - b) * 8) / dt));
+  for (const i of m.interfaces) { const o = old.get(i.ifIndex); if (o) { i.inBps = rate(i.inOctets, o.inOctets); i.outBps = rate(i.outOctets, o.outOctets); } }
+  return m;
 }

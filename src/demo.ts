@@ -91,6 +91,10 @@ function demoHealth(d: Dev, now: number): Health {
   } else if (d.name === 'dc-spine-01') h.stp = { rootId: '4096/' + d.mac, isRoot: true, rootPort: 0, rootCost: 0, topChanges: 4, sinceChangeSec: 9 * 86400, blockingPorts: 0, ports: 8 };
   else if (d.role === 'switch') h.stp = { rootId: '4096/00:1c:73:00:01:01', isRoot: false, rootPort: 1, rootCost: 4, topChanges: 6, sinceChangeSec: 5 * 86400, blockingPorts: 0, ports: 6 };
   if (d.name === 'core-rtr-01') h.ospf = [{ id: '10.255.0.2', address: '10.0.0.2', state: 'full', level: 'ok' }, { id: '10.255.0.5', address: '10.0.0.6', state: 'full', level: 'ok' }, { id: '10.255.0.9', address: '10.0.0.10', state: 'full', level: 'ok' }];
+  if (d.name === 'core-rtr-01') {
+    h.eigrp = [{ as: 1971, address: '10.0.0.14', ifIndex: 2, holdSec: 13, upText: '3w1d', srttMs: 1, retrans: 15, retries: 0, level: 'ok' }, { as: 1971, address: '10.0.0.18', ifIndex: 3, holdSec: 11, upText: '5d02h', srttMs: 4, retrans: 212, retries: 2, level: 'warn' }];
+    h.bfd = [{ id: 393217, address: '10.0.0.14', ifIndex: 2, state: 'up', level: 'ok', upSec: 21 * 86400, upCount: 1, diag: null, detectMs: 1500 }, { id: 393219, address: '10.0.0.18', ifIndex: 3, state: 'up', level: 'ok', upSec: 5 * 86400, upCount: 3, diag: 'control detection time expired', detectMs: 1500 }];
+  }
   if (d.name === 'wan-rtr-01') {
     h.ospf = [{ id: '10.255.0.1', address: '10.0.0.9', state: 'full', level: 'ok' }];
     h.bgpLocalAs = 65010;
@@ -117,7 +121,8 @@ function exRates(d: Dev, i: Ifc, t: number): Record<ExtraCounter, number> {
   return {
     fcs, align, symbol: 0, late, excessive: 0, collisions: mismatch ? 0.4 * (0.3 + wave(900, 7)) : 0, carrier: 0, tooLong: 0, unknown: 0.002 * (1 + wave(4000)),
     inMc: mc, inBc: bc, outMc: 2 * (0.7 + 0.6 * wave(2500)), outBc: storm ? bc * 0.3 : 1 * (0.6 + 0.8 * wave(2100)),
-    inErr: fcs + align, outErr: mismatch ? late : 0, inDisc: wave(11000) > 0.99 ? 0.01 : 0, outDisc
+    inErr: fcs + align, outErr: mismatch ? late : 0, inDisc: wave(11000) > 0.99 ? 0.01 : 0, outDisc,
+    outQDrops: busy ? outDisc * 0.8 : 0, inQDrops: 0, resets: 0, storm: storm && bc > 1000 ? bc * 0.05 : 0, portSec: 0
   };
 }
 const EXACC = new Map<string, { t: number; v: Record<string, number> }>();
@@ -174,12 +179,14 @@ const DEVS: Dev[] = [
 
 // class: [name, queue, matched DSCP values, guarantee]
 const POLICIES: Record<string, [string, string, number[], string][]> = {
-  'CORE-OUT': [['VOICE', 'Q0 · strict priority', [46], 'priority 10%'], ['VIDEO', 'Q1', [34], '25%'], ['CRITICAL', 'Q2', [18], '30%'], ['BULK', 'Q3', [10], '5%'], ['DEFAULT', 'Q4 · class-default', [], 'remainder']],
-  'WAN-OUT': [['VOICE', 'Q0 · strict priority', [46], 'priority 20%'], ['VIDEO', 'Q1', [34], '25%'], ['SIGNALING', 'Q2', [24], '5%'], ['CRITICAL', 'Q3', [18], '30%'], ['BULK', 'Q4', [10], '5%'], ['DEFAULT', 'Q5 · class-default', [], 'remainder']],
+  'CORE-OUT': [['VOICE', 'Q0 · strict priority', [46], '10%'], ['VIDEO', 'Q1', [34], '25%'], ['CRITICAL', 'Q2', [18], '30%'], ['BULK', 'Q3', [10], '5%'], ['DEFAULT', 'Q4 · class-default', [], 'remainder']],
+  'WAN-OUT': [['VOICE', 'Q0 · strict priority', [46], '20%'], ['VIDEO', 'Q1', [34], '25%'], ['SIGNALING', 'Q2', [24], '5%'], ['CRITICAL', 'Q3', [18], '30%'], ['BULK', 'Q4', [10], '5%'], ['DEFAULT', 'Q5 · class-default', [], 'remainder']],
   'DC-FABRIC-OUT': [['REPLICATION', 'Q1', [26], '30%'], ['CRITICAL', 'Q2', [18], '30%'], ['BULK', 'Q3', [10], '10%'], ['DEFAULT', 'Q4 · class-default', [], 'remainder']],
-  'FW-OUT': [['VOICE', 'Q0 · strict priority', [46], 'priority 10%'], ['CRITICAL', 'Q1', [18], '40%'], ['DEFAULT', 'Q2 · class-default', [], 'remainder']]
+  'FW-OUT': [['VOICE', 'Q0 · strict priority', [46], '10%'], ['CRITICAL', 'Q1', [18], '40%'], ['DEFAULT', 'Q2 · class-default', [], 'remainder']]
 };
 const SHARE: Record<string, number> = { VOICE: 0.03, VIDEO: 0.08, SIGNALING: 0.01, CRITICAL: 0.35, REPLICATION: 0.3, BULK: 0.12, DEFAULT: 0.25 };
+/** A voice queue running close to its priority limit (dist side of the WAN) */
+const HOT_SHARE: Record<string, number> = { 'wan-rtr-01|Gi0/0/0|VOICE': 0.44 };
 const OVERRIDE: Record<string, { drop: number; depth: number; mode: 'burst' | 'ramp' }> = {
   'dc-leaf-07|Eth1/49|BULK': { drop: 2.4, depth: 212, mode: 'burst' },
   'core-rtr-01|Te0/0/3|DEFAULT': { drop: 1.2, depth: 96, mode: 'ramp' },
@@ -399,11 +406,12 @@ class SnmpModel {
         let discPkts = 0;
         if (policy) {
           const defs = POLICIES[policy];
-          const total = defs.reduce((a, c) => a + (SHARE[c[0]] ?? 0.1), 0);
+          const shareOf = (c: string) => HOT_SHARE[`${d.name}|${name}|${c}`] ?? SHARE[c] ?? 0.1;
+          const total = defs.reduce((a, c) => a + shareOf(c[0]), 0);
           for (const [cname] of defs) {
             const key = `${d.name}|${name}|${cname}`;
             const o = OVERRIDE[key];
-            const classBps = outBps * (SHARE[cname] ?? 0.1) / total;
+            const classBps = outBps * shareOf(cname) / total;
             const preBytes = classBps * dt / 8, avg = cname === 'VOICE' ? 200 : 600;
             const prePkts = preBytes / avg;
             let pct = 0, depth = Math.round(5 + this.r() * 20);
@@ -468,7 +476,7 @@ function seedConfig(app: App, net: Net): void {
       const mode = svi ? 'svi' : pi?.mode ?? '', vlan = svi ? Number(svi[1]) : pi?.vlan ?? 0;
       db.prepare('INSERT OR IGNORE INTO interfaces(dev_id, if_index, name, descr, alias, speed_mbps, oper_status, policy) VALUES (?,?,?,?,?,?,?,?)').run(row!.id, ifx, ifc[0], ifc[1], ifc[1], ifc[2], 1, ifc[3]);
       db.prepare('UPDATE interfaces SET if_type = ?, port_mode = ?, vlan = ?, voice_vlan = ?, vlan_list = ?, policy_in = ? WHERE dev_id = ? AND if_index = ?').run(ifType, mode, vlan, pi?.voice ?? 0, pi?.list ?? '', POLICY_IN[key] ?? null, row!.id, ifx);
-      if (ifc[3]) for (const c of POLICIES[ifc[3]]) db.prepare('INSERT OR IGNORE INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)').run(row!.id, ifx, c[0], c[1], JSON.stringify(c[2]), c[3]);
+      if (ifc[3]) for (const c of POLICIES[ifc[3]]) db.prepare('INSERT OR IGNORE INTO class_defs(dev_id, if_index, cls, queue, dscps, bw, priority) VALUES (?,?,?,?,?,?,?)').run(row!.id, ifx, c[0], c[1], JSON.stringify(c[2]), c[3], c[1].includes('strict priority') ? 1 : 0);
       if (POLICY_IN[key]) for (const c of IN_POLICIES[POLICY_IN[key]]) db.prepare('INSERT OR IGNORE INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)').run(row!.id, ifx, 'in:' + c[0], '', JSON.stringify(c[1]), c[2]);
     });
     const ifs = db.prepare('SELECT if_index, name FROM interfaces WHERE dev_id = ?').all(row.id) as unknown as { if_index: number; name: string }[];
@@ -506,7 +514,37 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
   if (twice) app.devices.saveIfExtra(id, demoIfExtra(d, ifIdx, now - 60_000));
   app.devices.saveIfExtra(id, demoIfExtra(d, ifIdx, now));
   const h = demoHealth(d, now);
-  app.devices.saveHealth(id, h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length ? h : null);
+  app.devices.saveHealth(id, h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length || h.eigrp?.length || h.bfd?.length ? h : null);
+  // Cisco extras: busiest processes on the switches and routers, a stack, ARP inspection drops and application statistics
+  if (d.role === 'switch' || d.role === 'router') {
+    const wob = Math.round(((Math.sin(now / 600_000 + id) + 1) / 2) * 3);
+    app.devices.saveData(id, 'procs', { readAt: now, top: [{ name: 'linux_iosd-imag', pid: 7813, five: 9 + wob, one: 8, fiveMin: 7 }, { name: 'fed main event', pid: 6121, five: 6, one: 5, fiveMin: 5 }, { name: 'SNMP ENGINE', pid: 4172, five: 3 + wob, one: 4, fiveMin: 3 }, { name: 'IP Input', pid: 220, five: 1, one: 1, fiveMin: 1 }], snmpFive: 3 + wob, snmpOne: 4 }, now);
+  }
+  if (d.name === 'dc-spine-01') {
+    // multicast state: video and market-data groups from a handful of encoders, receivers on both downlinks
+    const e7 = ifIdx('Eth1/7') ?? 0, e9 = ifIdx('Eth1/9') ?? 0;
+    const routes = [] as any[]; const receivers = [] as any[];
+    for (let g = 0; g < 130; g++) {
+      const gi = Math.floor(g / 5), group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`; const src = `10.9.0.${30 + (g % 9)}`;
+      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: '10.255.0.1',
+        oifs: [{ ifIndex: e9, forwarding: g % 5 !== 0, pkts: 80_000 * (g + 1) }] });
+      if (g % 3 === 0) receivers.push({ group, ifIndex: e9, lastReporter: `10.1.4.${20 + (g % 40)}`, expirySec: 200, self: false });
+    }
+    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], truncated: false, interfaces: [{ ifIndex: e9, inOctets: null, outOctets: null, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: null, outOctets: null, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
+    // hosts collected over time from the IGMP cache: several per group on the downlink
+    for (const r of receivers) app.devices.noteIgmp(id, Array.from({ length: 6 }, (_, k) => ({ group: r.group, ifIndex: r.ifIndex, reporter: `10.1.4.${20 + ((Number(r.group.split('.')[3]) + k * 7) % 40)}` })), now, false);
+  }
+  if (d.name === 'dc-spine-01') {
+    const m = (n: number, role: string) => ({ index: n * 1000, number: n, role, state: 'ready', level: 'ok', mac: `00:1c:73:01:0${n}:00` });
+    app.devices.saveData(id, 'stack', { readAt: now, members: [m(1, 'master'), m(2, 'standby'), m(3, 'member')], ports: [88, 89, 191, 192, 272, 273].map((ifIndex, i) => ({ ifIndex, status: 'up', level: 'ok', neighbor: ((i + 1) % 3 + 1) * 1000 })), problems: [] }, now);
+  }
+  if (d.name === 'dist-sw-01') {
+    app.devices.saveData(id, 'dai', { readAt: now, dtSec: 300, vlans: [{ vlan: 140, forwarded: 290_344, dropped: 555_705, dhcpDenied: 555_705, aclDenied: 0, srcMac: 0, dstMac: 0, ip: 0, invalid: 0, droppedNow: 41 }] }, now);
+    const gi = ifIdx('Gi1/0/12');
+    if (gi) app.devices.saveData(id, 'nbar', { readAt: now, interfaces: { [gi]: [
+      { name: 'ms-office-365', inBps: 2_400_000, outBps: 640_000, inBytes: 9_100_000_000, outBytes: 2_300_000_000 }, { name: 'ssl', inBps: 1_100_000, outBps: 300_000, inBytes: 4_800_000_000, outBytes: 1_200_000_000 },
+      { name: 'dns', inBps: 12_000, outBps: 9_000, inBytes: 180_000_000, outBytes: 90_000_000 }, { name: 'ntp', inBps: 120, outBps: 120, inBytes: 4_000_000, outBytes: 4_000_000 }] } }, now);
+  }
 }
 
 function seedHosts(app: App, net: Net): void {

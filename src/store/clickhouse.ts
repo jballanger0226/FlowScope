@@ -453,7 +453,7 @@ class ClickHouseStore implements TsStore {
       if (!c) { c = { cls: r.cls, points: [] }; by.set(r.cls, c); }
       const secs2 = r.secs_ > 0 ? r.secs_ : 1;
       const dp = Number(r.dp), pp = Number(r.pp);
-      c.points.push({ ts: Number(r.bk), dropPct: pp > 0 ? 100 * dp / pp : 0, dropBps: Number(r.dbytes) / secs2, dropPps: dp / secs2, sentBps: Number(r.sb) / secs2, qdepth: Number(r.qd ?? 0) });
+      c.points.push({ ts: Number(r.bk), dropPct: pp > 0 ? 100 * dp / pp : 0, dropBps: 8 * Number(r.dbytes) / secs2, dropPps: dp / secs2, sentBps: 8 * Number(r.sb) / secs2, qdepth: Number(r.qd ?? 0) });
     }
     return { step, tier, classes: [...by.values()] };
   }
@@ -463,7 +463,7 @@ class ClickHouseStore implements TsStore {
       sum(dt) AS secs_, max(ts) AS mts, argMax(qdepth, ts) AS qd FROM snmp_cls WHERE ts BETWEEN ${N(sinceMs)} AND ${N(Date.now() + 60_000)} GROUP BY dev, if_index, cls`);
     return rows.map(r => ({
       dev: Number(r.dev), ifIndex: Number(r.if_index), cls: r.cls, dropPct: Number(r.pp) > 0 ? 100 * Number(r.dp) / Number(r.pp) : 0, dropPkts: Number(r.dp), dropBytes: Number(r.dbytes),
-      sentBps: Number(r.sb) / Math.max(1, Number(r.secs_)), qdepth: Number(r.qd ?? 0), ts: Number(r.mts)
+      sentBps: 8 * Number(r.sb) / Math.max(1, Number(r.secs_)), qdepth: Number(r.qd ?? 0), ts: Number(r.mts)
     }));
   }
 

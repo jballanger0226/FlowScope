@@ -8,9 +8,9 @@ import { buildPlan, type Plan } from '../snmp/multicast_plan.js';
 const STALE_MS = 10 * 60_000;
 
 /** The names of a device's interfaces, falling back to "if<number>". */
-function namer(app: App, devId: number): (ifIndex: number) => string {
+function namer(app: App, devId: number, mc?: { names?: Record<number, string> } | null): (ifIndex: number) => string {
   const m = new Map(app.devices.interfaces(devId).map(i => [i.ifIndex, i.name || i.descr] as const));
-  return ix => m.get(ix) || `if${ix}`;
+  return ix => m.get(ix) || app.devices.ifNameById(devId, ix) || mc?.names?.[ix] || `if${ix}`;
 }
 
 /** Where a multicast stream is expected to go, from the routers' own multicast state set beside what the exporters reported. */
@@ -25,7 +25,7 @@ export function multicastPlan(app: App, group: string, source: string, recs: Flo
   const devices = [];
   for (const d of app.devices.rows()) {
     const mc = app.devices.multicast(d.id); if (!mc) continue;
-    devices.push({ devId: d.id, name: d.name, role: d.role ?? 'device', mc, ifName: namer(app, d.id) });
+    devices.push({ devId: d.id, name: d.name, role: d.role ?? 'device', mc, ifName: namer(app, d.id, mc) });
   }
   return buildPlan({ group, source, firstSeen, lastSeen, now: Date.now(), devices, flows });
 }
@@ -54,20 +54,38 @@ export function registerMulticast(app: App): void {
     if (!d) throw new HttpError(404, 'No such device');
     const m = app.devices.multicast(id);
     if (!m) throw new HttpError(404, 'This device has not published multicast routing state. It may not route multicast, or SNMP has not read it yet.');
-    const name = namer(app, id);
+    const name = namer(app, id, m);
+    const ifs = new Map(app.devices.interfaces(id).map(i => [i.ifIndex, i.oper] as const)), downSet = new Set(m.down ?? []);
+    const isDown = (ix: number): boolean => ifs.has(ix) ? ifs.get(ix) !== 1 : downSet.has(ix);
     const nbr = new Map(m.neighbors.map(n => [n.ifIndex, n.address]));
     const joins = new Map<string, typeof m.receivers>();
     for (const r of m.receivers) { const k = r.group + '|' + r.ifIndex; const a = joins.get(k) ?? []; a.push(r); joins.set(k, a); }
     const now = Date.now();
+    // Where the hosts named in this device's state are plugged in. IGMP reports the VLAN interface and the last host that reported, not the switch port,
+    // so a reporter or a source is looked up in host tracking (ARP, MAC tables, DHCP snooping).
+    const ips = new Set<string>();
+    for (const r of m.routes) if (r.source !== '0.0.0.0') ips.add(r.source);
+    for (const r of m.receivers) if (r.lastReporter && !r.self) ips.add(r.lastReporter);
+    const members = new Map<string, { ip: string; lastSeen: number; firstSeen: number }[]>();
+    for (const x of app.devices.mcastMembers(id)) { ips.add(x.ip); const k = x.group + '|' + x.ifIndex; const a = members.get(k) ?? []; a.push({ ip: x.ip, lastSeen: x.lastSeen, firstSeen: x.firstSeen }); members.set(k, a); }
+    const hosts: Record<string, { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null } | null> = {};
+    for (const ip of [...ips].slice(0, 2500)) {
+      const a = app.hosts.locate(ip).attach;
+      hosts[ip] = a && a.edge ? { dev: a.dev, port: a.ifName, vlan: a.vlan, confidence: a.confidence, neighbor: a.neighbor } : null;
+    }
     c.json({
       device: { id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device' }, readAt: m.readAt, stale: now - m.readAt > STALE_MS, source: m.source, truncated: m.truncated,
       routes: m.routes.map(r => ({
         group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
-          ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null,
+          ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null,
+          members: (members.get(r.group + '|' + o.ifIndex) ?? []).map(x => ({ ip: x.ip, ageSec: Math.max(0, Math.round((now - x.lastSeen) / 1000)), sinceSec: Math.round((now - x.firstSeen) / 1000) })),
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))
       })),
+      hosts,
+      load: (m.interfaces ?? []).filter(i => (i.inOctets ?? 0) > 0 || (i.outOctets ?? 0) > 0).map(i => ({ name: name(i.ifIndex), inBps: i.inBps, outBps: i.outBps, inOctets: i.inOctets, outOctets: i.outOctets, ttl: i.ttl, rateLimit: i.rateLimit }))
+        .sort((a, b) => (b.inBps ?? 0) + (b.outBps ?? 0) - (a.inBps ?? 0) - (a.outBps ?? 0) || (b.inOctets ?? 0) + (b.outOctets ?? 0) - (a.inOctets ?? 0) - (a.outOctets ?? 0)),
       pim: { interfaces: m.pimInterfaces.map(p => ({ name: name(p.ifIndex), mode: p.mode, dr: p.dr })), neighbors: m.neighbors.map(n => ({ address: n.address, ifName: name(n.ifIndex) })) }
     });
   });

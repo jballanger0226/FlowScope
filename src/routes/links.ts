@@ -8,6 +8,7 @@ import { streamView } from './flows.js';
 import { isVlanInterface } from '../snmp/ports.js';
 import { DEFAULTS } from '../settings.js';
 import { linkWarnings } from '../snmp/health.js';
+import { daiReason, type Dai, type Nbar, type Processes, type Stack } from '../snmp/cisco_extra.js';
 
 export const MIBS = [
   { name: 'IF-MIB · ifXTable, ifTable', what: 'Interface names, speed, status, each interface\'s own MAC address, 64-bit octet counters and discards.' },
@@ -22,6 +23,10 @@ export const MIBS = [
   { name: 'CISCO-CLASS-BASED-QOS-MIB', what: 'Input and output service policies, per-class packets, bytes and drops, and queue depth (64-bit counters, or 32-bit where a device has no others). Used for devices that implement it.' },
   { name: 'JUNIPER-COS-MIB · DIFFSERV-MIB', what: 'Queue statistics per forwarding class on Juniper devices, and the standard DiffServ data path (classifier, meter, counter and drop elements) on devices that publish it. Cisco\'s MIB is tried first.' },
   { name: 'CISCO-VLAN-MEMBERSHIP-MIB · CISCO-VTP-MIB · Q-BRIDGE-MIB', what: 'The VLAN of each port: access and voice VLAN, trunk native and allowed VLANs, or the standard port VLAN id.' },
+  { name: 'CISCO-CEF-MIB · CISCO-DHCP-SNOOPING-MIB', what: 'Cisco only. The forwarding table (checks which interface a flow should have left) and DHCP snooping leases (MAC, IP, VLAN and port of each client), read every few minutes.' },
+  { name: 'CISCO-EIGRP-MIB · CISCO-IETF-BFD-MIB', what: 'Cisco only. EIGRP neighbours with retransmissions, and BFD sessions with their state and last failure.' },
+  { name: 'CISCO-IF-EXTENSION-MIB · CISCO-PORT-STORM-CONTROL-MIB · CISCO-PORT-SECURITY-MIB', what: 'Cisco only. Per interface: output and input queue drops, resets, packets suppressed by storm control and port security violations.' },
+  { name: 'CISCO-PROCESS-MIB · CISCO-STACKWISE-MIB · CISCO-DYNAMIC-ARP-INSPECTION-MIB · CISCO-NBAR-PROTOCOL-DISCOVERY-MIB', what: 'Cisco only. The busiest processes (including the SNMP engine), stack members and stack ports, ARP packets dropped per VLAN, and the applications NBAR2 recognised on each interface.' },
   { name: 'Aruba AI-AP-MIB (Instant access points)', what: 'Radios (channel, power, noise, how busy the channel is), SSIDs, and the wireless clients with their name, IP address, signal and traffic, read with the host tables.' },
   { name: 'BRIDGE-MIB · Q-BRIDGE-MIB · IP-MIB · LLDP-MIB · CISCO-CDP-MIB', what: 'MAC address tables, ARP, and LLDP/CDP neighbours every few minutes, to show which port a host is plugged into. Cisco switches are read one VLAN at a time.' }
 ];
@@ -29,6 +34,16 @@ export const MIBS = [
 interface Event { ts0: number; ts1: number; devId: number; dev: string; ifIndex: number; ifName: string; kind: 'drop' | 'util' | 'errors'; cls?: string; peak: number; text: string; severity: 'warn' | 'bad' }
 
 /** Interfaces and QoS classes for every polled device, with the latest rates. The Network health page and the Overview both read this. */
+/** The rate a priority class is limited to, from its configured bandwidth ("5000 kbps", "20%"). A share of what is left over has no fixed rate. */
+export function limitBps(bw: string | null, speedMbps: number): number | null {
+  const m = /^([\d.]+) (kbps|%)$/.exec((bw ?? '').trim().replace(/^([\d.]+)(%)$/, '$1 $2'));
+  if (!m) return null;
+  const v = Number(m[1]);
+  if (!(v > 0)) return null;
+  if (m[2] === 'kbps') return v * 1000;
+  return speedMbps > 0 ? v / 100 * speedMbps * 1e6 : null;
+}
+
 export async function linkDevices(app: App, minutes: number) {
   const since = Date.now() - minutes * 60_000;
   const [ifl, cll] = await Promise.all([app.store.ifLatest(since), app.store.classLatest(since)]);
@@ -36,14 +51,23 @@ export async function linkDevices(app: App, minutes: number) {
   const clBy = new Map<string, ClassLatest[]>();
   for (const k of cll) { const key = `${k.dev}/${k.ifIndex}`; const a = clBy.get(key); if (a) a.push(k); else clBy.set(key, [k]); }
   const al = app.settings.get('alerts');
+  // multicast octets per interface (IPMROUTE-STD-MIB), read with the multicast tables
+  const mcastLoad = new Map<number, Map<number, { inBps: number | null; outBps: number | null }>>();
+  for (const dv of app.devices.list()) { const m = app.devices.multicast(dv.id); if (m?.interfaces?.length) mcastLoad.set(dv.id, new Map(m.interfaces.map(x => [x.ifIndex, x]))); }
   const counts = app.hosts.portCounts();
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
     qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
     interfaces: app.devices.interfaces(d.id).map(i => {
+      const mload = mcastLoad.get(d.id)?.get(i.ifIndex);
       const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
       // VLAN and SVI interfaces carry routed traffic for a whole subnet and are never listed under "needs attention"
       const vlanIf = isVlanInterface(i);
+      // how full the busiest strict-priority queue is, and how much of the link multicast takes (the larger of in and out)
+      let prioPct: number | null = null;
+      for (const def of i.classes) { if (!def.priority || def.cls.startsWith('in:')) continue; const lim = limitBps(def.bw, i.speedMbps); const k = cls.find(x => x.cls === def.cls); if (lim && k) prioPct = Math.max(prioPct ?? 0, 100 * k.sentBps / lim); }
+      const mcastBps = mload ? Math.max(mload.inBps ?? 0, mload.outBps ?? 0) : null;
+      const mcastPct = mcastBps !== null && i.speedMbps > 0 ? 100 * mcastBps / (i.speedMbps * 1e6) : null;
       return {
         ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
         portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList,
@@ -51,10 +75,12 @@ export async function linkDevices(app: App, minutes: number) {
         utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
         classes: i.classes.map(def => {
           const k = cls.find(x => x.cls === def.cls);
-          return { cls: def.cls, label: def.cls.replace(/^in:/, ''), dir: def.cls.startsWith('in:') ? 'in' : 'out', dscps: def.dscps, bw: def.bw, queue: def.queue, dropPct: k?.dropPct ?? null, dropPkts: k?.dropPkts ?? 0, dropBytes: k?.dropBytes ?? 0, sentBps: k?.sentBps ?? null, qdepth: k?.qdepth ?? null };
+          const lim = def.priority && !def.cls.startsWith('in:') ? limitBps(def.bw, i.speedMbps) : null;
+          return { priority: def.priority, limitBps: lim, limitPct: lim && k ? 100 * k.sentBps / lim : null, cls: def.cls, label: def.cls.replace(/^in:/, ''), dir: def.cls.startsWith('in:') ? 'in' : 'out', dscps: def.dscps, bw: def.bw, queue: def.queue, dropPct: k?.dropPct ?? null, dropPkts: k?.dropPkts ?? 0, dropBytes: k?.dropBytes ?? 0, sentBps: k?.sentBps ?? null, qdepth: k?.qdepth ?? null };
         }),
         worstDropPct: cls.length ? Math.max(...cls.map(x => x.dropPct)) : null,
-        flagged: !vlanIf && ((!!l && Math.max(l.utilIn, l.utilOut) >= al.util) || cls.some(x => x.dropPct >= al.drop))
+        priorityPct: prioPct, mcastPct,
+        flagged: !vlanIf && ((!!l && Math.max(l.utilIn, l.utilOut) >= al.util) || cls.some(x => x.dropPct >= al.drop) || (prioPct !== null && prioPct >= al.priority) || (mcastPct !== null && mcastPct >= al.mcast))
       };
     })
   }));
@@ -68,7 +94,12 @@ export function linkHealth(app: App, dev: number) {
     const i = ifs.get(ifIndex);
     return { ifIndex, ...x, warnings: i ? linkWarnings(x, i.oper, i.speedMbps) : [] };
   });
-  return { health: app.devices.health(dev), ifExtra: extra };
+  const dai = app.devices.data<Dai>(dev, 'dai');
+  const extras = {
+    procs: app.devices.data<Processes>(dev, 'procs'), stack: app.devices.data<Stack>(dev, 'stack'), nbar: app.devices.data<Nbar>(dev, 'nbar'),
+    dai: dai ? { ...dai, vlans: dai.vlans.map(v => ({ ...v, why: daiReason(v) })) } : null
+  };
+  return { health: app.devices.health(dev), ifExtra: extra, extras };
 }
 
 export function registerLinks(app: App): void {

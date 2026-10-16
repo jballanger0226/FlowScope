@@ -172,3 +172,33 @@ test('multicast routing: a device that routes no multicast is not applicable; ac
   assert.equal(ap.mcast, undefined);
   assert.equal(expectFor({ role: 'switch', cisco: false, objectId: '1.3.6.1.4.1.8072.3.2.10', descr: 'Linux' }).mcast, false, 'a plain Layer 2 switch is not asked');
 });
+
+const CX: Record<string, SnmpValue> = {};
+for (const f of ['dhcp-c9300', 'eigrp-bfd-c9300', 'cisco-extra-c9300', 'fib-c9300', 'ifextra-c9300']) Object.assign(CX, JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'test', 'fixtures', f + '.json'), 'utf8')));
+function cxDevice(rows: Record<string, SnmpValue>) {
+  return {
+    column: async (col: string) => { const m = new Map<string, SnmpValue>(); for (const [o, v] of Object.entries(rows)) if (o.startsWith(col + '.')) m.set(o.slice(col.length + 1), o.startsWith('1.3.6.1.4.1.9.9.500.1.2.1.1.7.') && typeof v === 'string' ? Buffer.from(v, 'hex') : v); return m; },
+    get: async (oids: string[]) => new Map(oids.filter(o => rows[o] !== undefined).map(o => [o, { oid: o, type: 2, value: rows[o]! }])) as never
+  };
+}
+
+test('Cisco tables: a switch with them passes each check with counts, and the checks are grouped', async () => {
+  const c = byId(await runChecks(cxDevice(CX), CAT));
+  for (const [id, group] of [['fib', 'routing'], ['eigrp', 'routing'], ['bfd', 'routing'], ['dhcp', 'hosts'], ['dai', 'hosts'], ['stack', 'hardware'], ['procs', 'hardware'], ['nbar', 'quality']] as const) {
+    assert.equal(c[id]!.state, 'ok', id); assert.equal(c[id]!.group, group, id);
+  }
+  assert.equal(c.fib!.count, 34); assert.equal(c.eigrp!.count, 2); assert.equal(c.bfd!.count, 2); assert.equal(c.dhcp!.count, 12); assert.equal(c.stack!.count, 8);
+  assert.match(c.dai!.detail, /1 VLAN/);
+});
+
+test('Cisco tables: ones the device does not publish are not applicable and say why, and other vendors are not asked', async () => {
+  const c = byId(await runChecks(cxDevice({}), CAT));
+  for (const id of ['fib', 'eigrp', 'bfd', 'dhcp', 'stack', 'dai', 'procs', 'nbar']) assert.equal(c[id]!.state, 'na', id);
+  assert.match(c.eigrp!.detail, /does not run EIGRP/); assert.match(c.dhcp!.detail, /DHCP snooping is off/);
+  const asked: string[] = [];
+  const other = await runChecks(fake({}, [], {}, asked), { role: 'switch', cisco: false, objectId: '1.3.6.1.4.1.2636.1.1', descr: 'Juniper' });
+  for (const id of ['fib', 'eigrp', 'bfd', 'dhcp', 'stack', 'dai', 'procs', 'nbar']) assert.ok(!other.some(k => k.id === id), id);
+  assert.ok(!asked.some(o => o.startsWith('1.3.6.1.4.1.9.9.380') || o.startsWith('1.3.6.1.4.1.9.9.449') || o.startsWith('1.3.6.1.4.1.9.9.500')));
+  assert.equal(expectFor({ role: 'switch', cisco: true, objectId: '1.3.6.1.4.1.9.1.2504', descr: 'Cisco' }).cSwitch, true);
+  assert.equal(expectFor({ role: 'router', cisco: true, objectId: '1.3.6.1.4.1.9.1.1', descr: 'Cisco' }).cSwitch, false, 'a router has no DHCP snooping or stack');
+});

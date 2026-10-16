@@ -39,7 +39,7 @@ export interface InterfaceView {
   mac: string;
   /** The addresses configured on this interface, as "192.168.150.1/24". */
   addresses: string[];
-  classes: { cls: string; queue: string | null; dscps: number[]; bw: string | null; matched: number[]; sets: { dscp: number | null; cos: number | null; precedence: number | null; table: boolean } | null }[];
+  classes: { cls: string; queue: string | null; dscps: number[]; bw: string | null; priority: boolean; matched: number[]; sets: { dscp: number | null; cos: number | null; precedence: number | null; table: boolean } | null }[];
 }
 
 export function parseTargets(spec: string, max = 4096): string[] {
@@ -116,7 +116,7 @@ export class DeviceService {
 
   interfaces(devId: number): InterfaceView[] {
     const ifs = this.cdb.db.prepare('SELECT * FROM interfaces WHERE dev_id = ? ORDER BY if_index').all(devId) as unknown as { dev_id: number; if_index: number; name: string; descr: string | null; alias: string | null; speed_mbps: number; oper_status: number; policy: string | null; policy_in: string | null; if_type: number; mac: string | null; port_mode: string; vlan: number; voice_vlan: number; vlan_list: string }[];
-    const cls = this.cdb.db.prepare('SELECT * FROM class_defs WHERE dev_id = ? ORDER BY if_index, rowid').all(devId) as unknown as { if_index: number; cls: string; queue: string | null; dscps: string; bw: string | null; matched: string; sets: string | null }[];
+    const cls = this.cdb.db.prepare('SELECT * FROM class_defs WHERE dev_id = ? ORDER BY if_index, rowid').all(devId) as unknown as { if_index: number; cls: string; queue: string | null; dscps: string; bw: string | null; matched: string; sets: string | null; priority: number }[];
     const addrs = new Map<number, string[]>();
     for (const a of this.cdb.db.prepare('SELECT ip, if_index, mask FROM device_ips WHERE dev_id = ? ORDER BY ip').all(devId) as unknown as { ip: string; if_index: number | null; mask: string }[]) {
       if (a.if_index === null) continue;
@@ -125,7 +125,7 @@ export class DeviceService {
     return ifs.map(i => ({
       devId, ifIndex: i.if_index, name: i.name, descr: i.descr ?? '', alias: i.alias ?? '', speedMbps: i.speed_mbps, oper: i.oper_status, policy: i.policy, policyIn: i.policy_in, direction: i.policy ? 'output' : null,
       ifType: i.if_type, portMode: i.port_mode, vlan: i.vlan, voiceVlan: i.voice_vlan, vlanList: i.vlan_list, mac: i.mac ?? '', addresses: addrs.get(i.if_index) ?? [],
-      classes: cls.filter(c => c.if_index === i.if_index).map(c => ({ cls: c.cls, queue: c.queue, dscps: JSON.parse(c.dscps) as number[], bw: c.bw, matched: JSON.parse(c.matched || '[]') as number[], sets: c.sets ? JSON.parse(c.sets) : null }))
+      classes: cls.filter(c => c.if_index === i.if_index).map(c => ({ cls: c.cls, queue: c.queue, dscps: JSON.parse(c.dscps) as number[], bw: c.bw, priority: c.priority === 1, matched: JSON.parse(c.matched || '[]') as number[], sets: c.sets ? JSON.parse(c.sets) : null }))
     }));
   }
 
@@ -149,6 +149,8 @@ export class DeviceService {
             if_type=excluded.if_type, port_mode=excluded.port_mode, vlan=excluded.vlan, voice_vlan=excluded.voice_vlan, vlan_list=excluded.vlan_list, mac=excluded.mac`)
           .run(id, i.index, i.name, i.descr, i.alias, i.speedMbps, i.oper, polOut.get(i.index)?.join(', ') ?? null, polIn.get(i.index)?.join(', ') ?? null, i.type, pv?.mode ?? '', pv?.vlan ?? 0, pv?.voice ?? 0, pv?.allowed ?? '', i.mac);
       }
+      db.prepare('DELETE FROM interface_names WHERE dev_id = ?').run(id);
+      for (const h of p.hiddenIfs ?? []) if (h.name) db.prepare('INSERT OR REPLACE INTO interface_names(dev_id, if_index, name) VALUES (?,?,?)').run(id, h.index, h.name);
       for (const r of db.prepare('SELECT if_index FROM interfaces WHERE dev_id = ?').all(id) as unknown as { if_index: number }[]) {
         if (!seen.has(r.if_index)) { db.prepare('DELETE FROM interfaces WHERE dev_id = ? AND if_index = ?').run(id, r.if_index); db.prepare('DELETE FROM class_defs WHERE dev_id = ? AND if_index = ?').run(id, r.if_index); }
       }
@@ -160,9 +162,9 @@ export class DeviceService {
         for (const c of q.classes) {
           const label = classLabel(q, c.name);
           const key = `${q.ifIndex}/${label}`; keep.add(key);
-          db.prepare(`INSERT INTO class_defs(dev_id, if_index, cls, queue, dscps, bw, matched, sets) VALUES (?,?,?,?,?,?,?,?)
-            ON CONFLICT(dev_id, if_index, cls) DO UPDATE SET queue=excluded.queue, bw=excluded.bw, matched=excluded.matched, sets=excluded.sets`)
-            .run(id, q.ifIndex, label, null, JSON.stringify(guessDscps(c.name)), c.bandwidth, JSON.stringify(c.matched), c.sets ? JSON.stringify(c.sets) : null);
+          db.prepare(`INSERT INTO class_defs(dev_id, if_index, cls, queue, dscps, bw, matched, sets, priority) VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(dev_id, if_index, cls) DO UPDATE SET queue=excluded.queue, bw=excluded.bw, matched=excluded.matched, sets=excluded.sets, priority=excluded.priority`)
+            .run(id, q.ifIndex, label, null, JSON.stringify(guessDscps(c.name)), c.bandwidth, JSON.stringify(c.matched), c.sets ? JSON.stringify(c.sets) : null, c.priority ? 1 : 0);
         }
       }
       for (const r of db.prepare('SELECT if_index, cls FROM class_defs WHERE dev_id = ?').all(id) as unknown as { if_index: number; cls: string }[]) {
@@ -196,6 +198,39 @@ export class DeviceService {
   saveMulticast(id: number, m: Multicast | null): void {
     if (!m) { this.cdb.db.prepare('DELETE FROM device_mcast WHERE dev_id = ?').run(id); return; }
     this.cdb.db.prepare('INSERT INTO device_mcast(dev_id, data, read_at) VALUES (?,?,?) ON CONFLICT(dev_id) DO UPDATE SET data=excluded.data, read_at=excluded.read_at').run(id, JSON.stringify(m), m.readAt);
+  }
+
+  /** Keeps the latest read of something else a device publishes (forwarding table, Cisco extras). null removes it. */
+  saveData(id: number, kind: string, data: unknown | null, readAt = Date.now()): void {
+    if (data === null) { this.cdb.db.prepare('DELETE FROM device_data WHERE dev_id = ? AND kind = ?').run(id, kind); return; }
+    this.cdb.db.prepare('INSERT INTO device_data(dev_id, kind, data, read_at) VALUES (?,?,?,?) ON CONFLICT(dev_id, kind) DO UPDATE SET data=excluded.data, read_at=excluded.read_at').run(id, kind, JSON.stringify(data), readAt);
+  }
+  data<T>(id: number, kind: string): T | null {
+    const r = this.cdb.db.prepare('SELECT data FROM device_data WHERE dev_id = ? AND kind = ?').get(id, kind) as { data: string } | undefined;
+    return r ? JSON.parse(r.data) as T : null;
+  }
+
+  /**
+   * Hosts that reported membership of a group, kept over time. The IGMP cache holds one reporter per group and VLAN, so each read adds
+   * whoever reported last. A group that has left the cache drops all its hosts. A host not heard from for 30 minutes goes unless
+   * host tracking still has it on the network (ARP), and none is kept past 12 hours.
+   */
+  noteIgmp(devId: number, rows: { group: string; ifIndex: number; reporter: string }[], now: number, complete = true): void {
+    const db = this.cdb.db;
+    this.cdb.tx(() => {
+      const up = db.prepare('INSERT INTO mcast_members(dev_id, grp, if_index, ip, first_seen, last_seen) VALUES (?,?,?,?,?,?) ON CONFLICT(dev_id, grp, if_index, ip) DO UPDATE SET last_seen = excluded.last_seen');
+      const mine = new Set(((db.prepare('SELECT ip FROM device_ips WHERE dev_id = ?').all(devId) as unknown as { ip: string }[]).map(r => r.ip)));
+      const live = new Set<string>();
+      for (const r of rows) { live.add(r.group + '|' + r.ifIndex); if (!mine.has(r.reporter)) up.run(devId, r.group, r.ifIndex, r.reporter, now, now); }
+      if (complete) for (const m of db.prepare('SELECT DISTINCT grp, if_index FROM mcast_members WHERE dev_id = ?').all(devId) as unknown as { grp: string; if_index: number }[]) {
+        if (!live.has(m.grp + '|' + m.if_index)) db.prepare('DELETE FROM mcast_members WHERE dev_id = ? AND grp = ? AND if_index = ?').run(devId, m.grp, m.if_index);
+      }
+      db.prepare('DELETE FROM mcast_members WHERE dev_id = ? AND (last_seen < ? OR (last_seen < ? AND ip NOT IN (SELECT ip FROM arp WHERE last_seen >= ?)))').run(devId, now - 12 * 3600_000, now - 30 * 60_000, now - 30 * 60_000);
+    });
+  }
+  mcastMembers(devId: number): { group: string; ifIndex: number; ip: string; firstSeen: number; lastSeen: number }[] {
+    return (this.cdb.db.prepare('SELECT grp, if_index, ip, first_seen, last_seen FROM mcast_members WHERE dev_id = ? ORDER BY last_seen DESC').all(devId) as unknown as { grp: string; if_index: number; ip: string; first_seen: number; last_seen: number }[])
+      .map(r => ({ group: r.grp, ifIndex: r.if_index, ip: r.ip, firstSeen: r.first_seen, lastSeen: r.last_seen }));
   }
 
   multicast(id: number): Multicast | null {
@@ -331,11 +366,12 @@ export class DeviceService {
     const d = this.row(id);
     if (!d) throw new DeviceError('No such device', 404);
     this.cdb.tx(() => {
-      for (const t of ['interfaces', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
+      for (const t of ['interfaces', 'interface_names', 'mcast_members', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
       this.cdb.db.prepare('UPDATE exporters SET device_id = NULL WHERE device_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_resources WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_health WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_mcast WHERE dev_id = ?').run(id);
+      this.cdb.db.prepare('DELETE FROM device_data WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM iface_extra WHERE dev_id = ?').run(id);
       forgetResources(this.cdb.db, id); forgetIfExtra(this.cdb.db, id);
       this.cdb.db.prepare('DELETE FROM devices WHERE id = ?').run(id);
@@ -361,6 +397,7 @@ export class DeviceService {
     for (const r of this.cdb.db.prepare('SELECT dev_id, if_index, name, policy FROM interfaces').all() as unknown as { dev_id: number; if_index: number; name: string; policy: string | null }[]) {
       ifNames.set(`${r.dev_id}/${r.if_index}`, r.name); if (r.policy) policies.set(`${r.dev_id}/${r.if_index}`, r.policy);
     }
+    for (const r of this.cdb.db.prepare('SELECT dev_id, if_index, name FROM interface_names').all() as unknown as { dev_id: number; if_index: number; name: string }[]) { const k = `${r.dev_id}/${r.if_index}`; if (!ifNames.has(k)) ifNames.set(k, r.name); }
     this.lookup = { at: Date.now(), ipToDev, names, roles, ifNames, policies };
     return this.lookup;
   }
@@ -371,6 +408,8 @@ export class DeviceService {
   deviceIdForExporter(ip: string): number | null { return this.build().ipToDev.get(ip) ?? null; }
   deviceName(exporterIp: string): string { const l = this.build(); const id = l.ipToDev.get(exporterIp); return id === undefined ? exporterIp : l.names.get(id) ?? exporterIp; }
   deviceRole(exporterIp: string): string { const l = this.build(); const id = l.ipToDev.get(exporterIp); return id === undefined ? 'device' : l.roles.get(id) ?? 'device'; }
+  /** The name of an interface of a device by id, whether or not it is in the interface list. Null when unknown. */
+  ifNameById(devId: number, ifIndex: number): string | null { return this.build().ifNames.get(`${devId}/${ifIndex}`) ?? null; }
   ifName(exporterIp: string, ifIndex: number): string {
     const l = this.build(); const id = l.ipToDev.get(exporterIp);
     return (id !== undefined && l.ifNames.get(`${id}/${ifIndex}`)) || (ifIndex ? `if${ifIndex}` : '—');

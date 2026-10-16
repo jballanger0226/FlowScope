@@ -6,11 +6,11 @@ import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, deb
 import { post } from '../api.js';
 import { correlate, verdict } from './correlate.js';
 import { attentionPanel, cards, cardsRow, issues, type Target } from './links_overview.js';
-import { hardwarePanel, hasHardware, hasOptics, linkQuality, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
+import { hardwarePanel, hasHardware, hasOptics, linkQuality, nbarPanel, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
 import { publicAddresses } from './ip_scope.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
-interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
+interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null; priority?: boolean; limitBps?: number | null; limitPct?: number | null }
 interface Disk { name: string; usedPct: number; totalBytes: number; usedBytes: number }
 interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: number | null; load: [number, number, number] | null; memPct: number | null; memTotal: number | null; memUsed: number | null; swapPct: number | null; sessions?: number | null; sessionsMax?: number | null; tempC?: number | null; disks: Disk[]; source: string; readAt: number }
 interface Iface {
@@ -18,10 +18,10 @@ interface Iface {
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
   portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number;
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
-  classes: Cls[]; worstDropPct: number | null; flagged: boolean;
+  classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
 interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; resources: Resources | null; interfaces: Iface[] }
-interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number }; mibs: { name: string; what: string }[] }
+interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number; mcast: number; priority: number }; mibs: { name: string; what: string }[] }
 interface SeriesRes {
   util: { step: number; points: { ts: number; utilIn: number; utilOut: number; inBps: number; outBps: number; disc: number; err: number }[] };
   classes: { cls: string; dscps: number[]; bw: string | null; points: { ts: number; dropPct: number; dropBps: number; dropPps: number; sentBps: number; qdepth: number }[] }[];
@@ -314,10 +314,10 @@ function sidebar(): VNode {
         !devs.length ? h('span', { class: 'dim' }, d.devices.length ? 'No device matches.' : 'No devices are polled yet. Add one on the SNMP devices tab.') : null)),
     h('div', { class: 'panel col', style: 'gap:10px' },
       h('h3', null, 'Needs attention'),
-      h('p', { class: 'muted' }, `Interfaces above ${d.thresholds.util}% utilisation or dropping more than ${d.thresholds.drop}% of a class, in the last ${d.windowMinutes} minutes.`),
+      h('p', { class: 'muted' }, `Interfaces above ${d.thresholds.util}% utilisation, dropping more than ${d.thresholds.drop}% of a class, with a priority queue above ${d.thresholds.priority}% of its limit, or with multicast above ${d.thresholds.mcast}% of the link, in the last ${d.windowMinutes} minutes.`),
       attn.length ? h('div', { class: 'cards' }, attn.slice(0, 8).map(a => h('button', { key: a.dev.id + '/' + a.itf.ifIndex, type: 'button', class: 'cardbtn', 'aria-pressed': a.dev.id === devId && a.itf.ifIndex === ifIndex, onclick: () => select_(a.dev.id, a.itf.ifIndex, 'interfaces') },
         h('span', { class: 't' }, `${a.dev.name} · ${a.itf.name}`),
-        h('span', { class: 's' }, [a.itf.worstDropPct !== null && a.itf.worstDropPct >= d.thresholds.drop ? `drops ${pct(a.itf.worstDropPct, 2)}` : null, `util ${pct(Math.max(a.itf.utilIn ?? 0, a.itf.utilOut ?? 0), 0)}`].filter(Boolean).join(' · '))))) : h('span', { class: 'dim' }, 'Nothing is over its threshold right now.')),
+        h('span', { class: 's' }, [a.itf.worstDropPct !== null && a.itf.worstDropPct >= d.thresholds.drop ? `drops ${pct(a.itf.worstDropPct, 2)}` : null, a.itf.priorityPct != null && a.itf.priorityPct >= d.thresholds.priority ? `priority queue ${pct(a.itf.priorityPct, 0)} full` : null, a.itf.mcastPct != null && a.itf.mcastPct >= d.thresholds.mcast ? `multicast ${pct(a.itf.mcastPct, 0)} of link` : null, `util ${pct(Math.max(a.itf.utilIn ?? 0, a.itf.utilOut ?? 0), 0)}`].filter(Boolean).join(' · '))))) : h('span', { class: 'dim' }, 'Nothing is over its threshold right now.')),
     locator(),
     h('div', { class: 'panel col', style: 'gap:8px' },
       h('h3', null, 'What is polled'),
@@ -475,8 +475,8 @@ function classTable(itf: Iface): VNode {
   return h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:780px` },
     h('div', { class: 'tr head' }, ...['Class', 'DSCP values', 'Guaranteed', 'Sent', 'Drop %', 'Dropped', 'Queue depth'].map(t => h('span', null, t))),
     itf.classes.map(c => h('div', { key: c.cls, class: 'tr' },
-      h('span', { style: 'font-weight:600' }, c.label, ' ', c.dir === 'in' ? h('span', { class: 'tag', title: 'This class belongs to the input service policy' }, 'in') : null), h('span', { class: 'mono muted', style: 'font-size:12px' }, dscpText(c.dscps)),
-      h('span', { class: 'mono', style: 'font-size:12px' }, c.bw ?? '—'), h('span', { class: 'mono', style: 'font-size:12px' }, bps(c.sentBps)),
+      h('span', { style: 'font-weight:600' }, c.label, ' ', c.dir === 'in' ? h('span', { class: 'tag', title: 'This class belongs to the input service policy' }, 'in') : null, c.priority ? h('span', { class: 'tag', title: 'Strict-priority queue: traffic above its limit is dropped' }, 'priority') : null), h('span', { class: 'mono muted', style: 'font-size:12px' }, dscpText(c.dscps)),
+      h('span', { class: 'mono', style: 'font-size:12px' }, c.bw ?? '—'), h('span', { class: 'mono', style: `font-size:12px;color:${c.limitPct != null && c.limitPct >= (data?.thresholds.priority ?? 80) ? 'var(--bad)' : 'inherit'}`, title: c.limitBps ? `${pct(c.limitPct ?? 0, 0)} of the ${bps(c.limitBps)} this priority queue is limited to` : undefined }, bps(c.sentBps), c.limitPct != null ? ` (${pct(c.limitPct, 0)} of limit)` : ''),
       h('span', { class: 'mono', style: `font-size:12px;color:${(c.dropPct ?? 0) >= (data?.thresholds.drop ?? 1) ? 'var(--bad)' : 'inherit'}` }, c.dropPct === null ? '—' : pct(c.dropPct, 2)),
       h('span', { class: 'mono', style: 'font-size:12px' }, c.dropPkts ? `${num(c.dropPkts)} pkts · ${bytes(c.dropBytes)}` : '0'),
       h('span', { class: 'mono', style: 'font-size:12px' }, c.qdepth === null ? '—' : num(c.qdepth)))),
@@ -675,12 +675,14 @@ function qualityGraphs(itf: Iface): VNode {
   const charts = [
     make('err', 'Errors (per second)', inOut('inErr', 'outErr'), `Errors on ${itf.name}`),
     make('disc', 'Discards (per second)', inOut('inDisc', 'outDisc'), `Discards on ${itf.name}`),
+    make('qd', 'Queue drops (per second)', inOut('inQDrops', 'outQDrops'), `Queue drops on ${itf.name}`),
+    make('guard', 'Storm control and port security (per second)', [...ser('Storm control', 'var(--s4)', 'storm'), ...ser('Port security', 'var(--s2)', 'portSec')], `Storm control and port security on ${itf.name}`),
     make('bc', 'Broadcast (packets per second)', inOut('inBc', 'outBc'), `Broadcast packets on ${itf.name}`),
     make('mc', 'Multicast (packets per second)', inOut('inMc', 'outMc'), `Multicast packets on ${itf.name}`),
     make('types', 'Error types (per second)', kinds.flatMap(([k, n, c]) => ser(n, c, k)), `Error types on ${itf.name}`)
   ].filter((c): c is NonNullable<typeof c> => c !== null);
   const hit = (...k: string[]): number[] => pts.filter(p => k.some(x => (p[x] ?? 0) > 0)).map(p => p.ts);
-  const match = cpuMatch([{ kind: 'Discards', ts: hit('inDisc', 'outDisc') }, { kind: 'Errors', ts: hit('inErr', 'outErr') }], from, to, fmtT);
+  const match = cpuMatch([{ kind: 'Discards', ts: hit('inDisc', 'outDisc') }, { kind: 'Errors', ts: hit('inErr', 'outErr') }, { kind: 'Queue drops', ts: hit('inQDrops', 'outQDrops') }], from, to, fmtT);
   if (match.chart && charts.length) charts.push(match.chart);
   return h('div', { class: 'col', style: 'gap:12px' },
     h('div', { class: 'row end' }, graphControls(), quality?.tier === 'h1' ? chip('hourly averages', 'info', 'The range is older than the per-read samples kept, so hourly summaries are shown') : null),
@@ -698,6 +700,8 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
   const bands = evs.map(e => ({ a: e.a - s.step / 2, b: e.b + s.step / 2 }));
   const fmtT = axisTime(spanMs);
   const mk = (pick: (p: SeriesRes['classes'][0]['points'][0]) => number): Series[] => shown.map(c => ({ name: c.cls, color: classColor(c.cls, names), points: c.points.map(p => ({ t: p.ts, v: pick(p) })) }));
+  const speedBps = (itf.speedMbps || 0) * 1e6;
+  const clsUtil: Series[] = speedBps > 0 ? mk(p => 100 * p.sentBps / speedBps) : [];
   const peak = (c: SeriesRes['classes'][0]) => Math.max(0, ...c.points.map(p => p.dropPct));
   const dropTs = [...new Set(s.classes.flatMap(c => c.points.filter(p => p.dropPps > 0 || p.dropPct > 0).map(p => p.ts)))];
   const match = cpuMatch([{ kind: 'Queue drops', ts: dropTs }, { kind: 'Discards', ts: s.util.points.filter(p => p.disc > 0).map(p => p.ts) }], from, to, fmtT);
@@ -711,19 +715,19 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
         h('i', { class: 'sw', style: `background:${classColor(c.cls, names)};margin:0` }), h('span', null, c.cls), h('span', { class: 'dim' }, 'peak ' + pct(peak(c), 2))))) : null,
     match.note,
     chartGrid((names.length ? 4 : 2) + (match.chart ? 1 : 0), size => [
+      lineChart({
+        ...size, sync: 'iface', onZoom: zoomIf, title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut)), ...clsUtil.flatMap(c => c.points.map(p => p.v))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
+        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }, ...clsUtil], aria: `Utilisation of ${itf.name}, with each queue class`
+      }),
+      lineChart({
+        ...size, sync: 'iface', onZoom: zoomIf, title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)), ...mk(p => p.sentBps).flatMap(c => c.points.map(p => p.v)))), from, to, fmtT,
+        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }, ...mk(p => p.sentBps)], aria: `Throughput of ${itf.name} in bits per second, with each queue class`
+      }),
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Packets dropped (% of the class)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '%', series: mk(p => p.dropPct), from, to, threshold: dropThr, bands, fmtT, fmtV: v => pct(v, 2), aria: `Drop percentage per class on ${itf.name}` }) : null,
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Bytes dropped (per second)', unit: v => bytes(v) + '/s', series: mk(p => p.dropBps / 8), from, to, bands, fmtT, aria: `Bytes dropped per class on ${itf.name}` }) : null,
-      lineChart({
-        ...size, sync: 'iface', onZoom: zoomIf, title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
-        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }], aria: `Utilisation of ${itf.name}`
-      }),
-      lineChart({
-        ...size, sync: 'iface', onZoom: zoomIf, title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)))), from, to, fmtT,
-        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }], aria: `Throughput of ${itf.name} in bits per second`
-      }),
       match.chart ? match.chart.build(size) : null
     ]),
-    h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
+    h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Utilisation and throughput also draw a line for each queue class that is switched on above (what the class sent). Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
     h('div', { class: 'col', style: 'gap:6px' },
       h('b', null, 'Drop events above the threshold'),
       evs.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:150px 210px 90px 110px 1fr;--w:760px' }, evs.slice(0, 30).map((e, i) => h('div', { key: i, class: 'tr' },
@@ -854,7 +858,7 @@ function ifBody(dev: Dev, itf: Iface): VNode {
       linkQuality(healthRes?.ifExtra.find(x => x.ifIndex === itf.ifIndex), (healthRes?.health?.sensors ?? []).filter(x => x.kind === 'optic' && x.ifIndex === itf.ifIndex), itf.speedMbps),
       qualityGraphs(itf)]
     : tab === 'hosts' ? [hostsPanel(dev, itf)]
-    : [classTable(itf),
+    : [classTable(itf), nbarPanel(healthRes?.extras?.nbar, itf.ifIndex),
       seriesLoading && !series ? spinner('Loading the graphs…') : seriesError ? note(seriesError, 'bad', true) : series ? graphs(series, itf) : null,
       streamsPanel(dev, itf)];
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:16px' }, body);
@@ -891,7 +895,7 @@ function tabBody(dev: Dev, tab: DevTab): VNode {
   const body = tab === 'overview' ? overviewPanel(dev)
     : tab === 'interfaces' ? ifTable(dev)
     : tab === 'hardware' ? hardwareTab(dev)
-    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes }), arpPanel(dev), neighborsPanel(dev))
+    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes, ifName: i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? '' }), arpPanel(dev), neighborsPanel(dev))
     : wlanPanel(dev);
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:14px' }, body);
 }

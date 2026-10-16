@@ -1,7 +1,7 @@
 /** Hardware and protocol health on the Network health page: sensors and optics, PoE, spanning tree, OSPF and BGP, and the link quality of one interface. */
 import { h, type VNode } from '../vdom.js';
 import { btn, chip, note, stat, status as statusEl } from '../components.js';
-import { dur, num } from '../util.js';
+import { bps, dur, num } from '../util.js';
 
 export type Level = 'ok' | 'warn' | 'bad' | 'off';
 export interface Sensor { id: string; kind: string; name: string; value: number | null; unit: string; state: Level; stateText: string; optic?: 'tx' | 'rx' | 'temp' | 'other'; ifIndex?: number }
@@ -9,12 +9,26 @@ export interface Poe { group: number; budgetW: number | null; usedW: number | nu
 export interface Stp { rootId: string; isRoot: boolean; rootPort: number; rootCost: number; topChanges: number | null; sinceChangeSec: number | null; blockingPorts: number; ports: number }
 export interface OspfNeighbor { id: string; address: string; state: string; level: Level }
 export interface BgpPeer { address: string; as: number | null; state: string; level: Level; admin: string; upSec: number | null; updatesIn: number | null; updatesOut: number | null }
-export interface Health { readAt: number; sensors: Sensor[]; poe: Poe[]; stp: Stp | null; ospf: OspfNeighbor[]; bgp: BgpPeer[]; bgpLocalAs: number | null }
+export interface EigrpPeer { as: number; address: string; ifIndex: number; holdSec: number | null; upText: string; srttMs: number | null; retrans: number | null; retries: number | null; level: Level }
+export interface BfdSession { id: number; address: string; local?: string; peerKnown?: boolean; ifIndex: number | null; state: string; level: Level; upSec: number | null; upCount: number | null; diag: string | null; detectMs: number | null }
+export interface Health { readAt: number; sensors: Sensor[]; poe: Poe[]; stp: Stp | null; ospf: OspfNeighbor[]; bgp: BgpPeer[]; bgpLocalAs: number | null; eigrp?: EigrpPeer[]; bfd?: BfdSession[] }
 export interface IfExtra {
   ifIndex: number; duplex: 'full' | 'half' | 'unknown' | null; admin: number | null; totals: Record<string, number | undefined>; delta: Record<string, number | undefined> | null; dtSec: number | null; readAt: number;
   warnings: { level: Level; text: string }[];
 }
-export interface HealthRes { health: Health | null; ifExtra: IfExtra[] }
+export interface ProcessCpu { name: string; pid: number; five: number; one: number; fiveMin: number }
+export interface Processes { readAt: number; top: ProcessCpu[]; snmpFive: number | null; snmpOne: number | null }
+export interface StackMember { index: number; number: number | null; role: string; state: string; level: Level; mac: string }
+export interface StackPort { ifIndex: number; status: string; level: Level; neighbor: number | null }
+export interface Stack { readAt: number; members: StackMember[]; ports: StackPort[]; problems: string[] }
+export interface DaiVlan { vlan: number; forwarded: number; dropped: number; dhcpDenied: number; aclDenied: number; srcMac: number; dstMac: number; ip: number; invalid: number; droppedNow: number | null; why: string }
+export interface Dai { readAt: number; vlans: DaiVlan[]; dtSec: number | null }
+export interface NbarProto { name: string; inBps: number; outBps: number; inBytes: number; outBytes: number }
+export interface Nbar { readAt: number; interfaces: Record<number, NbarProto[]> }
+/** Cisco-only reads, each null when the device does not publish the table */
+export interface Extras { procs: Processes | null; stack: Stack | null; dai: Dai | null; nbar: Nbar | null }
+export interface HealthRes { health: Health | null; ifExtra: IfExtra[]; extras?: Extras }
+const NO_HEALTH: Health = { readAt: 0, sensors: [], poe: [], stp: null, ospf: [], bgp: [], bgpLocalAs: null };
 
 const colour = (l: Level): string | undefined => (l === 'bad' ? 'color:var(--bad)' : l === 'warn' ? 'color:var(--warn)' : undefined);
 const worst = (ls: Level[]): Level => (ls.includes('bad') ? 'bad' : ls.includes('warn') ? 'warn' : ls.length && ls.every(l => l === 'off') ? 'off' : 'ok');
@@ -60,15 +74,27 @@ export function attention(hl: Health | null): { level: Level; text: string }[] {
   for (const p of hl.poe) if (p.usedPct !== null && p.usedPct >= 90) out.push({ level: 'warn', text: `PoE budget ${p.usedPct}% used` });
   const nb = hl.ospf.filter(n => n.level !== 'ok'); if (nb.length) out.push({ level: nb.some(n => n.level === 'bad') ? 'bad' : 'warn', text: `${nb.length} OSPF neighbour${nb.length === 1 ? '' : 's'} not full` });
   const bp = hl.bgp.filter(p => p.level === 'bad' || p.level === 'warn'); if (bp.length) out.push({ level: bp.some(p => p.level === 'bad') ? 'bad' : 'warn', text: `${bp.length} BGP peer${bp.length === 1 ? '' : 's'} not established` });
+  const ep = (hl.eigrp ?? []).filter(p => p.level !== 'ok'); if (ep.length) out.push({ level: 'warn', text: `${ep.length} EIGRP neighbour${ep.length === 1 ? '' : 's'} retransmitting` });
+  const bf = (hl.bfd ?? []).filter(b => b.level === 'bad' || b.level === 'warn'); if (bf.length) out.push({ level: bf.some(b => b.level === 'bad') ? 'bad' : 'warn', text: `${bf.length} BFD session${bf.length === 1 ? '' : 's'} not up` });
   if (hl.stp && hl.stp.sinceChangeSec !== null && hl.stp.sinceChangeSec < 600 && hl.stp.topChanges) out.push({ level: 'warn', text: `Spanning tree changed ${dur(hl.stp.sinceChangeSec * 1000)} ago` });
   return out;
 }
 
 /** What the Overview shows of the hardware and protocol reads: whether anything is outside its limits, in one row of chips. */
+export function extrasAttention(ex: Extras | undefined): { level: Level; text: string }[] {
+  const out: { level: Level; text: string }[] = [];
+  if (!ex) return out;
+  if (ex.stack?.problems.length) out.push({ level: 'warn', text: ex.stack.problems.length === 1 ? 'Stack problem' : `${ex.stack.problems.length} stack problems` });
+  const dai = (ex.dai?.vlans ?? []).filter(v => (v.droppedNow ?? 0) > 0); if (dai.length) out.push({ level: 'warn', text: `ARP packets dropped on ${dai.length} VLAN${dai.length === 1 ? '' : 's'}` });
+  if ((ex.procs?.snmpOne ?? 0) >= 10) out.push({ level: 'warn', text: `SNMP engine using ${ex.procs!.snmpOne}% of the CPU` });
+  return out;
+}
+
 export function healthSummary(data: HealthRes | null): VNode | null {
-  const hl = data?.health ?? null;
-  if (!hl || (!hl.sensors.length && !hl.poe.length && !hl.stp && !hl.ospf.length && !hl.bgp.length)) return null;
-  const att = attention(hl);
+  const hl0 = data?.health ?? null;
+  const hl = hl0 ?? (data?.extras && (data.extras.stack || data.extras.procs || data.extras.dai?.vlans.length) ? NO_HEALTH : null);
+  if (!hl || (!hl.sensors.length && !hl.poe.length && !hl.stp && !hl.ospf.length && !hl.bgp.length && !hl.eigrp?.length && !hl.bfd?.length && !data?.extras?.stack && !data?.extras?.procs)) return null;
+  const att = [...attention(hl), ...extrasAttention(data?.extras)];
   const parts: string[] = [];
   const others = hl.sensors.filter(s => s.kind !== 'optic'), optics = hl.sensors.filter(s => s.kind === 'optic');
   if (others.length) parts.push(`${others.length} sensor${others.length === 1 ? '' : 's'}`);
@@ -77,19 +103,21 @@ export function healthSummary(data: HealthRes | null): VNode | null {
   if (hl.stp) parts.push('spanning tree');
   if (hl.ospf.length) parts.push(`${hl.ospf.length} OSPF neighbour${hl.ospf.length === 1 ? '' : 's'}`);
   if (hl.bgp.length) parts.push(`${hl.bgp.length} BGP peer${hl.bgp.length === 1 ? '' : 's'}`);
+  if (hl.eigrp?.length) parts.push(`${hl.eigrp.length} EIGRP neighbour${hl.eigrp.length === 1 ? '' : 's'}`);
+  if (hl.bfd?.length) parts.push(`${hl.bfd.length} BFD session${hl.bfd.length === 1 ? '' : 's'}`);
   return h('div', { class: 'col', style: 'gap:6px' },
     h('span', { class: 'muted', style: 'font-size:12px' }, `Hardware and protocols: ${parts.join(', ')}. Read every few minutes.`),
     att.length ? h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap' }, att.slice(0, 8).map(a => chip(a.text, a.level === 'bad' ? 'bad' : 'warn')), att.length > 8 ? chip(`+${att.length - 8} more`, 'default') : null)
       : h('div', { class: 'row', style: 'gap:6px' }, chip('Nothing outside its limits', 'ok')));
 }
-export const hasHardware = (data: HealthRes | null): boolean => !!data?.health && (data.health.sensors.some(s => s.kind !== 'optic') || data.health.poe.length > 0);
+export const hasHardware = (data: HealthRes | null): boolean => (!!data?.health && (data.health.sensors.some(s => s.kind !== 'optic') || data.health.poe.length > 0)) || !!data?.extras?.procs || !!data?.extras?.stack;
 export const hasOptics = (data: HealthRes | null): boolean => !!data?.health && data.health.sensors.some(s => s.kind === 'optic' && s.ifIndex !== undefined);
-export const hasProtocols = (data: HealthRes | null): boolean => !!data?.health && (!!data.health.stp || data.health.ospf.length > 0 || data.health.bgp.length > 0);
+export const hasProtocols = (data: HealthRes | null): boolean => !!data?.extras?.dai?.vlans.length || !!data?.health && (!!data.health.stp || data.health.ospf.length > 0 || data.health.bgp.length > 0 || !!data.health.eigrp?.length || !!data.health.bfd?.length);
 
 /** Sensors and PoE: the physical state of the device. The light levels of optics are with their interfaces. */
 export function hardwarePanel(o: { data: HealthRes | null }): VNode | null {
-  const hl = o.data?.health ?? null;
-  if (!hl || !hasHardware(o.data)) return null;
+  const hl = o.data?.health ?? NO_HEALTH;
+  if (!hasHardware(o.data)) return null;
   const others = hl.sensors.filter(s => s.kind !== 'optic');
   const sections: (VNode | null)[] = [];
   for (const [kind, title] of SENSOR_GROUPS) {
@@ -102,13 +130,58 @@ export function hardwarePanel(o: { data: HealthRes | null }): VNode | null {
     h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' }, hl.poe.map(p => stat(hl.poe.length > 1 ? `PoE source ${p.group}` : 'PoE power',
       h('span', { style: colour(p.status === 'faulty' ? 'bad' : p.usedPct !== null && p.usedPct >= 90 ? 'warn' : 'ok') }, p.usedW !== null && p.budgetW ? `${num(p.usedW)} of ${num(p.budgetW)} W` : p.status),
       [p.usedPct !== null ? `${p.usedPct}% of the budget` : null, p.portsTotal ? `${p.portsDelivering} of ${p.portsTotal} ports delivering${p.portsFault ? `, ${p.portsFault} in fault` : ''}` : null].filter(Boolean).join(' · ') || undefined)))));
+  const ex = o.data?.extras;
+  if (ex?.stack) sections.push(stackSection(ex.stack));
+  if (ex?.procs) sections.push(processSection(ex.procs));
   return h('div', { class: 'col', style: 'gap:12px' }, sections);
 }
 
+const sub = (t: string, hint?: string) => h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, t), hint ? h('span', { class: 'dim', style: 'font-size:11.5px' }, hint) : null);
+
+/** Stack members and stack ports (Catalyst StackWise): a broken ring link is the thing to see. */
+function stackSection(st: Stack): VNode {
+  return h('div', { key: 'stack', class: 'col', style: 'gap:6px' }, sub('Stack', `${st.members.length} member${st.members.length === 1 ? '' : 's'}, ${st.ports.filter(p => p.level === 'ok').length} of ${st.ports.length} stack ports up`),
+    ...st.problems.map(t => note(t, 'warn', true)),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:80px 110px minmax(140px,1fr) 150px;--w:520px' },
+      h('div', { class: 'tr head' }, ...['Member', 'Role', 'State', 'MAC address'].map(t => h('span', null, t))),
+      st.members.map(m => h('div', { key: m.index, class: 'tr' }, h('span', { class: 'mono' }, String(m.number ?? m.index)), h('span', null, m.role), statusEl(m.level, m.state), h('span', { class: 'mono', style: 'font-size:12px' }, m.mac || '—'))))));
+}
+
+/** The busiest processes. The SNMP engine is called out because polling is part of what it measures. */
+function processSection(p: Processes): VNode {
+  const snmpHigh = (p.snmpOne ?? 0) >= 10;
+  return h('div', { key: 'procs', class: 'col', style: 'gap:6px' }, sub('Busiest processes', 'share of one CPU over 5 seconds, 1 minute and 5 minutes'),
+    snmpHigh ? note(`The SNMP engine used ${p.snmpOne}% of the CPU over the last minute. Polling this device is part of its load: lengthen the poll interval or poll fewer tables if that is a problem.`, 'warn', true) : null,
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(180px,1fr) 80px 80px 80px;--w:420px' },
+      h('div', { class: 'tr head' }, ...['Process', '5 sec', '1 min', '5 min'].map(t => h('span', null, t))),
+      p.top.map(x => h('div', { key: x.name, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.name), ...[x.five, x.one, x.fiveMin].map(v => h('span', { class: 'mono', style: 'font-size:12px' }, `${v}%`)))))));
+}
+
+/** Dynamic ARP inspection: the VLANs where the switch is dropping ARP packets, and why. */
+function daiSection(d: Dai): VNode {
+  const since = d.dtSec ? (d.dtSec < 120 ? d.dtSec + ' s' : Math.round(d.dtSec / 60) + ' min') : '';
+  return h('div', { key: 'dai', class: 'col', style: 'gap:6px' }, sub('ARP inspection', 'VLANs where ARP packets were dropped'),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:70px 100px 130px minmax(220px,1fr);--w:640px' },
+      h('div', { class: 'tr head' }, ...['VLAN', 'Forwarded', 'Dropped', 'Why'].map(t => h('span', null, t))),
+      d.vlans.map(v => h('div', { key: v.vlan, class: 'tr' }, h('span', { class: 'mono' }, String(v.vlan)), h('span', { class: 'mono', style: 'font-size:12px' }, num(v.forwarded)),
+        h('span', { class: 'mono', style: `font-size:12px;${v.droppedNow ? 'color:var(--warn)' : ''}` }, num(v.dropped), v.droppedNow ? ` (+${num(v.droppedNow)} in ${since})` : ''),
+        h('span', { class: 'muted', style: 'font-size:12px' }, v.why))))));
+}
+
+/** Applications NBAR2 recognised on one interface. */
+export function nbarPanel(nbar: Nbar | null | undefined, ifIndex: number): VNode | null {
+  const list = nbar?.interfaces[ifIndex]; if (!list?.length) return null;
+  return h('div', { class: 'col', style: 'gap:6px' }, sub('Applications on this port', 'recognised by NBAR2 since it was switched on'),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(140px,1fr) 110px 110px 110px 110px;--w:600px' },
+      h('div', { class: 'tr head' }, ...['Application', 'Rate in', 'Rate out', 'Bytes in', 'Bytes out'].map(t => h('span', null, t))),
+      list.map(x => h('div', { key: x.name, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.name), h('span', { class: 'mono', style: 'font-size:12px' }, bps(x.inBps)), h('span', { class: 'mono', style: 'font-size:12px' }, bps(x.outBps)),
+        h('span', { class: 'mono', style: 'font-size:12px' }, num(x.inBytes)), h('span', { class: 'mono', style: 'font-size:12px' }, num(x.outBytes)))))));
+}
+
 /** Spanning tree and routing protocols: how the device sees the rest of the network. */
-export function protocolsPanel(o: { data: HealthRes | null }): VNode | null {
-  const hl = o.data?.health ?? null;
-  if (!hl || !hasProtocols(o.data)) return null;
+export function protocolsPanel(o: { data: HealthRes | null; ifName?: (ifIndex: number) => string }): VNode | null {
+  const hl = o.data?.health ?? NO_HEALTH;
+  if (!hasProtocols(o.data)) return null;
   const sections: (VNode | null)[] = [];
   if (hl.stp) {
     const s = hl.stp;
@@ -128,6 +201,20 @@ export function protocolsPanel(o: { data: HealthRes | null }): VNode | null {
       hl.bgp.map(p => h('div', { key: p.address, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, p.address), h('span', { class: 'mono', style: 'font-size:12px' }, p.as === null ? '—' : String(p.as)),
         statusEl(p.level === 'off' ? 'off' : p.level, p.admin === 'stop' && p.level !== 'ok' ? `${p.state} (shut down)` : p.state),
         h('span', { class: 'muted' }, p.upSec !== null ? dur(p.upSec * 1000) : '—'), h('span', { class: 'mono', style: 'font-size:12px' }, p.updatesIn === null ? '—' : num(p.updatesIn)), h('span', { class: 'mono', style: 'font-size:12px' }, p.updatesOut === null ? '—' : num(p.updatesOut))))))));
+  const nm = (i: number | null) => (i ? o.ifName?.(i) || `interface ${i}` : '—');
+  if (hl.eigrp?.length) sections.push(h('div', { key: 'eigrp', class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, `EIGRP neighbours (AS ${[...new Set(hl.eigrp.map(p => p.as))].join(', ')})`),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) 90px 90px 90px 110px;--w:700px' },
+      h('div', { class: 'tr head' }, ...['Neighbour', 'Interface', 'Up for', 'Round trip', 'Resent', 'State'].map(t => h('span', null, t))),
+      hl.eigrp.map(p => h('div', { key: `${p.as}/${p.address}`, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, p.address), h('span', { class: 'mono', style: 'font-size:12px' }, nm(p.ifIndex)), h('span', { class: 'muted' }, p.upText || '—'),
+        h('span', { class: 'mono', style: 'font-size:12px' }, p.srttMs === null ? '—' : `${p.srttMs} ms`), h('span', { class: 'mono', style: 'font-size:12px' }, p.retrans === null ? '—' : num(p.retrans)),
+        statusEl(p.level, p.level === 'ok' ? 'adjacent' : `retrying ${p.retries}`)))))));
+  if (hl.bfd?.length) sections.push(h('div', { key: 'bfd', class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'BFD sessions'),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) 100px 100px 90px minmax(160px,1fr);--w:760px' },
+      h('div', { class: 'tr head' }, ...['Peer', 'Interface', 'State', 'Up for', 'Detects in', 'Last failure'].map(t => h('span', null, t))),
+      hl.bfd.map(b => h('div', { key: b.id, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px', title: b.peerKnown === false ? 'The neighbour could not be worked out from the subnet, so this is the address of this device on the session' : undefined }, b.peerKnown === false ? `${b.address} (this end)` : b.address), h('span', { class: 'mono', style: 'font-size:12px' }, nm(b.ifIndex)), statusEl(b.level, b.state),
+        h('span', { class: 'muted' }, b.upSec !== null ? dur(b.upSec * 1000) : '—'), h('span', { class: 'mono', style: 'font-size:12px' }, b.detectMs === null ? '—' : `${b.detectMs} ms`),
+        h('span', { class: 'muted' }, b.diag ? `${b.diag}${b.upCount && b.upCount > 1 ? ` (${b.upCount - 1} earlier)` : ''}` : b.upCount && b.upCount > 1 ? `${b.upCount - 1} earlier` : 'none')))))));
+  if (o.data?.extras?.dai?.vlans.length) sections.push(daiSection(o.data.extras.dai));
   void STP_TEXT;
   return h('div', { class: 'col', style: 'gap:12px' }, sections);
 }
@@ -138,9 +225,12 @@ const COUNTER_TEXT: Record<string, [string, string]> = {
   inDisc: ['Input discards', 'received frames dropped with no error, usually for lack of buffer space'], outDisc: ['Output discards', 'frames dropped before sending, usually because the queue was full'],
   fcs: ['CRC errors', 'frames with a bad checksum: a bad cable, optic or duplex mismatch'], align: ['Alignment errors', 'frames that did not end on a byte boundary'], symbol: ['Symbol errors', 'bad signal on the wire'],
   late: ['Late collisions', 'collisions after the first 64 bytes. Half duplex only'], excessive: ['Excessive collisions', 'frames given up on after 16 collisions'], collisions: ['Collisions', 'frames that collided once or more. Half duplex only'],
-  carrier: ['Carrier sense errors', 'the carrier was lost while sending'], tooLong: ['Frames too long', 'frames longer than the interface accepts'], unknown: ['Unknown protocol', 'packets for a protocol the device does not run']
+  carrier: ['Carrier sense errors', 'the carrier was lost while sending'], tooLong: ['Frames too long', 'frames longer than the interface accepts'], unknown: ['Unknown protocol', 'packets for a protocol the device does not run'],
+  outQDrops: ['Output queue drops', 'packets dropped because this port\'s output queue was full: the port is congested (Cisco)'], inQDrops: ['Input queue drops', 'packets dropped because the device could not keep up with this port (Cisco)'],
+  resets: ['Interface resets', 'times the interface was reset (Cisco)'], storm: ['Storm control drops', 'packets suppressed because broadcast, multicast or unicast traffic went over the storm control limit (Cisco)'],
+  portSec: ['Port security violations', 'frames from a MAC address the port is not allowed to learn (Cisco)']
 };
-const ERROR_ORDER = ['inErr', 'outErr', 'inDisc', 'outDisc', 'fcs', 'align', 'symbol', 'late', 'excessive', 'collisions', 'carrier', 'tooLong', 'unknown'];
+const ERROR_ORDER = ['inErr', 'outErr', 'inDisc', 'outDisc', 'fcs', 'align', 'symbol', 'late', 'excessive', 'collisions', 'carrier', 'tooLong', 'unknown', 'outQDrops', 'inQDrops', 'storm', 'portSec', 'resets'];
 
 /** The link quality of one interface: duplex, every error and discard counter by type, broadcast and multicast rates, the optic's light levels, and plain-language warnings. */
 export function linkQuality(x: IfExtra | undefined, optics: Sensor[], speedMbps: number | null): VNode | null {

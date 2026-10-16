@@ -2,6 +2,7 @@ import type { ConfigDb } from '../db/configdb.js';
 import type { AppLog } from '../logger.js';
 import type { DeviceRow, DeviceService } from './devices.js';
 import type { SnmpClient } from './client.js';
+import { readDhcpBindings, type DhcpBinding } from './dhcp_snooping.js';
 import { readArp, readFdb, readNeighbors, readPortVlans, type Neighbor } from './ports.js';
 import { apAsResources, recordResources } from './resource_history.js';
 import type { WlanData } from './wlan.js';
@@ -71,6 +72,8 @@ export class HostTracker {
     const arp = await readArp(c).catch(e => { notes.push(`ARP not read: ${(e as Error).message}`); return []; });
 
     const cisco = (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.');
+    let binds: DhcpBinding[] = [];
+    if (cisco) { try { binds = await readDhcpBindings(c); } catch (e) { notes.push(`DHCP snooping not read: ${(e as Error).message}`); } }
     const vlans = new Set<number>();
     for (const p of ports.values()) { if (p.mode === 'access' || p.mode === 'pvid') { if (p.vlan) vlans.add(p.vlan); if (p.voice) vlans.add(p.voice); } else if (p.mode === 'trunk' && p.vlan) vlans.add(p.vlan); }
     if (!vlans.size) vlans.add(1);
@@ -93,10 +96,14 @@ export class HostTracker {
       const ua = this.db.prepare(`INSERT INTO arp(dev_id, ip, mac, if_index, last_seen) VALUES (?,?,?,?,?)
         ON CONFLICT(dev_id, ip, mac) DO UPDATE SET last_seen = excluded.last_seen, if_index = excluded.if_index`);
       for (const a of arp) { ua.run(d.id, a.ip, a.mac, a.ifIndex, now); arpRows++; }
+      // a lease the switch has seen also tells which IP address a MAC address uses; the bindings of a device are replaced as a whole, since an ended lease is gone from the table
+      this.db.prepare('DELETE FROM dhcp_bindings WHERE dev_id = ?').run(d.id);
+      const ub = this.db.prepare('INSERT OR REPLACE INTO dhcp_bindings(dev_id, mac, vlan, ip, if_index, lease_sec, last_seen) VALUES (?,?,?,?,?,?,?)');
+      for (const b of binds) { ub.run(d.id, b.mac, b.vlan, b.ip, b.ifIndex, b.leaseSec, now); ua.run(d.id, b.ip, b.mac, b.ifIndex, now); }
       this.db.prepare('DELETE FROM neighbors WHERE dev_id = ?').run(d.id);
       const un = this.db.prepare('INSERT OR REPLACE INTO neighbors(dev_id, if_index, proto, rem_key, rem_name, rem_port, rem_ip, kind, caps, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
       for (const n of nbs) un.run(d.id, n.ifIndex, n.proto, n.key, n.name, n.port, n.ip, n.kind, n.caps.join(','), now);
-      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries`, `${nbs.length} neighbours`, ...(wlan ? [`${wlan.clients.length} wireless clients`] : []), ...notes];
+      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries`, ...(binds.length ? [`${binds.length} DHCP snooping bindings`] : []), `${nbs.length} neighbours`, ...(wlan ? [`${wlan.clients.length} wireless clients`] : []), ...notes];
       this.db.prepare('UPDATE devices SET hosts_at = ?, hosts_note = ? WHERE id = ?').run(now, parts.join('; '), d.id);
     });
     return { macs: fdb.entries.length, arp: arpRows, neighbors: nbs.length, wifiClients: wlan?.clients.length ?? 0, note: notes.join('; ') };
@@ -150,13 +157,14 @@ export class HostTracker {
     const lim = now - this.opts().keepDays * 86_400_000;
     this.db.prepare('DELETE FROM fdb WHERE last_seen < ?').run(lim);
     this.db.prepare('DELETE FROM arp WHERE last_seen < ?').run(lim);
+    this.db.prepare('DELETE FROM dhcp_bindings WHERE last_seen < ?').run(lim);
     this.db.prepare('DELETE FROM wlan_client WHERE last_seen < ?').run(lim);
   }
 
   /* ---------------------------------------------------------------- queries */
 
   private ifName(devId: number, ifIndex: number): string {
-    const r = this.db.prepare('SELECT name FROM interfaces WHERE dev_id = ? AND if_index = ?').get(devId, ifIndex) as { name: string } | undefined;
+    const r = (this.db.prepare('SELECT name FROM interfaces WHERE dev_id = ? AND if_index = ?').get(devId, ifIndex) ?? this.db.prepare('SELECT name FROM interface_names WHERE dev_id = ? AND if_index = ?').get(devId, ifIndex)) as { name: string } | undefined;
     return r?.name ?? `if${ifIndex}`;
   }
 
@@ -246,6 +254,11 @@ export class HostTracker {
     const hasNb = new Set((this.db.prepare('SELECT DISTINCT dev_id FROM neighbors').all() as unknown as { dev_id: number }[]).map(r => r.dev_id));
     const rows = macs.flatMap(m => this.db.prepare('SELECT dev_id, mac, vlan, if_index, last_seen, since FROM fdb WHERE mac = ? ORDER BY last_seen DESC').all(m) as unknown as { dev_id: number; mac: string; vlan: number; if_index: number; last_seen: number; since: number }[]);
     if (!rows.length) {
+      const b0 = this.bindingFor(macs);
+      if (b0) {
+        const where = `${b0.dev} ${b0.ifName} (VLAN ${b0.vlan}, ${b0.ip}${b0.leaseSec ? ', lease ' + Math.round(b0.leaseSec / 3600) + ' h' : ''})`;
+        return { query: q, ip, macs, macSource: source, attach: { ...this.bindingAttach(b0), confidence: 'medium' }, others: [], note: `Placed from a DHCP snooping binding on ${where}. The address is not in the MAC table of any polled switch now, so this is where its lease was granted, not proof that it is still plugged in.` };
+      }
       const polled = (this.db.prepare('SELECT COUNT(DISTINCT dev_id) AS n FROM fdb').get() as unknown as { n: number }).n;
       return { query: q, ip, macs, macSource: source, attach: null, others: [], note: polled ? `${macs[0]} is not in the MAC table of any polled switch. The host may be quiet, or plugged into a switch that is not in the device list.` : 'No MAC address tables have been read yet. Add the access switches under SNMP devices and wait a few minutes.' };
     }
@@ -270,6 +283,35 @@ export class HostTracker {
     // every other place gets a confidence too, so the console can offer them: a port that leads to another switch, one that is no longer in the MAC table, and one of several host ports are all low
     const conf = (a: Attachment): 'high' | 'medium' | 'low' => (a.edge && a.active && edges.length === 1 ? (hasNb.has(a.devId) && source !== 'flow' ? 'high' : 'medium') : 'low');
     const others = all.filter(a => a !== (attach ? pick : null)).slice(0, 12).map(a => ({ ...a, confidence: conf(a) }));
+    // A DHCP snooping binding names the access port the client's lease request arrived on. It is checked against the MAC tables rather than trusted
+    // over them: a host that moved keeps its binding until the lease ends, so the MAC table (fresher) wins when the two disagree.
+    const bind = this.bindingFor(macs);
+    if (bind) {
+      const where = `${bind.dev} ${bind.ifName} (VLAN ${bind.vlan}, ${bind.ip}${bind.leaseSec ? ', lease ' + Math.round(bind.leaseSec / 3600) + ' h' : ''})`;
+      if (attach && attach.devId === bind.devId && attach.ifIndex === bind.ifIndex) { attach = { ...attach, confidence: source === 'flow' ? 'medium' : 'high' }; note = (note ? note + ' ' : '') + 'Confirmed by a DHCP snooping binding.'; }
+      else if (attach) note = (note ? note + ' ' : '') + `DHCP snooping on ${where} saw its lease on a different port than the MAC tables show now. If the host was moved, the binding stays until the lease ends.`;
+      else {
+        const a = this.bindingAttach(bind);
+        attach = { ...a, confidence: 'medium' };
+        note = `Placed from a DHCP snooping binding on ${where}. The address is not in the MAC table of any polled switch now, so this is where its lease was granted, not proof that it is still plugged in.`;
+      }
+    }
     return { query: q, ip, macs, macSource: source, attach, others, note };
+  }
+
+  /** The newest DHCP snooping binding for any of these MAC addresses. */
+  private bindingFor(macs: string[]): { devId: number; dev: string; ifIndex: number; ifName: string; vlan: number; ip: string; leaseSec: number | null; lastSeen: number; mac: string } | null {
+    for (const m of macs) {
+      const r = this.db.prepare('SELECT dev_id AS devId, mac, vlan, ip, if_index AS ifIndex, lease_sec AS leaseSec, last_seen AS lastSeen FROM dhcp_bindings WHERE mac = ? ORDER BY last_seen DESC LIMIT 1').get(m) as unknown as { devId: number; mac: string; vlan: number; ip: string; ifIndex: number; leaseSec: number | null; lastSeen: number } | undefined;
+      if (r) return { ...r, dev: this.devs.row(r.devId)?.name ?? `device ${r.devId}`, ifName: this.ifName(r.devId, r.ifIndex) };
+    }
+    return null;
+  }
+
+  private bindingAttach(b: { devId: number; dev: string; ifIndex: number; ifName: string; vlan: number; lastSeen: number; mac: string }): Attachment {
+    const nb = this.neighborsOf(b.devId, b.ifIndex)[0] ?? null;
+    const itf = this.db.prepare('SELECT port_mode AS mode FROM interfaces WHERE dev_id = ? AND if_index = ?').get(b.devId, b.ifIndex) as { mode: string } | undefined;
+    const count = (this.db.prepare('SELECT COUNT(DISTINCT mac) AS n FROM fdb WHERE dev_id = ? AND if_index = ? AND last_seen >= ?').get(b.devId, b.ifIndex, this.activeSince()) as unknown as { n: number }).n;
+    return { devId: b.devId, dev: b.dev, ifIndex: b.ifIndex, ifName: b.ifName, vlan: b.vlan, macCount: count, edge: true, neighbor: nb ? `${nb.name}${nb.port ? ' ' + nb.port : ''}` : null, neighborKind: nb?.kind ?? null, portMode: itf?.mode ?? '', lastSeen: b.lastSeen, since: b.lastSeen, active: false, mac: b.mac };
   }
 }

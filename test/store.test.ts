@@ -200,3 +200,16 @@ test('searches with many port ranges do not run into the SQL parameter limit', a
     assert.equal(none.rows.length, 0);
   } finally { db.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('class "sent" and drop rates are bits per second, not bytes', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fs-clsunits-'));
+  const db = openTsDb({ dir });
+  const ops = new SqliteOps(db, dir, true);
+  try {
+    const ts = Date.now();
+    // 12.5 MB sent in 10 s = 10 Mbps (bytes x 8 / seconds)
+    ops.insertSnmp([], [{ ts, dev: 1, ifIndex: 5, cls: 'VIDEO', dt: 10, prePkts: 0, preBytes: 0, postBytes: 12_500_000, dropPkts: 0, dropBytes: 1_250_000, qdepth: 0 }]);
+    const l = ops.classLatest(ts - 60_000).find(x => x.cls === 'VIDEO');
+    assert.equal(l?.sentBps, 10_000_000);
+  } finally { db.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
