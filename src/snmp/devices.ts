@@ -149,6 +149,8 @@ export class DeviceService {
             if_type=excluded.if_type, port_mode=excluded.port_mode, vlan=excluded.vlan, voice_vlan=excluded.voice_vlan, vlan_list=excluded.vlan_list, mac=excluded.mac`)
           .run(id, i.index, i.name, i.descr, i.alias, i.speedMbps, i.oper, polOut.get(i.index)?.join(', ') ?? null, polIn.get(i.index)?.join(', ') ?? null, i.type, pv?.mode ?? '', pv?.vlan ?? 0, pv?.voice ?? 0, pv?.allowed ?? '', i.mac);
       }
+      db.prepare('DELETE FROM interface_names WHERE dev_id = ?').run(id);
+      for (const h of p.hiddenIfs ?? []) if (h.name) db.prepare('INSERT OR REPLACE INTO interface_names(dev_id, if_index, name) VALUES (?,?,?)').run(id, h.index, h.name);
       for (const r of db.prepare('SELECT if_index FROM interfaces WHERE dev_id = ?').all(id) as unknown as { if_index: number }[]) {
         if (!seen.has(r.if_index)) { db.prepare('DELETE FROM interfaces WHERE dev_id = ? AND if_index = ?').run(id, r.if_index); db.prepare('DELETE FROM class_defs WHERE dev_id = ? AND if_index = ?').run(id, r.if_index); }
       }
@@ -341,7 +343,7 @@ export class DeviceService {
     const d = this.row(id);
     if (!d) throw new DeviceError('No such device', 404);
     this.cdb.tx(() => {
-      for (const t of ['interfaces', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
+      for (const t of ['interfaces', 'interface_names', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
       this.cdb.db.prepare('UPDATE exporters SET device_id = NULL WHERE device_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_resources WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_health WHERE dev_id = ?').run(id);
@@ -372,6 +374,7 @@ export class DeviceService {
     for (const r of this.cdb.db.prepare('SELECT dev_id, if_index, name, policy FROM interfaces').all() as unknown as { dev_id: number; if_index: number; name: string; policy: string | null }[]) {
       ifNames.set(`${r.dev_id}/${r.if_index}`, r.name); if (r.policy) policies.set(`${r.dev_id}/${r.if_index}`, r.policy);
     }
+    for (const r of this.cdb.db.prepare('SELECT dev_id, if_index, name FROM interface_names').all() as unknown as { dev_id: number; if_index: number; name: string }[]) { const k = `${r.dev_id}/${r.if_index}`; if (!ifNames.has(k)) ifNames.set(k, r.name); }
     this.lookup = { at: Date.now(), ipToDev, names, roles, ifNames, policies };
     return this.lookup;
   }
@@ -382,6 +385,8 @@ export class DeviceService {
   deviceIdForExporter(ip: string): number | null { return this.build().ipToDev.get(ip) ?? null; }
   deviceName(exporterIp: string): string { const l = this.build(); const id = l.ipToDev.get(exporterIp); return id === undefined ? exporterIp : l.names.get(id) ?? exporterIp; }
   deviceRole(exporterIp: string): string { const l = this.build(); const id = l.ipToDev.get(exporterIp); return id === undefined ? 'device' : l.roles.get(id) ?? 'device'; }
+  /** The name of an interface of a device by id, whether or not it is in the interface list. Null when unknown. */
+  ifNameById(devId: number, ifIndex: number): string | null { return this.build().ifNames.get(`${devId}/${ifIndex}`) ?? null; }
   ifName(exporterIp: string, ifIndex: number): string {
     const l = this.build(); const id = l.ipToDev.get(exporterIp);
     return (id !== undefined && l.ifNames.get(`${id}/${ifIndex}`)) || (ifIndex ? `if${ifIndex}` : '—');

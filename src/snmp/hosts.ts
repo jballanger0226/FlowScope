@@ -164,7 +164,7 @@ export class HostTracker {
   /* ---------------------------------------------------------------- queries */
 
   private ifName(devId: number, ifIndex: number): string {
-    const r = this.db.prepare('SELECT name FROM interfaces WHERE dev_id = ? AND if_index = ?').get(devId, ifIndex) as { name: string } | undefined;
+    const r = (this.db.prepare('SELECT name FROM interfaces WHERE dev_id = ? AND if_index = ?').get(devId, ifIndex) ?? this.db.prepare('SELECT name FROM interface_names WHERE dev_id = ? AND if_index = ?').get(devId, ifIndex)) as { name: string } | undefined;
     return r?.name ?? `if${ifIndex}`;
   }
 

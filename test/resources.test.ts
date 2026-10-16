@@ -170,6 +170,8 @@ test('a front-panel port is kept even when the device reports it with a virtual 
     '1.3.6.1.2.1.2.2.1.2.91': 'Loopback0', '1.3.6.1.2.1.31.1.1.1.1.91': 'Lo0', '1.3.6.1.2.1.2.2.1.3.91': 24, '1.3.6.1.2.1.2.2.1.8.91': 1
   };
   const c = { column: async (col: string) => { const m = new Map<string, SnmpValue>(); for (const [o, v] of Object.entries(rows)) if (o.startsWith(col + '.')) m.set(o.slice(col.length + 1), v); return m; } } as unknown as SnmpClient;
-  const r = await readInterfaces(c, false);
+  const hidden: { index: number; name: string }[] = [];
+  const r = await readInterfaces(c, false, hidden);
   assert.deepEqual(r.map(i => i.name), ['Twe1/1/14'], 'the port stays; the VLAN and loopback interfaces are still hidden');
+  assert.deepEqual(hidden.map(h => [h.index, h.name]).sort((a, b) => a[0] as number - (b[0] as number)), [[90, 'Vl90'], [91, 'Lo0']], 'but their names are kept, so a route or flow on one is not shown as ifNN');
 });

@@ -10,7 +10,7 @@ const STALE_MS = 10 * 60_000;
 /** The names of a device's interfaces, falling back to "if<number>". */
 function namer(app: App, devId: number, mc?: { names?: Record<number, string> } | null): (ifIndex: number) => string {
   const m = new Map(app.devices.interfaces(devId).map(i => [i.ifIndex, i.name || i.descr] as const));
-  return ix => m.get(ix) || mc?.names?.[ix] || `if${ix}`;
+  return ix => m.get(ix) || app.devices.ifNameById(devId, ix) || mc?.names?.[ix] || `if${ix}`;
 }
 
 /** Where a multicast stream is expected to go, from the routers' own multicast state set beside what the exporters reported. */

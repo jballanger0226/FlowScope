@@ -262,6 +262,10 @@ const MIGRATIONS: string[] = [
   `
   -- strict-priority queues (cbQosQueueingCfgPriorityEnabled), so a priority class nearing its limit can be flagged before it starts dropping
   ALTER TABLE class_defs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  -- names of the interfaces that are not listed (loopbacks, VLAN and tunnel interfaces on a switch), so a flow, a route or a host on one of them is not shown as ifNN
+  CREATE TABLE interface_names (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (dev_id, if_index)) WITHOUT ROWID;
   `
 
 ];

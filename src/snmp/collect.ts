@@ -17,7 +17,7 @@ export interface ClassSets { dscp: number | null; cos: number | null; precedence
 export interface QosClassMarking { matched: number[]; sets: ClassSets | null }
 export interface QosPolicy { policyIdx: number; ifIndex: number; direction: 'input' | 'output'; policyName: string; classes: (QosClass & QosClassMarking)[]; ifType: number; vlan: number; parentPolicyIdx: number }
 export interface Probe {
-  info: DeviceInfo; ifaces: IfaceInfo[]; ips: { ip: string; ifIndex: number; mask: string }[]; resources: Resources | null; vlans: { id: number; name: string }[]; qos: QosPolicy[]; profile: string;
+  info: DeviceInfo; ifaces: IfaceInfo[]; /** Interfaces that were read but are not listed (loopbacks, VLAN and tunnel interfaces on a switch). Kept for their names only. */ hiddenIfs?: { index: number; name: string }[]; ips: { ip: string; ifIndex: number; mask: string }[]; resources: Resources | null; vlans: { id: number; name: string }[]; qos: QosPolicy[]; profile: string;
   /** Why no QoS data could be read, or a short summary of what was found. */
   qosNote: string; ports: Map<number, PortVlan>;
 }
@@ -60,7 +60,7 @@ export function macText(v: SnmpValue | undefined): string {
 /** A front-panel port by name (Gi1/0/1, Te1/1/1, Twe1/1/14, Hu1/0/49, Eth1/1, ...). Some devices report these with a virtual interface type, and they must not be dropped as if they were VLAN or tunnel interfaces. */
 export const PORT_NAME = /^(Fa|Gi|Te|Twe|Fo|Hu|Eth|Ap|Ten|Twenty|Forty|Hundred|Gig|Fast)[a-z]*\d/i;
 
-export async function readInterfaces(c: SnmpClient, keepVlans = false): Promise<IfaceInfo[]> {
+export async function readInterfaces(c: SnmpClient, keepVlans = false, hidden?: { index: number; name: string }[]): Promise<IfaceInfo[]> {
   const [descr, type, speed, oper, name, high, alias, phys] = await Promise.all([
     c.column(OID.ifDescr), c.column(OID.ifType), c.column(OID.ifSpeed), c.column(OID.ifOperStatus),
     c.column(OID.ifName).catch(() => new Map<string, SnmpValue>()), c.column(OID.ifHighSpeed).catch(() => new Map<string, SnmpValue>()), c.column(OID.ifAlias).catch(() => new Map<string, SnmpValue>()),
@@ -72,7 +72,7 @@ export async function readInterfaces(c: SnmpClient, keepVlans = false): Promise<
     if (!Number.isInteger(idx)) continue;
     const t = num(type.get(k));
     const vlanType = t === 135 || t === 136;
-    if (IF_TYPE_IGNORED.has(t) && !toStr(alias.get(k) ?? null) && !(keepVlans && vlanType) && !PORT_NAME.test(toStr(name.get(k) ?? null))) continue;
+    if (IF_TYPE_IGNORED.has(t) && !toStr(alias.get(k) ?? null) && !(keepVlans && vlanType) && !PORT_NAME.test(toStr(name.get(k) ?? null))) { hidden?.push({ index: idx, name: toStr(name.get(k) ?? null) || toStr(d) }); continue; }
     out.push({
       index: idx, name: toStr(name.get(k) ?? null) || toStr(d), descr: toStr(d), alias: toStr(alias.get(k) ?? null), speedMbps: speedMbpsOf(num(high.get(k)), num(speed.get(k))),
       oper: num(oper.get(k), 4), type: t, mac: macText(phys.get(k))
@@ -239,13 +239,14 @@ export async function probe(c: SnmpClient): Promise<Probe> {
   const info = await readInfo(c);
   const role = guessRole(info.sysDescr, info.sysName, info.sysObjectId);
   const keepVlans = role === 'firewall' || role === 'router';
-  const [ifaces, ips, vlans, resources] = await Promise.all([readInterfaces(c, keepVlans), readIps(c).catch(() => []), readVlans(c).catch(() => []), readResources(c, info.sysObjectId).catch(() => null)]);
+  const hiddenIfs: { index: number; name: string }[] = [];
+  const [ifaces, ips, vlans, resources] = await Promise.all([readInterfaces(c, keepVlans, hiddenIfs), readIps(c).catch(() => []), readVlans(c).catch(() => []), readResources(c, info.sysObjectId).catch(() => null)]);
   // A failure here is kept as a note instead of being hidden, so "no policy" can be told apart from "the device did not answer in time"
   const found = await discoverQos(c, info.sysObjectId, ifaces);
   const qos = found.qos, qosNote = found.note;
   const ports = await readPortVlans(c, ifaces, ips).catch(() => new Map<number, PortVlan>());
   const profile = found.profile;
-  return { info, ifaces, ips, vlans, qos, profile, qosNote, ports, resources };
+  return { info, ifaces, hiddenIfs, ips, vlans, qos, profile, qosNote, ports, resources };
 }
 
 export interface IfCounters { inOct: bigint; outOct: bigint; inDisc: bigint; outDisc: bigint; inErr: bigint; outErr: bigint; oper: number; speedMbps: number; hc: boolean }
