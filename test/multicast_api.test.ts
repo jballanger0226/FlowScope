@@ -85,6 +85,10 @@ test('Multicast API: device list, one device\'s routes with names, and the plan 
     assert.deepEqual(r.out.map((o: any) => o.name), ['Vl104', 'Vl107', 'Vl110', 'Te1/1/1']);
     assert.ok(r.out.every((o: any) => o.forwarding));
     assert.equal(dev.json.pim.neighbors.length, 2);
+    // every route source is looked up for the plugged-in port (null when host tracking has not seen it)
+    assert.equal(typeof dev.json.hosts, 'object');
+    assert.ok('10.13.192.136' in dev.json.hosts, 'the source of a route has an entry');
+    assert.ok(!('0.0.0.0' in dev.json.hosts), 'wildcard sources are not looked up');
     assert.equal((await call(base, admin.cookie, '/api/multicast/device?id=' + plain)).status, 404, 'a device with no multicast state');
     assert.equal((await call(base, admin.cookie, '/api/multicast/device?id=99999')).status, 404);
 

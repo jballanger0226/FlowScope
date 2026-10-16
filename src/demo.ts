@@ -518,6 +518,18 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
     app.devices.saveData(id, 'procs', { readAt: now, top: [{ name: 'linux_iosd-imag', pid: 7813, five: 9 + wob, one: 8, fiveMin: 7 }, { name: 'fed main event', pid: 6121, five: 6, one: 5, fiveMin: 5 }, { name: 'SNMP ENGINE', pid: 4172, five: 3 + wob, one: 4, fiveMin: 3 }, { name: 'IP Input', pid: 220, five: 1, one: 1, fiveMin: 1 }], snmpFive: 3 + wob, snmpOne: 4 }, now);
   }
   if (d.name === 'dc-spine-01') {
+    // multicast state: video and market-data groups from a handful of encoders, receivers on both downlinks
+    const e7 = ifIdx('Eth1/7') ?? 0, e9 = ifIdx('Eth1/9') ?? 0;
+    const routes = [] as any[]; const receivers = [] as any[];
+    for (let g = 0; g < 130; g++) {
+      const group = `239.${10 + (g % 4)}.${20 + Math.floor(g / 4)}.${30 + (g % 7)}`; const src = `10.9.0.${30 + (g % 9)}`;
+      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: '10.255.0.1',
+        oifs: [{ ifIndex: e9, forwarding: g % 5 !== 0, pkts: 80_000 * (g + 1) }] });
+      if (g % 3 === 0) receivers.push({ group, ifIndex: e9, lastReporter: `10.1.4.${20 + (g % 40)}`, expirySec: 200, self: false });
+    }
+    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], truncated: false });
+  }
+  if (d.name === 'dc-spine-01') {
     const m = (n: number, role: string) => ({ index: n * 1000, number: n, role, state: 'ready', level: 'ok', mac: `00:1c:73:01:0${n}:00` });
     app.devices.saveData(id, 'stack', { readAt: now, members: [m(1, 'master'), m(2, 'standby'), m(3, 'member')], ports: [88, 89, 191, 192, 272, 273].map((ifIndex, i) => ({ ifIndex, status: 'up', level: 'ok', neighbor: ((i + 1) % 3 + 1) * 1000 })), problems: [] }, now);
   }

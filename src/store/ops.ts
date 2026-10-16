@@ -475,7 +475,7 @@ export class SqliteOps {
       let c = by.get(r.cls);
       if (!c) { c = { cls: r.cls, points: [] }; by.set(r.cls, c); }
       const secs = r.secs > 0 ? r.secs : 1;
-      c.points.push({ ts: r.b, dropPct: r.pp > 0 ? 100 * r.dp / r.pp : 0, dropBps: r.db / secs, dropPps: r.dp / secs, sentBps: r.sb / secs, qdepth: r.qd ?? 0 });
+      c.points.push({ ts: r.b, dropPct: r.pp > 0 ? 100 * r.dp / r.pp : 0, dropBps: 8 * r.db / secs, dropPps: r.dp / secs, sentBps: 8 * r.sb / secs, qdepth: r.qd ?? 0 });
     }
     return { step, tier, classes: [...by.values()] };
   }
@@ -488,7 +488,7 @@ export class SqliteOps {
     const u = tabs.map(t => { args.push(range.from, range.to); return `SELECT * FROM ${t} WHERE ts BETWEEN ? AND ?`; }).join(' UNION ALL ');
     const rows = this.db.prepare(`WITH s AS (${u}) SELECT dev, if_index, cls, SUM(drop_pkts) AS dp, SUM(pre_pkts) AS pp, SUM(drop_bytes) AS db, SUM(post_bytes) AS sb, SUM(dt) AS secs, MAX(ts) AS ts,
       (SELECT qdepth FROM s s2 WHERE s2.dev = s.dev AND s2.if_index = s.if_index AND s2.cls = s.cls ORDER BY s2.ts DESC LIMIT 1) AS qd FROM s GROUP BY dev, if_index, cls`).all(...args) as any[];
-    return rows.map(r => ({ dev: r.dev, ifIndex: r.if_index, cls: r.cls, dropPct: r.pp > 0 ? 100 * r.dp / r.pp : 0, dropPkts: r.dp, dropBytes: r.db, sentBps: r.sb / Math.max(1, r.secs), qdepth: r.qd ?? 0, ts: r.ts }));
+    return rows.map(r => ({ dev: r.dev, ifIndex: r.if_index, cls: r.cls, dropPct: r.pp > 0 ? 100 * r.dp / r.pp : 0, dropPkts: r.dp, dropBytes: r.db, sentBps: 8 * r.sb / Math.max(1, r.secs), qdepth: r.qd ?? 0, ts: r.ts }));
   }
 
   ifLatest(sinceMs: number): IfLatest[] {

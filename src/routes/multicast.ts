@@ -59,6 +59,16 @@ export function registerMulticast(app: App): void {
     const joins = new Map<string, typeof m.receivers>();
     for (const r of m.receivers) { const k = r.group + '|' + r.ifIndex; const a = joins.get(k) ?? []; a.push(r); joins.set(k, a); }
     const now = Date.now();
+    // Where the hosts named in this device's state are plugged in. IGMP reports the VLAN interface and the last host that reported, not the switch port,
+    // so a reporter or a source is looked up in host tracking (ARP, MAC tables, DHCP snooping).
+    const ips = new Set<string>();
+    for (const r of m.routes) if (r.source !== '0.0.0.0') ips.add(r.source);
+    for (const r of m.receivers) if (r.lastReporter && !r.self) ips.add(r.lastReporter);
+    const hosts: Record<string, { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null } | null> = {};
+    for (const ip of [...ips].slice(0, 800)) {
+      const a = app.hosts.locate(ip).attach;
+      hosts[ip] = a && a.edge ? { dev: a.dev, port: a.ifName, vlan: a.vlan, confidence: a.confidence, neighbor: a.neighbor } : null;
+    }
     c.json({
       device: { id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device' }, readAt: m.readAt, stale: now - m.readAt > STALE_MS, source: m.source, truncated: m.truncated,
       routes: m.routes.map(r => ({
@@ -68,6 +78,7 @@ export function registerMulticast(app: App): void {
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))
       })),
+      hosts,
       load: (m.interfaces ?? []).filter(i => (i.inOctets ?? 0) > 0 || (i.outOctets ?? 0) > 0).map(i => ({ name: name(i.ifIndex), inBps: i.inBps, outBps: i.outBps, inOctets: i.inOctets, outOctets: i.outOctets, ttl: i.ttl, rateLimit: i.rateLimit }))
         .sort((a, b) => (b.inBps ?? 0) + (b.outBps ?? 0) - (a.inBps ?? 0) - (a.outBps ?? 0) || (b.inOctets ?? 0) + (b.outOctets ?? 0) - (a.inOctets ?? 0) - (a.outOctets ?? 0)),
       pim: { interfaces: m.pimInterfaces.map(p => ({ name: name(p.ifIndex), mode: p.mode, dr: p.dr })), neighbors: m.neighbors.map(n => ({ address: n.address, ifName: name(n.ifIndex) })) }
