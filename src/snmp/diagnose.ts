@@ -240,7 +240,7 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
   if (ex.mcast) {
     const m = mcast.v;
     const groups = m ? new Set(m.routes.map(r => r.group)).size : 0;
-    const missing = m ? [m.source === 'standard' ? 'the Cisco rate and flags table (CISCO-IPMROUTE-MIB), so no rates' : null, m.pimInterfaces.length ? null : 'PIM-MIB, so no rendezvous points or neighbours', m.receivers.length ? null : 'any IGMP cache entry, so no joined hosts'].filter(Boolean) as string[] : [];
+    const missing = m ? [m.routeSource === 'pim' ? 'IPMROUTE-STD-MIB (as on NX-OS), so routes come from PIM-MIB with no interfaces or RPF' : null, m.source === 'standard' ? 'the Cisco rate and flags table (CISCO-IPMROUTE-MIB), so no rates' : null, m.pimInterfaces.length ? null : 'PIM-MIB, so no rendezvous points or neighbours', m.receivers.length ? null : 'any IGMP cache entry, so no joined hosts'].filter(Boolean) as string[] : [];
     out.push(m ? { id: 'mcast', title: 'Multicast routing', group: 'routing', state: missing.length ? 'warn' : 'ok', count: m.routes.length,
       detail: `${plural(m.routes.length, 'route')} for ${plural(groups, 'group')}, ${plural(m.receivers.length, 'IGMP join')}${m.pimInterfaces.length ? `, ${plural(m.pimInterfaces.length, 'PIM interface')}` : ''}.${missing.length ? ` Missing: ${missing.join('; ')}.` : ''}`,
       hint: missing.length ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83), IGMP-STD-MIB (.1.3.6.1.2.1.85), PIM-MIB (.1.3.6.1.3.61) and Cisco CISCO-IPMROUTE-MIB (.1.3.6.1.4.1.9.10.2). Check the SNMP view of this credential includes them.' : undefined }

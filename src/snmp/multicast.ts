@@ -64,6 +64,8 @@ export interface Multicast {
   receivers: McReceiver[];
   pimInterfaces: McPimIf[];
   neighbors: McNeighbor[];
+  /** 'pim' when the device publishes no IPMROUTE-STD-MIB (NX-OS) and the routes were taken from PIM-MIB: group, source and flags only, with no interfaces, no rates and no RPF. */
+  routeSource?: 'ipmroute' | 'pim';
   igmpInterfaces?: McIgmpIf[];
   /** The rendezvous point each group is using and whether it is up (pimRPTable, index group.rp). The Catalyst 9300 and 3850 walks publish this and leave pimRPSetTable empty. */
   rpGroups?: { group: string; rp: string; up: boolean; sinceSec: number | null }[];
@@ -91,6 +93,8 @@ const PIM_IF = '1.3.6.1.3.61.1.1.2.1';
 const PIM_NBR = '1.3.6.1.3.61.1.1.3.1';
 const PIM_RP = '1.3.6.1.3.61.1.1.5.1';
 const PIM_RPSET = '1.3.6.1.3.61.1.1.6.1';
+const PIM_MROUTE = '1.3.6.1.3.61.1.1.4.1';
+const IPIFSTATS = '1.3.6.1.2.1.4.31.3.1';
 const PIM_CAND = '1.3.6.1.3.61.1.1.11.1';
 const IGMP_IF = '1.3.6.1.2.1.85.1.1.1';
 
@@ -109,6 +113,7 @@ export const ipv4Int = (ip: string): number => { const p = ip.split('.'); return
 const num = (v: SnmpValue | undefined): number | null => (v === undefined || v === null ? null : toNum(v));
 const EMPTY = new Map<string, SnmpValue>();
 const col = (c: SnmpClient, oid: string) => c.column(oid, 50).catch(() => EMPTY);
+const x32 = (a: string): number => a.split('.').reduce((t, o) => t * 256 + Number(o), 0);
 const keyOf = (g: string, s: string) => g + '|' + s;
 /** A TimeTicks value (hundredths of a second) as whole seconds. */
 const secs = (v: SnmpValue | undefined): number | null => { const n = num(v); return n === null ? null : Math.round(n / 100); };
@@ -170,6 +175,15 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
     });
   }
 
+  // NX-OS publishes no IPMROUTE-STD-MIB. PIM-MIB still lists each (S,G) and (*,G) with its flags, indexed group.source.mask.
+  let routeSource: 'ipmroute' | 'pim' = 'ipmroute';
+  if (!routes.size) {
+    const fl = await col(c, `${PIM_MROUTE}.5`);
+    // the flags are a BITS value (rpt, spt); a (*,G) route is the shared tree and the rest are source trees, which is what the walk shows
+    for (const idx of fl.keys()) { const r = add(idx); if (!r) continue; r.protocol = 8; r.flags = [r.source === '0.0.0.0' ? 'rpt' : 'spt']; }
+    if (routes.size) routeSource = 'pim';
+  }
+
   // the rendezvous point of each group: PIM-MIB pimRPTable is indexed group.rpAddress
   const [rpCol, rpSince] = await Promise.all([3, 5].map(n => col(c, `${PIM_RP}.${n}`)));
   const rpOf = new Map<string, string>();
@@ -190,18 +204,18 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   }
   receivers.sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.ifIndex - b.ifIndex);
 
-  const [pMode, pDr] = await Promise.all([4, 5].map(n => col(c, `${PIM_IF}.${n}`)));
+  const [pMode, pDr, pStatus] = await Promise.all([4, 5, 7].map(n => col(c, `${PIM_IF}.${n}`)));
   const MODES: Record<number, McPimIf['mode']> = { 1: 'dense', 2: 'sparse', 3: 'sparse-dense' };
   const pimInterfaces: McPimIf[] = [...pMode].map(([idx, v]) => {
     return { ifIndex: Number(idx), mode: MODES[num(v) ?? 0] ?? 'other', dr: ipOf(pDr.get(idx)) };
-  }).filter(x => Number.isFinite(x.ifIndex));
+  }).filter(x => Number.isFinite(x.ifIndex) && (!pStatus.size || num(pStatus.get(String(x.ifIndex))) === 1));
   const nbrIf = await col(c, `${PIM_NBR}.2`);
   const neighbors: McNeighbor[] = [...nbrIf].map(([idx, v]) => ({ address: idx, ifIndex: num(v) ?? 0 })).filter(n => isIp(n.address));
 
   const igmpInterfaces = await readIgmpInterfaces(c);
   // the rendezvous point mappings: pimRPSetTable is indexed component.group.mask.rp
   const rpSet: McRpMap[] = [];
-  const [hold, expiry2] = await Promise.all([5, 6].map(n => col(c, `${PIM_RPSET}.${n}`)));
+  const [hold, expiry2] = await Promise.all([4, 5].map(n => col(c, `${PIM_RPSET}.${n}`)));
   for (const k of new Set([...hold.keys(), ...expiry2.keys()])) {
     const p = k.split('.'); if (p.length < 13) continue;
     const g = ip4(p, 1), m = ip4(p, 5), rp = ip4(p, 9);
@@ -219,14 +233,26 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
     const ifIndex = Number(k); if (!Number.isInteger(ifIndex) || ifIndex <= 0) continue;
     interfaces.push({ ifIndex, inOctets: big(hcIn.get(k)) ?? big(lIn.get(k)), outOctets: big(hcOut.get(k)) ?? big(lOut.get(k)), inBps: null, outBps: null, ttl: num(ttl.get(k)), rateLimit: num(lim.get(k)) });
   }
+  // without the multicast interface table (NX-OS), the IP counters count multicast octets per interface: HC in 37, HC out 41, indexed 1.ifIndex for IPv4
+  if (!interfaces.length) {
+    const [mIn, mOut] = await Promise.all([37, 41].map(n => col(c, `${IPIFSTATS}.${n}`)));
+    for (const [k, v] of mIn) {
+      const p = k.split('.'); if (p[0] !== '1') continue;
+      const ifIndex = Number(p[1]), i = big(v), o = big(mOut.get(k));
+      if (Number.isInteger(ifIndex) && ifIndex > 0 && ((i ?? 0) > 0 || (o ?? 0) > 0)) interfaces.push({ ifIndex, inOctets: i, outOctets: o, inBps: null, outBps: null, ttl: null, rateLimit: null });
+    }
+  }
   interfaces.sort((a, b) => a.ifIndex - b.ifIndex);
 
+  // no per-group RP table: the RP of a group is the one whose range covers it most closely
+  const covers = (r: McRpMap, g: string): boolean => { const size = 2 ** 32 - x32(r.mask), start = x32(r.group) - (x32(r.group) % size); return size < 2 ** 32 && x32(g) >= start && x32(g) < start + size; };
+  for (const r of routes.values()) if (!r.rp) { const best = rpSet.filter(x => covers(x, r.group)).sort((a, b) => x32(b.mask) - x32(a.mask))[0]; if (best) r.rp = best.rp; }
   if (!routes.size && !receivers.length) return null;
   const names = await interfaceNames(c, [...routes.values()].flatMap(r => [r.inIfIndex ?? 0, ...r.oifs.map(o => o.ifIndex)]).concat(receivers.map(r => r.ifIndex), pimInterfaces.map(p => p.ifIndex), neighbors.map(n => n.ifIndex), interfaces.map(i => i.ifIndex)));
   const used = [...routes.values()].flatMap(r => r.oifs.map(o => o.ifIndex)).concat(receivers.map(r => r.ifIndex));
   const down = await interfacesDown(c, used);
   const list = [...routes.values()].sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.source.localeCompare(b.source, undefined, { numeric: true }));
-  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, igmpInterfaces, rpGroups, rpSet, candidateRps, interfaces, names, down, truncated };
+  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, routeSource, igmpInterfaces, rpGroups, rpSet, candidateRps, interfaces, names, down, truncated };
 }
 
 /** The last host to report each group on each interface (igmpCacheLastReporter), read on its own so it can be sampled often. */
@@ -334,10 +360,11 @@ export function withLoadRates(m: Multicast, prev: Multicast | null): Multicast {
 
 /** IGMP per interface: the querier, the version and the query timers. Indexed by ifIndex. */
 export async function readIgmpInterfaces(c: SnmpClient): Promise<McIgmpIf[]> {
-  const [interval, version, querier, upTime, expiry] = await Promise.all([2, 4, 5, 7, 8].map(n => col(c, `${IGMP_IF}.${n}`)));
+  const [interval, version, querier, upTime, expiry, status] = await Promise.all([2, 4, 5, 7, 8, 3].map(n => col(c, `${IGMP_IF}.${n}`)));
   const out: McIgmpIf[] = [];
   for (const k of new Set([...querier.keys(), ...version.keys()])) {
     const ifIndex = Number(k); if (!Number.isInteger(ifIndex) || ifIndex <= 0) continue;
+    if (status.size && num(status.get(k)) !== 1) continue; // 2 is notInService: configured but not running
     const q = ipOf(querier.get(k));
     out.push({ ifIndex, querier: q && q !== '0.0.0.0' ? q : null, version: num(version.get(k)), queryIntervalSec: num(interval.get(k)), querierUpSec: secs(upTime.get(k)), querierExpirySec: secs(expiry.get(k)) });
   }

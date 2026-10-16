@@ -249,7 +249,7 @@ test('reads the IGMP querier per interface and the rendezvous point mappings', a
     ...FIX,
     [`${I}.4.735`]: 2, [`${I}.5.735`]: '10.1.1.2', [`${I}.2.735`]: 125, [`${I}.7.735`]: 360000, [`${I}.8.735`]: 25000,
     [`${I}.4.736`]: 3, [`${I}.5.736`]: '0.0.0.0',
-    [`${S}.5.1.224.0.0.0.240.0.0.0.10.10.30.1`]: 150, [`${S}.6.1.224.0.0.0.240.0.0.0.10.10.30.1`]: 12000,
+    [`${S}.4.1.224.0.0.0.240.0.0.0.10.10.30.1`]: 150, [`${S}.5.1.224.0.0.0.240.0.0.0.10.10.30.1`]: 12000,
     [`${C}.3.239.0.0.0.255.0.0.0`]: '10.1.1.1'
   };
   const m = (await readMulticast(agent(rows), 1))!;
@@ -262,14 +262,39 @@ test('reads the IGMP querier per interface and the rendezvous point mappings', a
 
 test('reads the IGMP querier of every interface from real walks of a Catalyst 9300 stack and a second switch', async () => {
   const { readIgmpInterfaces } = await import('../src/snmp/multicast.js');
-  for (const [file, n] of [['igmpif-c9300.json', 19], ['igmpif-c3850.json', 11]] as const) {
+  for (const [file, n] of [['igmpif-c9300.json', 19], ['igmpif-c3850.json', 10]] as const) {
     const rows = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'test', 'fixtures', file), 'utf8')) as Record<string, SnmpValue>;
     const list = await readIgmpInterfaces(agent(rows));
-    assert.equal(list.length, n, file);
+    assert.equal(list.length, n, file + ' (a row whose status is notInService is left out)');
     assert.ok(list.every(i => i.version === 2 || i.version === 3), 'version is column 4');
     assert.ok(list.every(i => i.queryIntervalSec === 60), 'the query interval is column 2, in seconds');
     assert.ok(list.some(i => i.querier && i.querierUpSec !== null && i.querierUpSec > 0), 'querier uptime is column 7, in timeticks');
-    assert.ok(list.some(i => i.querier === null), 'a querier of 0.0.0.0 is no querier');
+    if (file === 'igmpif-c9300.json') assert.ok(list.some(i => i.querier === null), 'a querier of 0.0.0.0 is no querier');
     assert.ok(list.some(i => (i.querierExpirySec ?? 0) > 0) && list.some(i => i.querierExpirySec === 0), 'expiry is 0 where this router is the querier, and counts down where another router is');
   }
+});
+
+test('an NX-OS switch: routes from PIM-MIB, only running PIM and IGMP interfaces, RP set, and multicast load from the IP counters', async () => {
+  const rows = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'test', 'fixtures', 'nxos-c93180.json'), 'utf8')) as Record<string, SnmpValue>;
+  const m = (await readMulticast(agent(rows), 1))!;
+  assert.equal(m.routeSource, 'pim', 'no IPMROUTE-STD-MIB on NX-OS');
+  assert.equal(m.routes.length, 27);
+  assert.ok(m.routes.every(r => r.oifs.length === 0 && r.inIfIndex === null));
+  assert.equal(m.routes.filter(r => r.source === '0.0.0.0').length, 1);
+  assert.deepEqual(m.routes.find(r => r.source === '0.0.0.0')!.flags, ['rpt']);
+  assert.equal(m.pimInterfaces.length, 31, '54 PIM interfaces are listed and 23 are notInService');
+  assert.ok(m.pimInterfaces.every(p => p.mode === 'sparse'));
+  assert.equal(m.igmpInterfaces!.length, 31);
+  assert.deepEqual(m.rpSet!.map(x => [x.group, x.mask, x.rp]), [['224.0.0.0', '240.0.0.0', '10.10.94.254'], ['239.130.0.0', '255.255.0.0', '10.10.30.1']]);
+  assert.equal(m.routes.find(r => r.group === '224.0.1.129')!.rp, '10.10.94.254', 'the RP of a group is the closest range that covers it');
+  assert.ok(m.neighbors.length === 6);
+  const load = m.interfaces!.find(i => i.ifIndex === 436207616)!;
+  assert.equal(load.inOctets, 76746524); assert.equal(load.outOctets, 981180);
+});
+
+test('an NX-OS chassis row gives the model', async () => {
+  const { readEntity, modelText } = await import('../src/snmp/entity.js');
+  const rows = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'test', 'fixtures', 'nxos-c93180.json'), 'utf8')) as Record<string, SnmpValue>;
+  const client = { column: agent(rows).column, get: async (oids: string[]) => new Map(oids.filter(o => o in rows).map(o => [o, { oid: o, type: 4, value: rows[o]! }])) } as unknown as SnmpClient;
+  assert.equal(modelText(await readEntity(client, 1)), 'N9K-C93180YC-FX3');
 });

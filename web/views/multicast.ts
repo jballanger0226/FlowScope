@@ -26,6 +26,7 @@ interface Route {
 interface Detail {
   igmpHint?: IgmpHint;
   device: { id: number; name: string; ip: string; role: string; model?: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
+  routeSource?: 'ipmroute' | 'pim';
   igmp?: IgmpIf[];
   rps?: { inUse?: { rp: string; who: string | null; self: boolean; up: boolean; groups: string[]; sinceSec: number | null }[]; map: RpMap[]; candidate: { range: string; rp: string; self: boolean }[] };
   pimIssues?: { level: 'warn' | 'info'; kind: string; text: string }[];
@@ -163,7 +164,7 @@ function expanded(r: Route): VNode {
       r.flags.length ? h('span', null, 'Flags: ', r.flags.join(', ')) : null),
     r.out.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:780px` },
       h('div', { class: 'tr head' }, ...['Sent out of', 'State', 'Reaches', 'Hosts that joined (IGMP)', 'Packets'].map(t => h('span', null, t))),
-      r.out.map(o => oilRow(r, o)))) : note('Nothing is joined downstream of this router, so it forwards this group nowhere.', 'info'));
+      r.out.map(o => oilRow(r, o)))) : detail?.routeSource === 'pim' ? null : note('Nothing is joined downstream of this router, so it forwards this group nowhere.', 'info'));
 }
 
 interface Grp { group: string; routes: Route[] }
@@ -296,6 +297,7 @@ export function render(): VNode {
       detail ? pimSummary(detail) : null,
       ...(detail?.pimIssues ?? []).map(i => note(i.text, i.level === 'warn' ? 'warn' : 'info')),
       cur ? h('div', { class: 'dim', style: 'font-size:12.5px' }, `Hosts that joined come from the router's IGMP cache over SNMP and are not a complete list. For the full membership, ${whereToLook()}.`) : null,
+      detail?.routeSource === 'pim' ? note('This device does not publish the standard multicast routing table (IPMROUTE-STD-MIB), as NX-OS does not. The groups and sources below come from PIM, so they have no incoming or outgoing interfaces, rates or RPF information. Use the device\'s CLI (show ip mroute) for those.', 'info') : null,
       cur?.truncated ? note('This device holds more routes than FlowScope keeps. The list is cut off.', 'warn') : null,
       h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },
         textInput(query, v => { query = v; page = 0; }, { placeholder: 'Search groups and source hosts: 239.1.1.1, 10.2.3.4, a port, a switch…', aria: 'Search groups and source hosts', width: '420px', id: 'mc-filter' }),
