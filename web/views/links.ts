@@ -7,6 +7,7 @@ import { post } from '../api.js';
 import { correlate, verdict } from './correlate.js';
 import { attentionPanel, cards, cardsRow, issues, type Target } from './links_overview.js';
 import { hardwarePanel, hasHardware, hasOptics, linkQuality, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
+import { publicAddresses } from './ip_scope.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
 interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
@@ -353,7 +354,7 @@ function termMatches(i: Iface, raw: string): boolean {
   const vtext = `${vlanLabel(i.vlan, i.vlanName)} ${vlanLabel(i.voiceVlan, i.voiceVlanName)} ${i.vlanName} ${i.voiceVlanName}`.toLowerCase();
   if (vlanOnly) return vtext.includes(t) || (t === 'trunk' && i.portMode === 'trunk');
   const nb = (nbRes?.ports.find(p => p.ifIndex === i.ifIndex)?.neighbors ?? []).map(n => `${n.name} ${n.port} ${n.ip}`).join(' ');
-  return `${i.name} ${i.alias} ${vtext} ${i.portMode} ${i.policy ?? ''} ${i.policyIn ?? ''} ${nb}`.toLowerCase().includes(t);
+  return `${i.name} ${i.alias} ${vtext} ${i.portMode} ${i.policy ?? ''} ${i.policyIn ?? ''} ${nb} ${(i.addresses ?? []).join(' ')} ${publicAddresses(i.addresses).length ? 'public' : ''}`.toLowerCase().includes(t);
 }
 function filterIfaces(list: Iface[]): Iface[] {
   const terms = ifSearch.trim().split(/\s+/).filter(Boolean);
@@ -365,23 +366,33 @@ function policyCell(i: Iface): VNode {
   return h('span', { class: 'col', style: 'gap:1px;font-size:12px' }, i.policy ? h('span', { class: 'muted', title: 'Policy applied to traffic leaving the port' }, 'out ', h('b', null, i.policy)) : null, i.policyIn ? h('span', { class: 'muted', title: 'Policy applied to traffic entering the port' }, 'in ', h('b', null, i.policyIn)) : null);
 }
 
+/** The IP addresses of a routed port or an SVI. A public one carries a quiet "public" tag: informational only, since edge routers and firewalls are meant to have one. */
+function ipCell(i: Iface): VNode {
+  if (!i.addresses?.length) return h('span', { class: 'dim' }, '—');
+  const pub = new Set(publicAddresses(i.addresses));
+  return h('span', { class: 'col', style: 'gap:2px' }, i.addresses.map(a => h('span', { key: a, class: 'row', style: 'gap:6px;flex-wrap:nowrap' },
+    h('span', { class: 'mono', style: 'font-size:12px;white-space:nowrap' }, a),
+    pub.has(a) ? h('span', { class: 'tag', style: 'padding:1px 6px;font-size:11px', title: 'A public (internet-routable) address. For information only.' }, 'public') : null)));
+}
+
 function ifTable(dev: Dev): VNode {
   const optics = opticMap(healthRes?.health?.sensors ?? []);
   const light = hasOptics(healthRes);
-  const cols = 'minmax(88px,0.8fr) minmax(120px,1fr) minmax(130px,1fr) minmax(140px,1.1fr) 52px 58px ' + (light ? '112px ' : '') + '118px 118px 64px minmax(84px,0.8fr) 70px';
+  const cols = 'minmax(88px,0.8fr) minmax(120px,1fr) minmax(200px,1fr) minmax(130px,1fr) minmax(140px,1.1fr) 52px 58px ' + (light ? '112px ' : '') + '118px 118px 64px minmax(84px,0.8fr) 70px';
   const nbOf = (ix: number): Neighbor[] => nbRes?.ports.find(p => p.ifIndex === ix)?.neighbors ?? [];
   const rows = filterIfaces(dev.interfaces);
   return h('div', { class: 'col', style: 'gap:8px' },
     h('div', { class: 'row', style: 'gap:10px' },
-      h('div', { style: 'flex:1 1 320px;max-width:460px' }, textInput(ifSearch, v => { ifSearch = v; }, { placeholder: 'Search interface, description, neighbour or VLAN', aria: 'Search interfaces', width: '100%' })),
+      h('div', { style: 'flex:1 1 320px;max-width:460px' }, textInput(ifSearch, v => { ifSearch = v; }, { placeholder: 'Search interface, description, neighbour, VLAN or address', aria: 'Search interfaces', width: '100%' })),
       ifSearch.trim() ? btn('Clear', { kind: 'ghost', small: true, onclick: () => { ifSearch = ''; redraw(); } }) : null,
       h('span', { class: 'muted', role: 'status', 'aria-live': 'polite' }, ifSearch.trim() ? `${rows.length} of ${dev.interfaces.length} interfaces` : `${dev.interfaces.length} interfaces`),
-      h('span', { class: 'dim', style: 'font-size:12px' }, 'Words must all match. A number is a VLAN id; vlan:20 matches only VLANs.')),
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:${light ? 1345 : 1230}px` },
-      h('div', { class: 'tr head' }, ...['Interface', 'Description', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', ...(light ? [h('span', { title: 'Optic light levels in dBm: receive / transmit' }, 'Light Rx / Tx')] : []), 'In', 'Out', 'Discards', 'Service policy', 'Flows'].map(t => (typeof t === 'string' ? h('span', null, t) : t))),
+      h('span', { class: 'dim', style: 'font-size:12px' }, 'Words must all match. A number is a VLAN id; vlan:20 matches only VLANs. "public" finds interfaces with a public IP address.')),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:${light ? 1545 : 1430}px` },
+      h('div', { class: 'tr head' }, ...['Interface', 'Description', 'IP address', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', ...(light ? [h('span', { title: 'Optic light levels in dBm: receive / transmit' }, 'Light Rx / Tx')] : []), 'In', 'Out', 'Discards', 'Service policy', 'Flows'].map(t => (typeof t === 'string' ? h('span', null, t) : t))),
       h('div', { class: 'scroll' }, rows.map(i => h('div', { key: i.ifIndex, class: 'tr pick', 'aria-current': i.ifIndex === ifIndex ? 'true' : undefined, onclick: () => select_(dev.id, i.ifIndex, 'interfaces') },
         h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex, 'interfaces'); } }, i.name), i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
         h('span', { class: 'muted' }, i.alias || '—'),
+        ipCell(i),
         nbCell(nbOf(i.ifIndex)),
         vlanCell(i),
         h('span', { class: 'mono', style: 'font-size:12px' }, i.speedMbps ? (i.speedMbps >= 1000 ? i.speedMbps / 1000 + ' G' : i.speedMbps + ' M') : '—'),
@@ -906,7 +917,7 @@ export function render(): VNode {
         h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, `${itf.name}${itf.alias ? ' · ' + itf.alias : ''}`),
           h('span', { class: 'muted' }, [itf.speedMbps ? (itf.speedMbps >= 1000 ? itf.speedMbps / 1000 + ' Gbps' : itf.speedMbps + ' Mbps') : 'speed unknown',
             itf.portMode === 'trunk' ? `trunk, native VLAN ${vlanLabel(itf.vlan, itf.vlanName) || 'unknown'}${itf.vlanList ? ', allowed ' + itf.vlanList : ''}` : itf.vlan ? `${itf.isVlanIf ? 'SVI for ' : ''}VLAN ${vlanLabel(itf.vlan, itf.vlanName)}${itf.voiceVlan ? ', voice VLAN ' + vlanLabel(itf.voiceVlan, itf.voiceVlanName) : ''}` : null,
-            itf.addresses?.length ? itf.addresses.join(', ') : null, itf.mac ? 'MAC ' + itf.mac : null,
+            itf.addresses?.length ? itf.addresses.map(a => publicAddresses([a]).length ? a + ' (public)' : a).join(', ') : null, itf.mac ? 'MAC ' + itf.mac : null,
             itf.policy ? 'output policy ' + itf.policy : null, itf.policyIn ? 'input policy ' + itf.policyIn : null].filter(Boolean).join(' · '))),
           h('div', { class: 'row' }, itf.flagged ? chip('Needs attention', 'warn') : chip('Within thresholds', 'ok'))),
         dev.qosNote ? note(dev.qosNote, 'warn') : null,
