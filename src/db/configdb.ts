@@ -187,6 +187,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE class_defs ADD COLUMN sets TEXT;
   `,
   `
+  -- strict-priority queues (cbQosQueueingCfgPriorityEnabled), so a priority class nearing its limit can be flagged before it starts dropping
+  ALTER TABLE class_defs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
   -- each interface's own MAC address (so a MAC seen in a flow can be named), the netmask of each device address, and the latest uptime / CPU / memory / disk reading of each device
   ALTER TABLE interfaces ADD COLUMN mac TEXT NOT NULL DEFAULT '';
   ALTER TABLE device_ips ADD COLUMN mask TEXT NOT NULL DEFAULT '';

@@ -19,10 +19,10 @@ export type Target = { tab: 'interfaces' | 'hardware' | 'network' | 'wifi'; ifIn
 export interface Issue { level: 'bad' | 'warn'; title: string; detail: string; target?: Target }
 export interface Card { tab: Target['tab']; label: string; level: Level; headline: string; lines: string[] }
 
-interface OvIface { ifIndex: number; name: string; alias: string; oper: string; isVlanIf: boolean; flagged: boolean; utilIn: number | null; utilOut: number | null; worstDropPct: number | null }
+interface OvIface { ifIndex: number; name: string; alias: string; oper: string; isVlanIf: boolean; flagged: boolean; utilIn: number | null; utilOut: number | null; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null }
 export interface OvDev { status: string; lastError: string | null; resources: { cpuPct: number | null; memPct: number | null; swapPct: number | null; disks: { name: string; usedPct: number }[]; tempC?: number | null } | null; interfaces: OvIface[]; hasWlan: boolean }
 export interface OvWlan { aps: { name: string; mac: string }[]; radios: { apMac: string; idx: number; band: string; up: boolean }[]; clients: unknown[] }
-export interface OvInput { dev: OvDev; health: OvHealth | null; wlan: OvWlan | null; neighbours: number | null; arp: number | null; hasHardware: boolean; thresholds: { util: number; drop: number } }
+export interface OvInput { dev: OvDev; health: OvHealth | null; wlan: OvWlan | null; neighbours: number | null; arp: number | null; hasHardware: boolean; thresholds: { util: number; drop: number; mcast?: number; priority?: number } }
 
 const plural = (n: number, one: string, many = one + 's'): string => `${n} ${n === 1 ? one : many}`;
 const pct = (n: number | null): string => (n === null ? '–' : `${Math.round(n)}%`);
@@ -41,6 +41,8 @@ export function issues(o: OvInput): Issue[] {
   for (const i of dev.interfaces) if (i.flagged) {
     const bits: string[] = [];
     if (i.worstDropPct !== null && i.worstDropPct >= o.thresholds.drop) bits.push(`queue drops ${i.worstDropPct.toFixed(1)}%`);
+    if (i.priorityPct != null && i.priorityPct >= (o.thresholds.priority ?? 80)) bits.push(`priority queue ${Math.round(i.priorityPct)}% of its limit (traffic above it is dropped)`);
+    if (i.mcastPct != null && i.mcastPct >= (o.thresholds.mcast ?? 50)) bits.push(`multicast ${Math.round(i.mcastPct)}% of the link`);
     const u = Math.max(i.utilIn ?? 0, i.utilOut ?? 0); if (u >= o.thresholds.util) bits.push(`utilisation ${Math.round(u)}%`);
     out.push({ level: 'warn', title: `${names.get(i.ifIndex)}: over its limits`, detail: bits.join(', ') || 'Over a threshold in the last window.', target: { tab: 'interfaces', ifIndex: i.ifIndex, section: 'traffic' } });
   }

@@ -10,7 +10,7 @@ import { hardwarePanel, hasHardware, hasOptics, linkQuality, nbarPanel, opticCel
 import { publicAddresses } from './ip_scope.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
-interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null }
+interface Cls { cls: string; label: string; dir: 'in' | 'out'; dscps: number[]; bw: string | null; queue: string | null; dropPct: number | null; dropPkts: number; dropBytes: number; sentBps: number | null; qdepth: number | null; priority?: boolean; limitBps?: number | null; limitPct?: number | null }
 interface Disk { name: string; usedPct: number; totalBytes: number; usedBytes: number }
 interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: number | null; load: [number, number, number] | null; memPct: number | null; memTotal: number | null; memUsed: number | null; swapPct: number | null; sessions?: number | null; sessionsMax?: number | null; tempC?: number | null; disks: Disk[]; source: string; readAt: number }
 interface Iface {
@@ -18,10 +18,10 @@ interface Iface {
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
   portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number;
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
-  classes: Cls[]; worstDropPct: number | null; flagged: boolean;
+  classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
 interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; resources: Resources | null; interfaces: Iface[] }
-interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number }; mibs: { name: string; what: string }[] }
+interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number; mcast: number; priority: number }; mibs: { name: string; what: string }[] }
 interface SeriesRes {
   util: { step: number; points: { ts: number; utilIn: number; utilOut: number; inBps: number; outBps: number; disc: number; err: number }[] };
   classes: { cls: string; dscps: number[]; bw: string | null; points: { ts: number; dropPct: number; dropBps: number; dropPps: number; sentBps: number; qdepth: number }[] }[];
@@ -314,10 +314,10 @@ function sidebar(): VNode {
         !devs.length ? h('span', { class: 'dim' }, d.devices.length ? 'No device matches.' : 'No devices are polled yet. Add one on the SNMP devices tab.') : null)),
     h('div', { class: 'panel col', style: 'gap:10px' },
       h('h3', null, 'Needs attention'),
-      h('p', { class: 'muted' }, `Interfaces above ${d.thresholds.util}% utilisation or dropping more than ${d.thresholds.drop}% of a class, in the last ${d.windowMinutes} minutes.`),
+      h('p', { class: 'muted' }, `Interfaces above ${d.thresholds.util}% utilisation, dropping more than ${d.thresholds.drop}% of a class, with a priority queue above ${d.thresholds.priority}% of its limit, or with multicast above ${d.thresholds.mcast}% of the link, in the last ${d.windowMinutes} minutes.`),
       attn.length ? h('div', { class: 'cards' }, attn.slice(0, 8).map(a => h('button', { key: a.dev.id + '/' + a.itf.ifIndex, type: 'button', class: 'cardbtn', 'aria-pressed': a.dev.id === devId && a.itf.ifIndex === ifIndex, onclick: () => select_(a.dev.id, a.itf.ifIndex, 'interfaces') },
         h('span', { class: 't' }, `${a.dev.name} · ${a.itf.name}`),
-        h('span', { class: 's' }, [a.itf.worstDropPct !== null && a.itf.worstDropPct >= d.thresholds.drop ? `drops ${pct(a.itf.worstDropPct, 2)}` : null, `util ${pct(Math.max(a.itf.utilIn ?? 0, a.itf.utilOut ?? 0), 0)}`].filter(Boolean).join(' · '))))) : h('span', { class: 'dim' }, 'Nothing is over its threshold right now.')),
+        h('span', { class: 's' }, [a.itf.worstDropPct !== null && a.itf.worstDropPct >= d.thresholds.drop ? `drops ${pct(a.itf.worstDropPct, 2)}` : null, a.itf.priorityPct != null && a.itf.priorityPct >= d.thresholds.priority ? `priority queue ${pct(a.itf.priorityPct, 0)} full` : null, a.itf.mcastPct != null && a.itf.mcastPct >= d.thresholds.mcast ? `multicast ${pct(a.itf.mcastPct, 0)} of link` : null, `util ${pct(Math.max(a.itf.utilIn ?? 0, a.itf.utilOut ?? 0), 0)}`].filter(Boolean).join(' · '))))) : h('span', { class: 'dim' }, 'Nothing is over its threshold right now.')),
     locator(),
     h('div', { class: 'panel col', style: 'gap:8px' },
       h('h3', null, 'What is polled'),
@@ -475,8 +475,8 @@ function classTable(itf: Iface): VNode {
   return h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:780px` },
     h('div', { class: 'tr head' }, ...['Class', 'DSCP values', 'Guaranteed', 'Sent', 'Drop %', 'Dropped', 'Queue depth'].map(t => h('span', null, t))),
     itf.classes.map(c => h('div', { key: c.cls, class: 'tr' },
-      h('span', { style: 'font-weight:600' }, c.label, ' ', c.dir === 'in' ? h('span', { class: 'tag', title: 'This class belongs to the input service policy' }, 'in') : null), h('span', { class: 'mono muted', style: 'font-size:12px' }, dscpText(c.dscps)),
-      h('span', { class: 'mono', style: 'font-size:12px' }, c.bw ?? '—'), h('span', { class: 'mono', style: 'font-size:12px' }, bps(c.sentBps)),
+      h('span', { style: 'font-weight:600' }, c.label, ' ', c.dir === 'in' ? h('span', { class: 'tag', title: 'This class belongs to the input service policy' }, 'in') : null, c.priority ? h('span', { class: 'tag', title: 'Strict-priority queue: traffic above its limit is dropped' }, 'priority') : null), h('span', { class: 'mono muted', style: 'font-size:12px' }, dscpText(c.dscps)),
+      h('span', { class: 'mono', style: 'font-size:12px' }, c.bw ?? '—'), h('span', { class: 'mono', style: `font-size:12px;color:${c.limitPct != null && c.limitPct >= (data?.thresholds.priority ?? 80) ? 'var(--bad)' : 'inherit'}`, title: c.limitBps ? `${pct(c.limitPct ?? 0, 0)} of the ${bps(c.limitBps)} this priority queue is limited to` : undefined }, bps(c.sentBps), c.limitPct != null ? ` (${pct(c.limitPct, 0)} of limit)` : ''),
       h('span', { class: 'mono', style: `font-size:12px;color:${(c.dropPct ?? 0) >= (data?.thresholds.drop ?? 1) ? 'var(--bad)' : 'inherit'}` }, c.dropPct === null ? '—' : pct(c.dropPct, 2)),
       h('span', { class: 'mono', style: 'font-size:12px' }, c.dropPkts ? `${num(c.dropPkts)} pkts · ${bytes(c.dropBytes)}` : '0'),
       h('span', { class: 'mono', style: 'font-size:12px' }, c.qdepth === null ? '—' : num(c.qdepth)))),

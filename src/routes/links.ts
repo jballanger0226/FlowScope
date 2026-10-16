@@ -34,6 +34,16 @@ export const MIBS = [
 interface Event { ts0: number; ts1: number; devId: number; dev: string; ifIndex: number; ifName: string; kind: 'drop' | 'util' | 'errors'; cls?: string; peak: number; text: string; severity: 'warn' | 'bad' }
 
 /** Interfaces and QoS classes for every polled device, with the latest rates. The Network health page and the Overview both read this. */
+/** The rate a priority class is limited to, from its configured bandwidth ("5000 kbps", "20%"). A share of what is left over has no fixed rate. */
+export function limitBps(bw: string | null, speedMbps: number): number | null {
+  const m = /^([\d.]+) (kbps|%)$/.exec((bw ?? '').trim().replace(/^([\d.]+)(%)$/, '$1 $2'));
+  if (!m) return null;
+  const v = Number(m[1]);
+  if (!(v > 0)) return null;
+  if (m[2] === 'kbps') return v * 1000;
+  return speedMbps > 0 ? v / 100 * speedMbps * 1e6 : null;
+}
+
 export async function linkDevices(app: App, minutes: number) {
   const since = Date.now() - minutes * 60_000;
   const [ifl, cll] = await Promise.all([app.store.ifLatest(since), app.store.classLatest(since)]);
@@ -41,14 +51,23 @@ export async function linkDevices(app: App, minutes: number) {
   const clBy = new Map<string, ClassLatest[]>();
   for (const k of cll) { const key = `${k.dev}/${k.ifIndex}`; const a = clBy.get(key); if (a) a.push(k); else clBy.set(key, [k]); }
   const al = app.settings.get('alerts');
+  // multicast octets per interface (IPMROUTE-STD-MIB), read with the multicast tables
+  const mcastLoad = new Map<number, Map<number, { inBps: number | null; outBps: number | null }>>();
+  for (const dv of app.devices.list()) { const m = app.devices.multicast(dv.id); if (m?.interfaces?.length) mcastLoad.set(dv.id, new Map(m.interfaces.map(x => [x.ifIndex, x]))); }
   const counts = app.hosts.portCounts();
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
     qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
     interfaces: app.devices.interfaces(d.id).map(i => {
+      const mload = mcastLoad.get(d.id)?.get(i.ifIndex);
       const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
       // VLAN and SVI interfaces carry routed traffic for a whole subnet and are never listed under "needs attention"
       const vlanIf = isVlanInterface(i);
+      // how full the busiest strict-priority queue is, and how much of the link multicast takes (the larger of in and out)
+      let prioPct: number | null = null;
+      for (const def of i.classes) { if (!def.priority || def.cls.startsWith('in:')) continue; const lim = limitBps(def.bw, i.speedMbps); const k = cls.find(x => x.cls === def.cls); if (lim && k) prioPct = Math.max(prioPct ?? 0, 100 * k.sentBps / lim); }
+      const mcastBps = mload ? Math.max(mload.inBps ?? 0, mload.outBps ?? 0) : null;
+      const mcastPct = mcastBps !== null && i.speedMbps > 0 ? 100 * mcastBps / (i.speedMbps * 1e6) : null;
       return {
         ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
         portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList,
@@ -56,10 +75,12 @@ export async function linkDevices(app: App, minutes: number) {
         utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
         classes: i.classes.map(def => {
           const k = cls.find(x => x.cls === def.cls);
-          return { cls: def.cls, label: def.cls.replace(/^in:/, ''), dir: def.cls.startsWith('in:') ? 'in' : 'out', dscps: def.dscps, bw: def.bw, queue: def.queue, dropPct: k?.dropPct ?? null, dropPkts: k?.dropPkts ?? 0, dropBytes: k?.dropBytes ?? 0, sentBps: k?.sentBps ?? null, qdepth: k?.qdepth ?? null };
+          const lim = def.priority && !def.cls.startsWith('in:') ? limitBps(def.bw, i.speedMbps) : null;
+          return { priority: def.priority, limitBps: lim, limitPct: lim && k ? 100 * k.sentBps / lim : null, cls: def.cls, label: def.cls.replace(/^in:/, ''), dir: def.cls.startsWith('in:') ? 'in' : 'out', dscps: def.dscps, bw: def.bw, queue: def.queue, dropPct: k?.dropPct ?? null, dropPkts: k?.dropPkts ?? 0, dropBytes: k?.dropBytes ?? 0, sentBps: k?.sentBps ?? null, qdepth: k?.qdepth ?? null };
         }),
         worstDropPct: cls.length ? Math.max(...cls.map(x => x.dropPct)) : null,
-        flagged: !vlanIf && ((!!l && Math.max(l.utilIn, l.utilOut) >= al.util) || cls.some(x => x.dropPct >= al.drop))
+        priorityPct: prioPct, mcastPct,
+        flagged: !vlanIf && ((!!l && Math.max(l.utilIn, l.utilOut) >= al.util) || cls.some(x => x.dropPct >= al.drop) || (prioPct !== null && prioPct >= al.priority) || (mcastPct !== null && mcastPct >= al.mcast))
       };
     })
   }));

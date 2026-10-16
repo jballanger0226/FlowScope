@@ -7,7 +7,7 @@ import { diffservSource, juniperSource, type QosSource } from './qos_vendors.js'
 
 export interface DeviceInfo { sysName: string; sysDescr: string; sysObjectId: string; uptimeSec: number }
 export interface IfaceInfo { index: number; name: string; descr: string; alias: string; speedMbps: number; oper: number; type: number; /** The interface's own MAC address, lower case with colons, or '' */ mac: string }
-export interface QosClass { name: string; objIdx: number; queueObjIdx: number | null; parentName: string | null; bandwidth: string | null; /** Where the class's counters are, for sources whose tables are not indexed like Cisco's */ ref?: string }
+export interface QosClass { name: string; objIdx: number; queueObjIdx: number | null; parentName: string | null; bandwidth: string | null; /** A strict-priority (low latency) queue: it is policed to its bandwidth, and what is above that is dropped */ priority?: boolean; /** Where the class's counters are, for sources whose tables are not indexed like Cisco's */ ref?: string }
 /** cbQosIfType: 1 main interface, 2 sub-interface, 5 control plane, 6 one VLAN of a trunk (cbQosVlanIndex), 7 EVC, 8 tunnel, 9 wireless. */
 /**
  * What a class does to the marking of the packets it matches ("set" actions). `dscp` is the value of a "set dscp" action. A value of 0 cannot be told from a
@@ -116,10 +116,10 @@ export async function readQosStructure(c: SnmpClient): Promise<QosPolicy[]> {
   const [ifIdx, ifType, vlanIdx, parentIdx] = await Promise.all([
     c.column(OID.cbQosIfIndex).catch(empty), c.column(OID.cbQosIfType).catch(empty), c.column(OID.cbQosVlanIndex).catch(empty), c.column(OID.cbQosParentPolicyIndex).catch(empty)
   ]);
-  const [cfgIdx, objType, parent, pmName, cmName, qBw, qUnits] = await Promise.all([
+  const [cfgIdx, objType, parent, pmName, cmName, qBw, qUnits, qPrio] = await Promise.all([
     c.column(OID.cbQosConfigIndex), c.column(OID.cbQosObjectsType), c.column(OID.cbQosParentObjectsIndex),
     c.column(OID.cbQosPolicyMapName), c.column(OID.cbQosCMName), c.column(OID.cbQosQueueingCfgBandwidth).catch(empty),
-    c.column(OID.cbQosQueueingCfgBandwidthUnits).catch(empty)
+    c.column(OID.cbQosQueueingCfgBandwidthUnits).catch(empty), c.column(OID.cbQosQueueingCfgPriorityEnabled).catch(empty)
   ]);
   const [matchName, setFeature, setDscp, setPrec, setCos] = await Promise.all([OID.cbQosMatchStmtName, OID.cbQosSetCfgFeature, OID.cbQosSetCfgIpDSCPValue, OID.cbQosSetCfgIpPrecedenceValue, OID.cbQosSetCfgL2CosValue].map(o => c.column(o).catch(empty)));
   // group the objects by policy once, instead of scanning the whole table for every policy
@@ -156,7 +156,7 @@ export async function readQosStructure(c: SnmpClient): Promise<QosPolicy[]> {
       const kids = objs.filter(x => x.parent === o.idx);
       const matched = [...new Set(kids.filter(x => x.type === CBQOS_OBJ.matchStatement).flatMap(x => matchedDscps(toStr(matchName.get(x.cfg) ?? null))))].sort((a, b) => a - b);
       const sets = setActions(kids.filter(x => x.type === CBQOS_OBJ.set).map(x => x.cfg), setFeature, setDscp, setPrec, setCos);
-      classes.push({ name, objIdx: o.idx, queueObjIdx: q ? q.idx : null, parentName, bandwidth: bw, matched, sets });
+      classes.push({ name, objIdx: o.idx, queueObjIdx: q ? q.idx : null, parentName, bandwidth: bw, priority: q ? num(qPrio.get(q.cfg), 2) === 1 : false, matched, sets });
     }
     out.push({
       policyIdx, ifIndex: num(ifIdx.get(pk)), direction, policyName: pmap ? toStr(pmName.get(pmap.cfg) ?? null) : '', classes,

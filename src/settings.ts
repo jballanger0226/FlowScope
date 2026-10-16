@@ -28,7 +28,8 @@ export const DEFAULTS = {
   logDays: 90,
   /** Limits on where SNMP-role users can send stored credentials. Empty allows any address. */
   snmpAccess: { allowedNets: '' },
-  alerts: { util: 90, drop: 1 },
+  /** util and drop: % of line speed and % of a class dropped. mcast: multicast as % of line speed. priority: a strict-priority queue as % of the rate it is limited to. */
+  alerts: { util: 90, drop: 1, mcast: 50, priority: 80 },
   /** Automatic HTTPS certificate from an ACME CA (Let's Encrypt or an internal one). Secrets are stored encrypted. */
   acme: {
     enabled: false, preset: 'letsencrypt' as 'letsencrypt' | 'letsencrypt-staging' | 'custom', directoryUrl: '', email: '', tosAgreed: false,

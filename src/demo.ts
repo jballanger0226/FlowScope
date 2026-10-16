@@ -179,12 +179,14 @@ const DEVS: Dev[] = [
 
 // class: [name, queue, matched DSCP values, guarantee]
 const POLICIES: Record<string, [string, string, number[], string][]> = {
-  'CORE-OUT': [['VOICE', 'Q0 · strict priority', [46], 'priority 10%'], ['VIDEO', 'Q1', [34], '25%'], ['CRITICAL', 'Q2', [18], '30%'], ['BULK', 'Q3', [10], '5%'], ['DEFAULT', 'Q4 · class-default', [], 'remainder']],
-  'WAN-OUT': [['VOICE', 'Q0 · strict priority', [46], 'priority 20%'], ['VIDEO', 'Q1', [34], '25%'], ['SIGNALING', 'Q2', [24], '5%'], ['CRITICAL', 'Q3', [18], '30%'], ['BULK', 'Q4', [10], '5%'], ['DEFAULT', 'Q5 · class-default', [], 'remainder']],
+  'CORE-OUT': [['VOICE', 'Q0 · strict priority', [46], '10%'], ['VIDEO', 'Q1', [34], '25%'], ['CRITICAL', 'Q2', [18], '30%'], ['BULK', 'Q3', [10], '5%'], ['DEFAULT', 'Q4 · class-default', [], 'remainder']],
+  'WAN-OUT': [['VOICE', 'Q0 · strict priority', [46], '20%'], ['VIDEO', 'Q1', [34], '25%'], ['SIGNALING', 'Q2', [24], '5%'], ['CRITICAL', 'Q3', [18], '30%'], ['BULK', 'Q4', [10], '5%'], ['DEFAULT', 'Q5 · class-default', [], 'remainder']],
   'DC-FABRIC-OUT': [['REPLICATION', 'Q1', [26], '30%'], ['CRITICAL', 'Q2', [18], '30%'], ['BULK', 'Q3', [10], '10%'], ['DEFAULT', 'Q4 · class-default', [], 'remainder']],
-  'FW-OUT': [['VOICE', 'Q0 · strict priority', [46], 'priority 10%'], ['CRITICAL', 'Q1', [18], '40%'], ['DEFAULT', 'Q2 · class-default', [], 'remainder']]
+  'FW-OUT': [['VOICE', 'Q0 · strict priority', [46], '10%'], ['CRITICAL', 'Q1', [18], '40%'], ['DEFAULT', 'Q2 · class-default', [], 'remainder']]
 };
 const SHARE: Record<string, number> = { VOICE: 0.03, VIDEO: 0.08, SIGNALING: 0.01, CRITICAL: 0.35, REPLICATION: 0.3, BULK: 0.12, DEFAULT: 0.25 };
+/** A voice queue running close to its priority limit (dist side of the WAN) */
+const HOT_SHARE: Record<string, number> = { 'wan-rtr-01|Gi0/0/0|VOICE': 0.44 };
 const OVERRIDE: Record<string, { drop: number; depth: number; mode: 'burst' | 'ramp' }> = {
   'dc-leaf-07|Eth1/49|BULK': { drop: 2.4, depth: 212, mode: 'burst' },
   'core-rtr-01|Te0/0/3|DEFAULT': { drop: 1.2, depth: 96, mode: 'ramp' },
@@ -404,11 +406,12 @@ class SnmpModel {
         let discPkts = 0;
         if (policy) {
           const defs = POLICIES[policy];
-          const total = defs.reduce((a, c) => a + (SHARE[c[0]] ?? 0.1), 0);
+          const shareOf = (c: string) => HOT_SHARE[`${d.name}|${name}|${c}`] ?? SHARE[c] ?? 0.1;
+          const total = defs.reduce((a, c) => a + shareOf(c[0]), 0);
           for (const [cname] of defs) {
             const key = `${d.name}|${name}|${cname}`;
             const o = OVERRIDE[key];
-            const classBps = outBps * (SHARE[cname] ?? 0.1) / total;
+            const classBps = outBps * shareOf(cname) / total;
             const preBytes = classBps * dt / 8, avg = cname === 'VOICE' ? 200 : 600;
             const prePkts = preBytes / avg;
             let pct = 0, depth = Math.round(5 + this.r() * 20);
@@ -473,7 +476,7 @@ function seedConfig(app: App, net: Net): void {
       const mode = svi ? 'svi' : pi?.mode ?? '', vlan = svi ? Number(svi[1]) : pi?.vlan ?? 0;
       db.prepare('INSERT OR IGNORE INTO interfaces(dev_id, if_index, name, descr, alias, speed_mbps, oper_status, policy) VALUES (?,?,?,?,?,?,?,?)').run(row!.id, ifx, ifc[0], ifc[1], ifc[1], ifc[2], 1, ifc[3]);
       db.prepare('UPDATE interfaces SET if_type = ?, port_mode = ?, vlan = ?, voice_vlan = ?, vlan_list = ?, policy_in = ? WHERE dev_id = ? AND if_index = ?').run(ifType, mode, vlan, pi?.voice ?? 0, pi?.list ?? '', POLICY_IN[key] ?? null, row!.id, ifx);
-      if (ifc[3]) for (const c of POLICIES[ifc[3]]) db.prepare('INSERT OR IGNORE INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)').run(row!.id, ifx, c[0], c[1], JSON.stringify(c[2]), c[3]);
+      if (ifc[3]) for (const c of POLICIES[ifc[3]]) db.prepare('INSERT OR IGNORE INTO class_defs(dev_id, if_index, cls, queue, dscps, bw, priority) VALUES (?,?,?,?,?,?,?)').run(row!.id, ifx, c[0], c[1], JSON.stringify(c[2]), c[3], c[1].includes('strict priority') ? 1 : 0);
       if (POLICY_IN[key]) for (const c of IN_POLICIES[POLICY_IN[key]]) db.prepare('INSERT OR IGNORE INTO class_defs(dev_id, if_index, cls, queue, dscps, bw) VALUES (?,?,?,?,?,?)').run(row!.id, ifx, 'in:' + c[0], '', JSON.stringify(c[1]), c[2]);
     });
     const ifs = db.prepare('SELECT if_index, name FROM interfaces WHERE dev_id = ?').all(row.id) as unknown as { if_index: number; name: string }[];
@@ -527,7 +530,7 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
         oifs: [{ ifIndex: e9, forwarding: g % 5 !== 0, pkts: 80_000 * (g + 1) }] });
       if (g % 3 === 0) receivers.push({ group, ifIndex: e9, lastReporter: `10.1.4.${20 + (g % 40)}`, expirySec: 200, self: false });
     }
-    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], truncated: false });
+    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], truncated: false, interfaces: [{ ifIndex: e9, inOctets: null, outOctets: null, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: null, outOctets: null, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
   }
   if (d.name === 'dc-spine-01') {
     const m = (n: number, role: string) => ({ index: n * 1000, number: n, role, state: 'ready', level: 'ok', mac: `00:1c:73:01:0${n}:00` });
