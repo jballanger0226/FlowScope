@@ -7,6 +7,14 @@ import type { AppLog } from '../logger.js';
 import type { SnmpClient } from './client.js';
 import { readResources } from './resources.js';
 import { readMulticast } from './multicast.js';
+import { readFib } from './fib.js';
+
+/** The slow optional readers. `run` returns whether the device had the table. */
+interface SlowReader { name: string; cisco: boolean; every: number; emptyEvery: number; errorEvery: number; run(c: SnmpClient, d: DeviceRow, devs: DeviceService, now: number, cisco: boolean): Promise<boolean> }
+const SLOW: SlowReader[] = [
+  { name: 'mcast', cisco: false, every: 115_000, emptyEvery: 3600_000, errorEvery: 600_000, run: async (c, d, devs, now, cisco) => { const m = await readMulticast(c, now, cisco); devs.saveMulticast(d.id, m); return !!m; } },
+  { name: 'fib', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs) => { const f = await readFib(c); devs.saveData(d.id, 'fib', f, f?.readAt); return !!f; } }
+];
 
 interface PrevIf { t: number; c: IfCounters }
 interface PrevCls { t: number; c: ClassCounters }
@@ -33,10 +41,9 @@ export class Poller {
   /** Hardware and link-quality reads are slower to change and heavier to ask for, so they run less often than the counters. */
   private healthAt = new Map<number, number>();
   private hottest = new Map<number, number | null>();
-  /** Multicast tables are large, so they are read every two minutes, and once an hour from a device that has none. */
-  private mcastAt = new Map<number, number>();
-  private mcastEvery = new Map<number, number>();
-  private mcastRunning = new Set<number>();
+  /** Large optional tables (multicast routes, forwarding table, Cisco extras) each have their own schedule per device, and are read on a session of their own so they never delay the counter polls. */
+  private slow = new Map<string, { at: number; every: number }>();
+  private slowRunning = new Set<number>();
 
   constructor(private devs: DeviceService, private store: Pick<TsStore, 'insertSnmp'>, private log: AppLog, private o: PollerOpts, private hosts?: HostTracker) {}
 
@@ -48,7 +55,7 @@ export class Poller {
 
   /** Forget cached counters and structure for a device (after removal or re-discovery). */
   forget(devId: number): void {
-    this.due.delete(devId); this.fails.delete(devId); this.structure.delete(devId); this.structureAt.delete(devId); this.hostDue.delete(devId); this.refreshDue.delete(devId); this.resourcesAt.delete(devId); this.healthAt.delete(devId); this.hottest.delete(devId); this.mcastAt.delete(devId); this.mcastEvery.delete(devId);
+    this.due.delete(devId); this.fails.delete(devId); this.structure.delete(devId); this.structureAt.delete(devId); this.hostDue.delete(devId); this.refreshDue.delete(devId); this.resourcesAt.delete(devId); this.healthAt.delete(devId); this.hottest.delete(devId); for (const k of [...this.slow.keys()]) if (k.startsWith(devId + '/')) this.slow.delete(k);
     for (const k of [...this.prevIf.keys()]) if (k.startsWith(devId + '/')) this.prevIf.delete(k);
     for (const k of [...this.prevCls.keys()]) if (k.startsWith(devId + '/')) this.prevCls.delete(k);
   }
@@ -84,7 +91,7 @@ export class Poller {
         if (due === undefined) this.hostDue.set(d.id, now + 10_000 + Math.floor(Math.random() * 30_000));
         else if (due <= now) void this.hostCycle(d, h);
       }
-      if (!this.mcastRunning.has(d.id) && this.mcastRunning.size < 2 && now - (this.mcastAt.get(d.id) ?? 0) >= (this.mcastEvery.get(d.id) ?? 0)) void this.mcastCycle(d);
+      if (!this.slowRunning.has(d.id) && this.slowRunning.size < 2 && SLOW.some(r => this.slowDue(d, r.name, now))) void this.slowCycle(d);
       if (!this.refreshing) {
         const due = this.refreshDue.get(d.id);
         if (due === undefined) this.refreshDue.set(d.id, now + 120_000 + Math.floor(Math.random() * 600_000));
@@ -108,18 +115,24 @@ export class Poller {
     } finally { c?.close(); this.hostRunning.delete(d.id); }
   }
 
-  /** Reads the multicast routing tables on a session of their own, so the long walk never delays the counter polls. */
-  private async mcastCycle(d: DeviceRow): Promise<void> {
-    this.mcastRunning.add(d.id); this.mcastAt.set(d.id, Date.now());
+  private slowDue(d: DeviceRow, name: string, now: number): boolean { const t = this.slow.get(d.id + '/' + name); return !t || now - t.at >= t.every; }
+
+  /** Reads whichever of the slow optional tables are due, one after another on one session. A table a device does not publish is asked about only rarely. */
+  private async slowCycle(d: DeviceRow): Promise<void> {
+    const cisco = (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.');
+    this.slowRunning.add(d.id);
     let c: SnmpClient | null = null;
     try {
       c = this.devs.open(d);
-      const m = await readMulticast(c, Date.now(), (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.'));
-      this.devs.saveMulticast(d.id, m);
-      this.mcastEvery.set(d.id, m ? 115_000 : 3600_000);
-      if (m) this.log.debug?.('snmp', `Multicast state from ${d.name}: ${m.routes.length} routes, ${m.receivers.length} IGMP receivers`);
-    } catch { this.mcastEvery.set(d.id, 600_000); /* optional: a device without the MIBs is simply skipped */ }
-    finally { c?.close(); this.mcastRunning.delete(d.id); }
+      for (const r of SLOW) {
+        const now = Date.now();
+        if (!this.slowDue(d, r.name, now) || (r.cisco && !cisco)) continue;
+        let every = r.errorEvery;
+        try { const had = await r.run(c, d, this.devs, now, cisco); every = had ? r.every : r.emptyEvery; } catch { /* optional: a device without the MIB is simply skipped */ }
+        this.slow.set(d.id + '/' + r.name, { at: now, every });
+      }
+    } catch { /* could not open a session */ }
+    finally { c?.close(); this.slowRunning.delete(d.id); }
   }
 
   /** Re-discovers a device so policies, VLAN names and interfaces added after the first discovery appear without anyone pressing a button. */

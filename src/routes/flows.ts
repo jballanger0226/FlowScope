@@ -2,6 +2,8 @@ import { enrichPath } from '../analysis/path.js';
 import { notExported } from '../analysis/exported.js';
 import { pathEnv } from './pathenv.js';
 import { multicastPlan } from './multicast.js';
+import { checkRoutes } from '../analysis/route_check.js';
+import type { Fib } from '../snmp/fib.js';
 import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { parseQuery } from '../query/tokens.js';
@@ -139,6 +141,13 @@ export function registerFlows(app: App): void {
     }
     // Fill in ports the exporter did not report and list the CDP/LLDP neighbour at each port; both are extras, so a failure leaves the plain path.
     try { enrichPath(detail, pathEnv(app), ip => app.devices.deviceIdForExporter(ip)); } catch (e) { app.log.warn('query', `Could not add neighbour detail to a stream: ${(e as Error).message}`); }
+    // What each device's forwarding table says about the destination, where it was read. A failure leaves the plain path.
+    if (!detail.multicast) {
+      try {
+        const rc = { fibOf: (ip: string) => { const id = app.devices.deviceIdForExporter(ip); return id === null ? null : app.devices.data<Fib>(id, 'fib'); }, ifName: (ip: string, i: number) => app.devices.ifName(ip, i) };
+        checkRoutes(detail.forward, detail.responder.ip, rc); checkRoutes(detail.reverse, detail.initiator.ip, rc);
+      } catch (e) { app.log.warn('query', `Could not check the forwarding tables for a stream: ${(e as Error).message}`); }
+    }
     let multicast: (NonNullable<typeof detail.multicast> & { location: ReturnType<typeof app.hosts.locate> | null }) | null = null;
     if (detail.multicast) {
       // The source of a multicast stream is not "behind" the first device that reported it: every switch on the tree reports the same packets.

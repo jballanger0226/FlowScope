@@ -67,11 +67,13 @@ const CFLAGS: [number, string][] = [[12, 'prune'], [13, 'sparse'], [14, 'connect
 
 const ip4 = (p: string[], at: number): string => p.slice(at, at + 4).join('.');
 /** An IpAddress value: net-snmp hands back dotted text, but four raw bytes are accepted too. */
-const ipOf = (v: SnmpValue | undefined): string | null => {
+export const ipOf = (v: SnmpValue | undefined): string | null => {
   if (v === undefined || v === null) return null;
   const t = Buffer.isBuffer(v) ? (v.length === 4 ? [...v].join('.') : '') : String(v);
   return isIp(t) && t !== '0.0.0.0' ? t : null;
 };
+/** An IPv4 address as a number (NaN when it is not one). */
+export const ipv4Int = (ip: string): number => { const p = ip.split('.'); return p.length === 4 && p.every(x => /^\d{1,3}$/.test(x) && Number(x) < 256) ? ((Number(p[0]) << 24) | (Number(p[1]) << 16) | (Number(p[2]) << 8) | Number(p[3])) >>> 0 : NaN; };
 const num = (v: SnmpValue | undefined): number | null => (v === undefined || v === null ? null : toNum(v));
 const EMPTY = new Map<string, SnmpValue>();
 const col = (c: SnmpClient, oid: string) => c.column(oid, 50).catch(() => EMPTY);

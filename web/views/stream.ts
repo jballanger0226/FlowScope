@@ -19,6 +19,7 @@ export interface Hop {
   ttl: number | null; ttlExpired: 'ttl' | 'icmp' | null; dscpInS: string; dscpOutS: string; qosChanged: boolean; qosVerdict?: Verdict | null; pkts: number; bytes: number; linkMs: number | null; cumMs: number | null; policy: string | null;
   obs: { kind: string; text: string; severity: 'info' | 'warn' | 'bad' }[]; firstSeen: number; lastSeen: number;
   outIfs?: string[]; sourcePort?: string | null; sourceConfirmed?: boolean; frameSrcOwner?: string | null; frameDstOwner?: string | null;
+  route?: { prefix: string; len: number; readAt: number; paths: { ifIndex: number; ifName: string; nextHop: string | null; kind: string }[]; state: 'ok' | 'mismatch' | 'local' | 'unknown' } | null;
   notExported?: string[]; devId?: number | null; inFrom?: PortSource; outFrom?: PortSource; inNeighbors?: Neighbor[]; outNeighbors?: Neighbor[];
 }
 interface Attach { dev: string; ifName: string; vlan: number; macCount: number; edge: boolean; neighbor: string | null; neighborKind: string | null; portMode: string; confidence?: 'high' | 'medium' | 'low' }
@@ -231,6 +232,17 @@ function multicastTable(hops: Hop[]): VNode {
       h('div', { class: 'obs' }, hp.obs.length ? hp.obs.map((o, k) => h('span', { key: k, class: 'ob ' + o.severity }, o.text)) : h('span', { class: 'dim' }, 'Nominal'))))));
 }
 
+/** What the device's forwarding table says about the destination: the prefix, where it points, and whether the flow went that way. */
+function routeLine(hp: Hop): VNode | null {
+  const r = hp.route;
+  if (!r || r.state === 'local' || !r.prefix) return null;
+  const used = r.paths.filter(p => p.ifIndex > 0);
+  const text = `${r.prefix}/${r.len} → ${used.slice(0, 3).map(p => p.ifName + (p.nextHop ? ' via ' + p.nextHop : '')).join(', ')}${used.length > 3 ? ` +${used.length - 3}` : ''}`;
+  const color = r.state === 'mismatch' ? 'color:var(--warn)' : r.state === 'ok' ? 'color:var(--ok)' : undefined;
+  return h('div', { style: `font-size:11.5px;${color ?? ''}`, class: color ? undefined : 'dim', title: `From the forwarding table of ${hp.dev} read ${stamp(r.readAt)}. ${r.state === 'ok' ? 'The flow left this way.' : r.state === 'mismatch' ? 'The flow left a different way.' : ''}` },
+    h('span', { class: 'dim' }, 'route '), text, r.state === 'ok' ? ' ✓' : r.state === 'mismatch' ? ' ✗' : '');
+}
+
 function hopsTable(hops: Hop[]): VNode {
   const cols = '36px minmax(130px,1.1fr) minmax(110px,1fr) minmax(150px,1.2fr) 110px 44px 110px 70px 70px 56px 56px minmax(200px,1.6fr)';
   return h('div', { class: 'tbl hops' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1310px` },
@@ -244,7 +256,7 @@ function hopsTable(hops: Hop[]): VNode {
         hp.notExported ? h('div', { class: 'dim', style: 'font-size:11.5px', title: 'The exporter does not include these in what it sends, so they are blank here. Add them to its flow record (Flexible NetFlow / IPFIX template) to see them.' }, 'Not sent: ' + hp.notExported.join(', ')) : null),
         h('div', { class: 'mono', style: 'font-size:12px' },
           h('div', null, h('span', { class: 'dim' }, 'in '), portLink(hp.dev, hp.inIf, hp.inFrom, hp.devId != null)), neighborLines(hp.inNeighbors),
-          h('div', null, h('span', { class: 'dim' }, 'out '), portLink(hp.dev, hp.outIf, hp.outFrom, hp.devId != null)), neighborLines(hp.outNeighbors)),
+          h('div', null, h('span', { class: 'dim' }, 'out '), portLink(hp.dev, hp.outIf, hp.outFrom, hp.devId != null)), neighborLines(hp.outNeighbors), routeLine(hp)),
         h('div', { class: 'mono', style: 'font-size:12px' }, h('div', null, h('span', { class: 'dim' }, 'src '), hp.frameSrc ?? '—'), h('div', null, h('span', { class: 'dim' }, 'dst '), hp.frameDst ?? '—')),
         h('span', { class: 'mono', style: 'font-size:12px' }, hp.vlan ? String(hp.vlan) : '—', ' ', h('span', { class: 'dim' }, hp.vlanName)),
         h('span', { class: 'mono', style: 'font-size:12px' }, hp.ttl === null ? '—' : String(hp.ttl)),

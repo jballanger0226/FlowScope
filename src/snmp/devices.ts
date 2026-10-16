@@ -198,6 +198,16 @@ export class DeviceService {
     this.cdb.db.prepare('INSERT INTO device_mcast(dev_id, data, read_at) VALUES (?,?,?) ON CONFLICT(dev_id) DO UPDATE SET data=excluded.data, read_at=excluded.read_at').run(id, JSON.stringify(m), m.readAt);
   }
 
+  /** Keeps the latest read of something else a device publishes (forwarding table, Cisco extras). null removes it. */
+  saveData(id: number, kind: string, data: unknown | null, readAt = Date.now()): void {
+    if (data === null) { this.cdb.db.prepare('DELETE FROM device_data WHERE dev_id = ? AND kind = ?').run(id, kind); return; }
+    this.cdb.db.prepare('INSERT INTO device_data(dev_id, kind, data, read_at) VALUES (?,?,?,?) ON CONFLICT(dev_id, kind) DO UPDATE SET data=excluded.data, read_at=excluded.read_at').run(id, kind, JSON.stringify(data), readAt);
+  }
+  data<T>(id: number, kind: string): T | null {
+    const r = this.cdb.db.prepare('SELECT data FROM device_data WHERE dev_id = ? AND kind = ?').get(id, kind) as { data: string } | undefined;
+    return r ? JSON.parse(r.data) as T : null;
+  }
+
   multicast(id: number): Multicast | null {
     const r = this.cdb.db.prepare('SELECT data FROM device_mcast WHERE dev_id = ?').get(id) as { data: string } | undefined;
     return r ? JSON.parse(r.data) as Multicast : null;
@@ -336,6 +346,7 @@ export class DeviceService {
       this.cdb.db.prepare('DELETE FROM device_resources WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_health WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_mcast WHERE dev_id = ?').run(id);
+      this.cdb.db.prepare('DELETE FROM device_data WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM iface_extra WHERE dev_id = ?').run(id);
       forgetResources(this.cdb.db, id); forgetIfExtra(this.cdb.db, id);
       this.cdb.db.prepare('DELETE FROM devices WHERE id = ?').run(id);

@@ -238,6 +238,26 @@ const MIGRATIONS: string[] = [
   -- the latest multicast routing state of each device: routes with their outgoing interfaces, IGMP receivers, PIM rendezvous points and neighbours
   CREATE TABLE device_mcast (dev_id INTEGER PRIMARY KEY, data TEXT NOT NULL, read_at INTEGER NOT NULL);
   `
+  ,
+  `
+  -- DHCP snooping bindings: the lease a switch saw for a host, with the access port it arrived on
+  CREATE TABLE dhcp_bindings (dev_id INTEGER NOT NULL, mac TEXT NOT NULL, vlan INTEGER NOT NULL, ip TEXT NOT NULL, if_index INTEGER NOT NULL, lease_sec INTEGER, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, mac, vlan));
+  CREATE INDEX dhcp_mac ON dhcp_bindings(mac);
+  CREATE INDEX dhcp_ip ON dhcp_bindings(ip);
+  -- other things read from a device that are kept as the latest read only (forwarding table, Cisco extras, per-interface protocols)
+  CREATE TABLE device_data (dev_id INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, read_at INTEGER NOT NULL, PRIMARY KEY (dev_id, kind));
+  -- counters read every few minutes: output and input queue drops, interface resets, storm-control suppression and port-security violations
+  ALTER TABLE iface_extra_samples ADD COLUMN q_out INTEGER;
+  ALTER TABLE iface_extra_samples ADD COLUMN q_in INTEGER;
+  ALTER TABLE iface_extra_samples ADD COLUMN resets INTEGER;
+  ALTER TABLE iface_extra_samples ADD COLUMN storm INTEGER;
+  ALTER TABLE iface_extra_samples ADD COLUMN port_sec INTEGER;
+  ALTER TABLE iface_extra_1h ADD COLUMN q_out INTEGER;
+  ALTER TABLE iface_extra_1h ADD COLUMN q_in INTEGER;
+  ALTER TABLE iface_extra_1h ADD COLUMN resets INTEGER;
+  ALTER TABLE iface_extra_1h ADD COLUMN storm INTEGER;
+  ALTER TABLE iface_extra_1h ADD COLUMN port_sec INTEGER;
+  `
 ];
 
 export class ConfigDb {
