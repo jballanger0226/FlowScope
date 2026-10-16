@@ -7,6 +7,7 @@ import * as overview from './views/overview.js';
 import * as explorer from './views/explorer.js';
 import * as ports from './views/ports.js';
 import * as links from './views/links.js';
+import * as multicast from './views/multicast.js';
 import * as devices from './views/devices.js';
 import * as storage from './views/storage.js';
 import * as reports from './views/reports.js';
@@ -15,7 +16,7 @@ import * as account from './views/account.js';
 import { getTheme, setTheme, type ThemePref } from './theme.js';
 
 interface ViewMod { enter(p: URLSearchParams): void; render(): VNode }
-const VIEWS: Record<View, ViewMod> = { overview, explorer, ports, links, devices, storage, reports, admin, account };
+const VIEWS: Record<View, ViewMod> = { overview, explorer, ports, links, multicast, devices, storage, reports, admin, account };
 
 const root = document.getElementById('app')!;
 let booting = true;
@@ -81,7 +82,7 @@ export function logo(): VNode {
 /* ------------------------------------------------------------------ shell */
 
 function navItems(me: Me): { v: View; label: string }[] {
-  const n: { v: View; label: string }[] = [{ v: 'overview', label: 'Overview' }, { v: 'explorer', label: 'Flow explorer' }, { v: 'ports', label: 'Flows by port' }, { v: 'links', label: 'Network health' }, { v: 'reports', label: 'Report builder' }];
+  const n: { v: View; label: string }[] = [{ v: 'overview', label: 'Overview' }, { v: 'explorer', label: 'Flow explorer' }, { v: 'ports', label: 'Flows by port' }, { v: 'links', label: 'Network health' }, { v: 'multicast', label: 'Multicast' }, { v: 'reports', label: 'Report builder' }];
   if (me.caps.storage) n.push({ v: 'storage', label: 'Storage and retention' });
   if (me.caps.devices) n.push({ v: 'devices', label: 'SNMP devices' });
   if (me.caps.admin) n.push({ v: 'admin', label: 'Admin' });

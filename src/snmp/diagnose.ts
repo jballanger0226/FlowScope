@@ -1,3 +1,4 @@
+import { readMulticast } from './multicast.js';
 import type { SnmpValue } from './client.js';
 import { OID } from './oids.js';
 import type { Walker } from './ports.js';
@@ -40,7 +41,7 @@ export interface Expect {
   vendor: Vendor; ap: boolean; l2: boolean; l3: boolean;
   cdp: boolean; mac: boolean; arp: boolean; vlans: boolean;
   /** 'must' when the vendor's boxes always have sensors, 'maybe' when the standard MIB may be there */
-  sensors: 'must' | 'maybe' | null; poe: boolean; stp: boolean; ospf: boolean; bgp: boolean;
+  sensors: 'must' | 'maybe' | null; poe: boolean; stp: boolean; ospf: boolean; bgp: boolean; mcast: boolean;
   qos: 'cisco-cbqos' | 'juniper-cos' | 'diffserv' | null; wifi: boolean;
 }
 export function expectFor(f: CheckFacts): Expect {
@@ -54,6 +55,7 @@ export function expectFor(f: CheckFacts): Expect {
     vendor, ap, l2, l3, cdp: vendor === 'cisco', mac: l2, arp: l3 || l2, vlans: l2,
     sensors: ap || vendor === 'netsnmp' ? null : strong && (l2 || l3) ? 'must' : capable || l2 || f.role === 'router' ? 'maybe' : null,
     poe: l2, stp: l2, ospf: l3 || (l2 && (strong || vendor === 'arista')), bgp: l3 || (l2 && (strong || vendor === 'arista')),
+    mcast: l3 || (l2 && (strong || vendor === 'arista')),
     qos: ap ? null : vendor === 'cisco' ? 'cisco-cbqos' : vendor === 'juniper' ? 'juniper-cos' : 'diffserv', wifi: ap || wl
   };
 }
@@ -99,7 +101,7 @@ const WIFI_HINT: Record<string, string> = {
   cisco: 'Cisco wireless controllers publish access points and clients in CISCO-LWAPP-AP-MIB (.1.3.6.1.4.1.9.9.513) and CISCO-LWAPP-DOT11-CLIENT-MIB (.1.3.6.1.4.1.9.9.599).'
 };
 const GROUP: Record<string, CheckGroup> = { interfaces: 'basics', counters: 'basics', resources: 'basics', lldp: 'neighbours', cdp: 'neighbours', mac: 'hosts', arp: 'hosts', vlans: 'hosts',
-  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', quality: 'quality', qos: 'quality', wifi: 'wifi' };
+  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', quality: 'quality', qos: 'quality', wifi: 'wifi' };
 const GROUP_ORDER: CheckGroup[] = ['basics', 'neighbours', 'hosts', 'hardware', 'routing', 'quality', 'wifi'];
 
 async function attempt<T>(fn: () => Promise<T>, empty: T): Promise<{ v: T; error: string | null }> {
@@ -177,13 +179,14 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
   const cl = c as unknown as SnmpClient;
   const oid = f.objectId ?? '', descr = f.descr ?? '';
   const none = <T,>(v: T) => Promise.resolve({ v, error: null as string | null });
-  const [res, sens, poe, stp, ospf, bgp, extra, wifi] = await Promise.all([
+  const [res, sens, poe, stp, ospf, bgp, mcast, extra, wifi] = await Promise.all([
     attempt(() => readResources(cl, oid), null),
     ex.sensors ? attempt(() => readSensors(cl, oid), []) : none([] as Awaited<ReturnType<typeof readSensors>>),
     ex.poe ? attempt(() => readPoe(cl), []) : none([] as Awaited<ReturnType<typeof readPoe>>),
     ex.stp ? attempt(() => readStp(cl), null) : none(null as Awaited<ReturnType<typeof readStp>>),
     ex.ospf ? attempt(() => readOspf(cl), []) : none([] as Awaited<ReturnType<typeof readOspf>>),
     ex.bgp ? attempt(() => readBgp(cl), { peers: [], localAs: null }) : none({ peers: [], localAs: null as number | null }),
+    ex.mcast ? attempt(() => readMulticast(cl, Date.now(), ex.vendor === 'cisco'), null) : none(null as Awaited<ReturnType<typeof readMulticast>>),
     attempt(() => readIfExtra(cl), new Map<number, never>() as unknown as Awaited<ReturnType<typeof readIfExtra>>),
     ex.wifi ? attempt(() => readWlanFor(c, f.ifaces ?? [], oid, descr), null) : none(null as Awaited<ReturnType<typeof readWlanFor>>)
   ]);
@@ -214,6 +217,16 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
     : { id: 'ospf', title: 'OSPF neighbours', group: 'routing', state: 'na', count: 0, detail: ospf.error ?? 'No OSPF neighbours (OSPF-MIB). Normal when this device does not run OSPF.' });
   if (ex.bgp) out.push(bgp.v.peers.length ? { id: 'bgp', title: 'BGP peers', group: 'routing', state: bgp.v.peers.some(p => p.level === 'bad') ? 'warn' : 'ok', count: bgp.v.peers.length, detail: `${plural(bgp.v.peers.length, 'peer')}, ${bgp.v.peers.filter(p => p.level === 'ok').length} established.` }
     : { id: 'bgp', title: 'BGP peers', group: 'routing', state: 'na', count: 0, detail: bgp.error ?? 'No BGP peers (BGP4-MIB). Normal when this device does not run BGP.' });
+  if (ex.mcast) {
+    const m = mcast.v;
+    const groups = m ? new Set(m.routes.map(r => r.group)).size : 0;
+    const missing = m ? [m.source === 'standard' ? 'the Cisco rate and flags table (CISCO-IPMROUTE-MIB), so no rates' : null, m.pimInterfaces.length ? null : 'PIM-MIB, so no rendezvous points or neighbours', m.receivers.length ? null : 'any IGMP cache entry, so no joined hosts'].filter(Boolean) as string[] : [];
+    out.push(m ? { id: 'mcast', title: 'Multicast routing', group: 'routing', state: missing.length ? 'warn' : 'ok', count: m.routes.length,
+      detail: `${plural(m.routes.length, 'route')} for ${plural(groups, 'group')}, ${plural(m.receivers.length, 'IGMP join')}${m.pimInterfaces.length ? `, ${plural(m.pimInterfaces.length, 'PIM interface')}` : ''}.${missing.length ? ` Missing: ${missing.join('; ')}.` : ''}`,
+      hint: missing.length ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83), IGMP-STD-MIB (.1.3.6.1.2.1.85), PIM-MIB (.1.3.6.1.3.61) and Cisco CISCO-IPMROUTE-MIB (.1.3.6.1.4.1.9.10.2). Check the SNMP view of this credential includes them.' : undefined }
+      : { id: 'mcast', title: 'Multicast routing', group: 'routing', state: 'na', count: 0, detail: mcast.error ?? 'No multicast routes (IPMROUTE-STD-MIB). Normal when this device does not route multicast.',
+        hint: mcast.error ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83). Check the SNMP view of this credential includes them.' : undefined });
+  }
 
   // Link quality: IF-MIB errors and discards, broadcast and multicast, and the EtherLike-MIB frame errors
   const ifx = [...extra.v.values()];

@@ -233,6 +233,11 @@ const MIGRATIONS: string[] = [
   CREATE TABLE iface_extra_samples (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, ts INTEGER NOT NULL, dt INTEGER NOT NULL, fcs INTEGER, align INTEGER, symbol INTEGER, late INTEGER, excessive INTEGER, collisions INTEGER, carrier INTEGER, too_long INTEGER, unknown_proto INTEGER, in_mc INTEGER, in_bc INTEGER, out_mc INTEGER, out_bc INTEGER, in_err INTEGER, out_err INTEGER, in_disc INTEGER, out_disc INTEGER, PRIMARY KEY (dev_id, if_index, ts)) WITHOUT ROWID;
   CREATE TABLE iface_extra_1h (dev_id INTEGER NOT NULL, if_index INTEGER NOT NULL, ts INTEGER NOT NULL, dt INTEGER NOT NULL, fcs INTEGER, align INTEGER, symbol INTEGER, late INTEGER, excessive INTEGER, collisions INTEGER, carrier INTEGER, too_long INTEGER, unknown_proto INTEGER, in_mc INTEGER, in_bc INTEGER, out_mc INTEGER, out_bc INTEGER, in_err INTEGER, out_err INTEGER, in_disc INTEGER, out_disc INTEGER, PRIMARY KEY (dev_id, if_index, ts)) WITHOUT ROWID;
   `
+  ,
+  `
+  -- the latest multicast routing state of each device: routes with their outgoing interfaces, IGMP receivers, PIM rendezvous points and neighbours
+  CREATE TABLE device_mcast (dev_id INTEGER PRIMARY KEY, data TEXT NOT NULL, read_at INTEGER NOT NULL);
+  `
 ];
 
 export class ConfigDb {

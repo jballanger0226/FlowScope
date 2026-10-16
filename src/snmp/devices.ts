@@ -1,4 +1,5 @@
 import net from 'node:net';
+import type { Multicast } from './multicast.js';
 import { diffExtra, linkOptics, type Health, type IfExtra } from './health.js';
 import { forgetIfExtra, ifExtraSeries, pruneIfExtra, recordIfExtra, type IfExtraSeries } from './iface_history.js';
 import { forgetResources, pruneResources, recordResources, resourceSeries, type ResSeries } from './resource_history.js';
@@ -191,6 +192,17 @@ export class DeviceService {
     this.cdb.db.prepare('INSERT INTO device_health(dev_id, data, read_at) VALUES (?,?,?) ON CONFLICT(dev_id) DO UPDATE SET data=excluded.data, read_at=excluded.read_at').run(id, JSON.stringify(h), h.readAt);
   }
 
+  /** Keeps the latest multicast state of a device. Each read replaces the last one; null removes it (the device stopped publishing it). */
+  saveMulticast(id: number, m: Multicast | null): void {
+    if (!m) { this.cdb.db.prepare('DELETE FROM device_mcast WHERE dev_id = ?').run(id); return; }
+    this.cdb.db.prepare('INSERT INTO device_mcast(dev_id, data, read_at) VALUES (?,?,?) ON CONFLICT(dev_id) DO UPDATE SET data=excluded.data, read_at=excluded.read_at').run(id, JSON.stringify(m), m.readAt);
+  }
+
+  multicast(id: number): Multicast | null {
+    const r = this.cdb.db.prepare('SELECT data FROM device_mcast WHERE dev_id = ?').get(id) as { data: string } | undefined;
+    return r ? JSON.parse(r.data) as Multicast : null;
+  }
+
   /** The latest health of a device, with optic sensors tied to the interface they belong to. */
   health(id: number): Health | null {
     const r = this.cdb.db.prepare('SELECT data FROM device_health WHERE dev_id = ?').get(id) as { data: string } | undefined;
@@ -323,6 +335,7 @@ export class DeviceService {
       this.cdb.db.prepare('UPDATE exporters SET device_id = NULL WHERE device_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_resources WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_health WHERE dev_id = ?').run(id);
+      this.cdb.db.prepare('DELETE FROM device_mcast WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM iface_extra WHERE dev_id = ?').run(id);
       forgetResources(this.cdb.db, id); forgetIfExtra(this.cdb.db, id);
       this.cdb.db.prepare('DELETE FROM devices WHERE id = ?').run(id);

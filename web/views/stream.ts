@@ -26,9 +26,18 @@ interface Located { ip: string | null; macs: string[]; macSource: string; attach
 /** Whether a configured QoS policy explains a DSCP change (see explainRemark in src/analysis/hops.ts). */
 export interface Verdict { kind: 'policy' | 'unexplained' | 'unknown'; text: string }
 interface Multicast { group: string; source: string; location: Located | null }
+/** What the routers say about where a multicast group goes (see src/snmp/multicast_plan.ts). */
+interface PlanOut { ifIndex: number; name: string; state: 'forwarding' | 'pruned'; seenInFlow: boolean; joins: { reporter: string | null; expirySec: number | null; self: boolean }[]; neighbor: string | null; pkts: number | null }
+interface PlanDevice {
+  devId: number; name: string; role: string; exported: boolean; readAt: number; stale: boolean;
+  route: null | { source: string; inIf: string | null; upstream: string | null; rp: string | null; bps: number | null; flags: string[]; sharedTree: boolean };
+  outgoing: PlanOut[]; strayJoins: { ifIndex: number; name: string; reporter: string | null }[]; flow: { inIf: string | null; outIfs: string[] } | null;
+  findings: { level: 'ok' | 'info' | 'warn'; text: string }[];
+}
+interface Plan { group: string; source: string; devices: PlanDevice[]; forwardingTo: number; joinedHosts: number; level: 'ok' | 'info' | 'warn' }
 export interface Detail {
   skey: string; initiator: { ip: string; port: number }; responder: { ip: string; port: number }; proto: number; protoName: string; app: string; appPort: number | null; t0: number; t1: number;
-  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; qosVerdict?: (Verdict | { kind: 'mixed'; text: string }) | null; marking?: { direction: 'forward' | 'reverse'; values: { dscp: number; name: string; pkts: number; bytes: number; where: string[] }[] }[]; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null; multicast: Multicast | null;
+  forward: Hop[]; reverse: Hop[]; qosChanged: boolean; qosVerdict?: (Verdict | { kind: 'mixed'; text: string }) | null; marking?: { direction: 'forward' | 'reverse'; values: { dscp: number; name: string; pkts: number; bytes: number; where: string[] }[] }[]; ttlExpired: boolean; totals: { fwdBytes: number; revBytes: number; fwdPkts: number; revPkts: number }; note: string | null; multicast: Multicast | null; plan?: Plan | null;
   activity: { t0: number; t1: number; fwd: number[]; rev: number[] };
 }
 
@@ -160,9 +169,49 @@ function multicastExplain(d: Detail, m: Multicast): VNode {
   const loc = m.location;
   return h('div', { class: 'note info' },
     h('b', null, 'This is a multicast stream: one source, many receivers'),
-    h('div', null, 'Every switch and router that forwards the group reports the same packets, so each one appears once, side by side. They are not hops in a line, and no delay or loss is worked out between them. The receivers themselves are not listed because multicast flow data only shows the sending side.'),
+    h('div', null, 'Every switch and router that forwards the group reports the same packets, so each one appears once, side by side. They are not hops in a line, and no delay or loss is worked out between them. Flow data only shows the side where the packets arrive, so where the group is sent comes from each router\'s own multicast table, below.'),
     loc?.attach ? h('div', { style: 'margin-top:6px' }, `The source ${m.source} was found plugged in to ${loc.attach.dev} ${loc.attach.ifName}${loc.attach.vlan ? ' (VLAN ' + loc.attach.vlan + ')' : ''} by reading the MAC address tables${loc.macSource === 'arp' ? ' and ARP' : ''}, ${loc.attach.confidence} confidence.${loc.attach.confidence !== 'high' && loc.note ? ' ' + loc.note : ''}`)
       : h('div', { style: 'margin-top:6px' }, `The switch that ${m.source} is plugged in to is not known${loc?.note ? ': ' + loc.note : '. Host tracking has not learned this address yet, or its switch is not polled over SNMP.'} It is not guessed from the flow data.`));
+}
+
+/**
+ * Where the group should go: for every polled router that knows it, the interfaces it is forwarded out of and the hosts that joined,
+ * beside what the flow records reported. A mismatch is called out; "NetFlow did not report this interface" is normal and not one.
+ */
+function multicastPlan(plan: Plan | null | undefined, m: Multicast): VNode | null {
+  if (plan === undefined) return null;
+  if (!plan || !plan.devices.length) return h('section', { class: 'panel col', style: 'gap:8px', 'aria-label': 'Where this group goes' },
+    h('span', { class: 'eyebrow' }, 'Where this group should go'),
+    note('No polled device has multicast routing state for this group. Add the routers and Layer 3 switches that carry it as SNMP devices, with the multicast MIBs enabled, to see the interfaces it is sent out of and the hosts that joined.', 'info'));
+  const lv = (l: 'ok' | 'info' | 'warn') => (l === 'warn' ? 'warn' : l === 'ok' ? 'ok' : 'info');
+  return h('section', { class: 'panel col', style: 'gap:14px', 'aria-label': 'Where this group goes' },
+    h('div', { class: 'row', style: 'justify-content:space-between;align-items:flex-start;gap:12px' },
+      h('div', { class: 'col', style: 'gap:4px' },
+        h('span', { class: 'eyebrow' }, 'Where this group should go'),
+        h('div', { style: 'color:var(--muted)' }, `${plan.forwardingTo} interface${plan.forwardingTo === 1 ? '' : 's'} forward ${m.group} across ${plan.devices.filter(x => x.route).length} device${plan.devices.filter(x => x.route).length === 1 ? '' : 's'}`, plan.joinedHosts ? `, ${plan.joinedHosts} host${plan.joinedHosts === 1 ? '' : 's'} known to have joined` : '', '. From each router\'s multicast table, read over SNMP.')),
+      statusEl(plan.level === 'warn' ? 'warn' : plan.level === 'ok' ? 'ok' : 'info', plan.level === 'warn' ? 'Something does not match' : plan.level === 'ok' ? 'Consistent with the flows' : 'For information')),
+    plan.devices.map(dv => {
+      const cols = 'minmax(140px,1fr) 110px minmax(120px,1fr) minmax(220px,2fr)';
+      return h('div', { key: dv.devId, class: 'col', style: 'gap:8px;border-top:1px solid var(--line);padding-top:12px' },
+        h('div', { class: 'row', style: 'gap:8px 14px;flex-wrap:wrap;align-items:center' },
+          h('b', null, dv.name), h('span', { class: 'dim' }, dv.role), dv.exported ? chip('sent flows for this stream', 'info') : chip('no flows from this device', 'default', 'This device did not export records for the stream, but it has a route for the group'),
+          dv.route ? [
+            dv.route.inIf ? h('span', null, 'Arrives on ', h('b', { class: 'mono' }, dv.route.inIf)) : null,
+            dv.route.upstream ? h('span', null, 'from ', h('b', { class: 'mono' }, dv.route.upstream)) : null,
+            dv.route.rp ? h('span', null, 'RP ', h('b', { class: 'mono' }, dv.route.rp)) : null,
+            dv.route.bps ? h('span', null, 'device rate ', h('b', { class: 'mono' }, bps(dv.route.bps))) : null,
+            dv.route.sharedTree ? chip('shared tree (*,G)', 'default', 'This source has no route of its own on this device') : null
+          ] : h('span', { class: 'dim' }, 'no route for this group now'),
+          btn('Open in Multicast', { small: true, onclick: () => go('multicast', { dev: dv.devId, g: m.group }) })),
+        dv.outgoing.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:700px` },
+          h('div', { class: 'tr head' }, ...['Sent out of', 'State', 'In the flow data', 'Hosts that joined (IGMP)'].map(t => h('span', null, t))),
+          dv.outgoing.map(o => h('div', { key: o.ifIndex, class: 'tr' },
+            h('span', { class: 'mono', style: 'font-size:12px' }, o.name),
+            h('span', null, o.state === 'forwarding' ? chip('forwarding', 'ok') : chip('pruned', 'default', 'Listed, but no one downstream wants the group')),
+            h('span', { style: 'font-size:12px' }, dv.exported ? (o.seenInFlow ? chip('reported', 'info') : h('span', { class: 'dim', title: 'Normal: flow records show the interface a packet arrived on, and many exporters never report the outgoing copies' }, 'not reported')) : h('span', { class: 'dim' }, '—')),
+            h('span', { class: 'mono', style: 'font-size:12px' }, o.joins.length ? o.joins.slice(0, 4).map(j => j.self ? 'this router' : j.reporter ?? '?').join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : '') : h('span', { class: 'dim' }, o.neighbor ? `via PIM neighbour ${o.neighbor}` : 'none seen')))))) : null,
+        dv.findings.map((f, i) => h('div', { key: i, class: `note ${lv(f.level)}` }, f.text)));
+    }));
 }
 
 function multicastTable(hops: Hop[]): VNode {
@@ -301,6 +350,6 @@ function followed(f: Follower, row: { flags: number } | undefined): VNode | null
       qm.dev ? btn('Open egress queue', { kind: qm.kind === 'bad' ? 'danger' : 'ghost', onclick: () => go('links', { dev: qm.dev, if: qm.ifName }) }) : null) : null,
     tm ? h('div', { class: 'note bad' }, h('b', null, 'TTL expired before the destination'), h('div', null, tm.text)) : null,
     mc ? multicastExplain(d, mc) : null,
-    mc ? (hops.length ? [multicastStrip(hops, d, mc), multicastTable(hops)] : note('No exporter reported this stream.', 'info')) : hops.length ? [strip(hops, d, reverse), hopsTable(hops)] : note('No exporter reported this direction.', 'info'),
+    mc ? (hops.length ? [multicastStrip(hops, d, mc), multicastPlan(d.plan, mc), multicastTable(hops)] : [note('No exporter reported this stream.', 'info'), multicastPlan(d.plan, mc)]) : hops.length ? [strip(hops, d, reverse), hopsTable(hops)] : note('No exporter reported this direction.', 'info'),
     h('div', { class: 'split' }, h('div', { class: 'mainp', style: 'flex-basis:520px' }, layers(d, row, (mc ? d.forward.find(x => x.sourcePort) : undefined) ?? d.forward[0])), h('div', { class: 'side', style: 'flex-basis:420px' }, activity(d, f))));
 }
