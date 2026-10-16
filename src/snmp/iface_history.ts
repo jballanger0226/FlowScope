@@ -10,7 +10,8 @@ const HOUR = 3_600_000;
 /** Column of each counter in iface_extra_samples and iface_extra_1h */
 const COL: Record<ExtraCounter, string> = {
   fcs: 'fcs', align: 'align', symbol: 'symbol', late: 'late', excessive: 'excessive', collisions: 'collisions', carrier: 'carrier', tooLong: 'too_long', unknown: 'unknown_proto',
-  inMc: 'in_mc', inBc: 'in_bc', outMc: 'out_mc', outBc: 'out_bc', inErr: 'in_err', outErr: 'out_err', inDisc: 'in_disc', outDisc: 'out_disc'
+  inMc: 'in_mc', inBc: 'in_bc', outMc: 'out_mc', outBc: 'out_bc', inErr: 'in_err', outErr: 'out_err', inDisc: 'in_disc', outDisc: 'out_disc',
+  outQDrops: 'q_out', inQDrops: 'q_in', resets: 'resets', storm: 'storm', portSec: 'port_sec'
 };
 const COLS = EXTRA_COUNTERS.map(k => COL[k]);
 

@@ -1,5 +1,6 @@
 import type { DeviceRow, DeviceService } from './devices.js';
 import { hottest, readHealth, readIfExtra } from './health.js';
+import { readDai, readNbar, readProcesses, readStack, type Dai } from './cisco_extra.js';
 import { classLabel, delta, perInterface, pollIfCounters, QOS_SOURCES, type ClassCounters, type IfCounters, type QosPolicy } from './collect.js';
 import type { HostOpts, HostTracker } from './hosts.js';
 import type { ClsPoint, IfPoint, TsStore } from '../store/types.js';
@@ -13,7 +14,12 @@ import { readFib } from './fib.js';
 interface SlowReader { name: string; cisco: boolean; every: number; emptyEvery: number; errorEvery: number; run(c: SnmpClient, d: DeviceRow, devs: DeviceService, now: number, cisco: boolean): Promise<boolean> }
 const SLOW: SlowReader[] = [
   { name: 'mcast', cisco: false, every: 115_000, emptyEvery: 3600_000, errorEvery: 600_000, run: async (c, d, devs, now, cisco) => { const m = await readMulticast(c, now, cisco); devs.saveMulticast(d.id, m); return !!m; } },
-  { name: 'fib', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs) => { const f = await readFib(c); devs.saveData(d.id, 'fib', f, f?.readAt); return !!f; } }
+  { name: 'fib', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs) => { const f = await readFib(c); devs.saveData(d.id, 'fib', f, f?.readAt); return !!f; } },
+  // Cisco extras: the busiest processes, stack health, ARP inspection drops and the applications NBAR2 recognised
+  { name: 'procs', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readProcesses(c, now); devs.saveData(d.id, 'procs', x, now); return !!x; } },
+  { name: 'stack', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readStack(c, now); devs.saveData(d.id, 'stack', x, now); return !!x; } },
+  { name: 'dai', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readDai(c, devs.data<Dai>(d.id, 'dai'), now); devs.saveData(d.id, 'dai', x, now); return !!x; } },
+  { name: 'nbar', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readNbar(c, now); devs.saveData(d.id, 'nbar', x, now); return !!x; } }
 ];
 
 interface PrevIf { t: number; c: IfCounters }
@@ -212,7 +218,7 @@ export class Poller {
         try {
           const hl = await readHealth(c, d.sys_object_id ?? '');
           this.devs.saveHealth(d.id, hl); this.hottest.set(d.id, hl ? hottest(hl.sensors) : null);
-          const ex = await readIfExtra(c); if (ex.size) this.devs.saveIfExtra(d.id, ex);
+          const ex = await readIfExtra(c, Date.now(), (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.')); if (ex.size) this.devs.saveIfExtra(d.id, ex);
         } catch { /* optional */ }
       }
       if (ifs.length || cls.length) await this.store.insertSnmp(ifs, cls);

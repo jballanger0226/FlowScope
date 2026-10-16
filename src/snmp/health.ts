@@ -6,6 +6,7 @@
  * reader treats a missing table as "not published" and never fails the poll.
  */
 import { toBigInt, toNum, toStr, type SnmpClient, type SnmpValue } from './client.js';
+import { ipOf } from './multicast.js';
 
 export type SensorKind = 'temperature' | 'fan' | 'power' | 'voltage' | 'current' | 'optic' | 'humidity' | 'status' | 'other';
 export type Level = 'ok' | 'warn' | 'bad' | 'off';
@@ -20,8 +21,13 @@ export interface Poe { group: number; budgetW: number | null; usedW: number | nu
 export interface Stp { rootId: string; isRoot: boolean; rootPort: number; rootCost: number; topChanges: number | null; sinceChangeSec: number | null; blockingPorts: number; ports: number }
 export interface OspfNeighbor { id: string; address: string; state: string; level: Level }
 export interface BgpPeer { address: string; as: number | null; state: string; level: Level; admin: string; upSec: number | null; updatesIn: number | null; updatesOut: number | null }
-export interface Health { readAt: number; sensors: Sensor[]; poe: Poe[]; stp: Stp | null; ospf: OspfNeighbor[]; bgp: BgpPeer[]; bgpLocalAs: number | null }
-export const EMPTY_HEALTH = (readAt: number): Health => ({ readAt, sensors: [], poe: [], stp: null, ospf: [], bgp: [], bgpLocalAs: null });
+/** An EIGRP neighbour (CISCO-EIGRP-MIB). The table lists only neighbours that have formed, so a lost one is absent, not shown down. */
+export interface EigrpPeer { as: number; address: string; ifIndex: number; holdSec: number | null; upText: string; srttMs: number | null; retrans: number | null; retries: number | null; level: Level }
+/** A BFD session (CISCO-IETF-BFD-MIB): the fast failure detector that routing protocols are often tied to. */
+export interface BfdSession { id: number; address: string; ifIndex: number | null; state: string; level: Level; upSec: number | null; upCount: number | null; diag: string | null; detectMs: number | null }
+/** `eigrp` and `bfd` are absent from health stored before they were read */
+export interface Health { readAt: number; sensors: Sensor[]; poe: Poe[]; stp: Stp | null; ospf: OspfNeighbor[]; bgp: BgpPeer[]; bgpLocalAs: number | null; eigrp?: EigrpPeer[]; bfd?: BfdSession[] }
+export const EMPTY_HEALTH = (readAt: number): Health => ({ readAt, sensors: [], poe: [], stp: null, ospf: [], bgp: [], bgpLocalAs: null, eigrp: [], bfd: [] });
 
 const num = (v: SnmpValue | undefined): number | null => (v === undefined || v === null ? null : toNum(v));
 const EMPTY = new Map<string, SnmpValue>();
@@ -273,6 +279,40 @@ export async function readBgp(c: SnmpClient): Promise<{ peers: BgpPeer[]; localA
   return { peers: peers.sort((a, b) => a.address.localeCompare(b.address, undefined, { numeric: true })), localAs };
 }
 
+/* ------------------------------------------------------------------ CISCO-EIGRP-MIB and CISCO-IETF-BFD-MIB */
+
+const EIGRP = '1.3.6.1.4.1.9.9.449.1.4.1.1';
+/** Peer rows are indexed vrf.as.handle; columns 3 address, 4 ifIndex, 5 hold time (s), 6 uptime as text like "3w1d", 7 smooth round trip (ms), 12 retransmissions, 13 retries of the current packet. */
+export async function readEigrp(c: SnmpClient): Promise<EigrpPeer[]> {
+  const col = colsOf(c);
+  const [addr, ifx, hold, up, srtt, retrans, retries] = await Promise.all([3, 4, 5, 6, 7, 12, 13].map(n => col(`${EIGRP}.${n}`)));
+  const out: EigrpPeer[] = [];
+  for (const [k, v] of addr) {
+    const p = k.split('.'); if (p.length < 3) continue;
+    const a = ipOf(v); if (!a) continue;
+    const r = num(retries.get(k));
+    out.push({ as: Number(p[1]), address: a, ifIndex: num(ifx.get(k)) ?? 0, holdSec: num(hold.get(k)), upText: toStr(up.get(k) ?? null) || '', srttMs: num(srtt.get(k)), retrans: num(retrans.get(k)), retries: r, level: r !== null && r > 0 ? 'warn' : 'ok' });
+  }
+  return out.sort((a, b) => a.as - b.as || a.address.localeCompare(b.address, undefined, { numeric: true }));
+}
+
+const BFD = '1.3.6.1.4.1.9.10.137.1';
+const BFD_STATE: Record<number, [string, Level]> = { 1: ['admin down', 'off'], 2: ['down', 'bad'], 3: ['init', 'warn'], 4: ['up', 'ok'] };
+const BFD_DIAG: Record<number, string> = { 1: 'control detection time expired', 2: 'echo function failed', 3: 'neighbour signalled session down', 4: 'forwarding plane reset', 5: 'path down', 6: 'concatenated path down', 7: 'administratively down', 8: 'reverse concatenated path down' };
+export async function readBfd(c: SnmpClient): Promise<BfdSession[]> {
+  const col = colsOf(c);
+  const [state, addr, ifx, txi, mult, upTime, upCount, diag] = await Promise.all([
+    col(`${BFD}.2.1.6`), col(`${BFD}.2.1.14`), col(`${BFD}.2.1.25`), col(`${BFD}.2.1.15`), col(`${BFD}.2.1.18`), col(`${BFD}.3.1.3`), col(`${BFD}.3.1.6`), col(`${BFD}.3.1.5`)]);
+  const out: BfdSession[] = [];
+  for (const [k, v] of state) {
+    const [st, level] = BFD_STATE[num(v) ?? 0] ?? ['unknown', 'off' as Level];
+    const tx = num(txi.get(k)), m = num(mult.get(k)), d = num(diag.get(k)), ut = num(upTime.get(k));
+    out.push({ id: Number(k), address: ipOf(addr.get(k) ?? null) ?? '', ifIndex: num(ifx.get(k)) || null, state: st, level, upSec: level === 'ok' && ut !== null ? Math.round(ut / 100) : null, upCount: num(upCount.get(k)),
+      diag: d ? BFD_DIAG[d] ?? null : null, detectMs: tx !== null && m !== null ? Math.round((tx * m) / 1000) : null });
+  }
+  return out.filter(x => x.address).sort((a, b) => a.address.localeCompare(b.address, undefined, { numeric: true }) || a.id - b.id);
+}
+
 /* ------------------------------------------------------------------ everything slow, in one read */
 
 export async function readHealth(c: SnmpClient, objectId = '', now = Date.now()): Promise<Health | null> {
@@ -281,8 +321,10 @@ export async function readHealth(c: SnmpClient, objectId = '', now = Date.now())
     readSensors(c, objectId).then(x => { h.sensors = x; }), readPoe(c).then(x => { h.poe = x; }), readStp(c).then(x => { h.stp = x; }),
     readOspf(c).then(x => { h.ospf = x; }), readBgp(c).then(x => { h.bgp = x.peers; h.bgpLocalAs = x.localAs; })
   ];
+  // vendor-specific MIBs are only asked of the vendor that publishes them
+  if (objectId.startsWith('1.3.6.1.4.1.9.')) tasks.push(readEigrp(c).then(x => { h.eigrp = x; }), readBfd(c).then(x => { h.bfd = x; }));
   await Promise.all(tasks.map(t => t.catch(() => undefined)));
-  return h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length ? h : null;
+  return h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length || h.eigrp?.length || h.bfd?.length ? h : null;
 }
 
 /* ------------------------------------------------------------------ interface link quality (EtherLike-MIB, IF-MIB) */
@@ -290,12 +332,26 @@ export async function readHealth(c: SnmpClient, objectId = '', now = Date.now())
 const DOT3 = { align: '1.3.6.1.2.1.10.7.2.1.2', fcs: '1.3.6.1.2.1.10.7.2.1.3', single: '1.3.6.1.2.1.10.7.2.1.4', multi: '1.3.6.1.2.1.10.7.2.1.5', late: '1.3.6.1.2.1.10.7.2.1.8', excessive: '1.3.6.1.2.1.10.7.2.1.9', carrier: '1.3.6.1.2.1.10.7.2.1.11', tooLong: '1.3.6.1.2.1.10.7.2.1.13', symbol: '1.3.6.1.2.1.10.7.2.1.18', duplex: '1.3.6.1.2.1.10.7.2.1.19' };
 const IFX = { admin: '1.3.6.1.2.1.2.2.1.7', unknown: '1.3.6.1.2.1.2.2.1.15', inMc: '1.3.6.1.2.1.31.1.1.1.2', inBc: '1.3.6.1.2.1.31.1.1.1.3', outMc: '1.3.6.1.2.1.31.1.1.1.4', outBc: '1.3.6.1.2.1.31.1.1.1.5', hcInMc: '1.3.6.1.2.1.31.1.1.1.8', hcInBc: '1.3.6.1.2.1.31.1.1.1.9', hcOutMc: '1.3.6.1.2.1.31.1.1.1.12', hcOutBc: '1.3.6.1.2.1.31.1.1.1.13', inDisc: '1.3.6.1.2.1.2.2.1.13', inErr: '1.3.6.1.2.1.2.2.1.14', outDisc: '1.3.6.1.2.1.2.2.1.19', outErr: '1.3.6.1.2.1.2.2.1.20' };
 
-export const EXTRA_COUNTERS = ['fcs', 'align', 'symbol', 'late', 'excessive', 'collisions', 'carrier', 'tooLong', 'unknown', 'inMc', 'inBc', 'outMc', 'outBc', 'inErr', 'outErr', 'inDisc', 'outDisc'] as const;
+const CISCO_IF = { inQ: '1.3.6.1.4.1.9.9.276.1.1.1.1.10', outQ: '1.3.6.1.4.1.9.9.276.1.1.1.1.11', resets: '1.3.6.1.4.1.9.9.276.1.1.2.1.1', reason: '1.3.6.1.4.1.9.9.276.1.1.2.1.3' };
+/** cpscSuppressedPacket, indexed ifIndex.trafficType (broadcast, multicast, unicast, all) */
+const CISCO_STORM = '1.3.6.1.4.1.9.9.362.1.2.1.1.3';
+/** cpsIfViolationCount, indexed ifIndex */
+const CISCO_PSEC = '1.3.6.1.4.1.9.9.315.1.2.1.1.9';
+/** The packets storm control has suppressed on an interface, of every traffic type together. Absent when the interface has no storm control rows. */
+function stormTotal(m: Map<string, SnmpValue>, ifIndex: string): number | undefined {
+  let sum: number | undefined;
+  for (const [k, v] of m) { if (!k.startsWith(ifIndex + '.')) continue; const b = toBigInt(v); if (b !== null) sum = (sum ?? 0) + Number(b); }
+  return sum;
+}
+
+export const EXTRA_COUNTERS = ['fcs', 'align', 'symbol', 'late', 'excessive', 'collisions', 'carrier', 'tooLong', 'unknown', 'inMc', 'inBc', 'outMc', 'outBc', 'inErr', 'outErr', 'inDisc', 'outDisc', 'outQDrops', 'inQDrops', 'resets', 'storm', 'portSec'] as const;
 export type ExtraCounter = (typeof EXTRA_COUNTERS)[number];
 export interface IfExtra {
   duplex: 'full' | 'half' | 'unknown' | null;
   /** ifAdminStatus: 1 up, 2 down, 3 testing */
   admin: number | null;
+  /** Why the interface last changed state, as the device words it (CISCO-IF-EXTENSION-MIB) */
+  reason?: string | null;
   /** Counter totals as last read; a counter the device does not publish is absent */
   totals: Partial<Record<ExtraCounter, number>>;
   /** What each counter went up by since the previous read, and how many seconds that was */
@@ -304,8 +360,10 @@ export interface IfExtra {
 }
 
 /** Reads the extra interface counters of every interface in one pass. A counter the device does not publish is left out of that interface's totals. */
-export async function readIfExtra(c: SnmpClient, now = Date.now()): Promise<Map<number, IfExtra>> {
+export async function readIfExtra(c: SnmpClient, now = Date.now(), cisco = false): Promise<Map<number, IfExtra>> {
   const col = colsOf(c);
+  // Cisco only: queue drops and resets (CISCO-IF-EXTENSION-MIB), storm control suppression and port security violations. Each table may be absent.
+  const cx = cisco ? await Promise.all([col(CISCO_IF.inQ), col(CISCO_IF.outQ), col(CISCO_IF.resets), col(CISCO_IF.reason), col(CISCO_STORM), col(CISCO_PSEC)]) : null;
   const [align, fcs, single, multi, late, exc, carrier, tooLong, symbol, duplex, admin, unknown, inMc, inBc, outMc, outBc, hInMc, hInBc, hOutMc, hOutBc, inErr, outErr, inDisc, outDisc] = await Promise.all([
     col(DOT3.align), col(DOT3.fcs), col(DOT3.single), col(DOT3.multi), col(DOT3.late), col(DOT3.excessive), col(DOT3.carrier), col(DOT3.tooLong), col(DOT3.symbol), col(DOT3.duplex),
     col(IFX.admin), col(IFX.unknown), col(IFX.inMc), col(IFX.inBc), col(IFX.outMc), col(IFX.outBc), col(IFX.hcInMc), col(IFX.hcInBc), col(IFX.hcOutMc), col(IFX.hcOutBc),
@@ -323,8 +381,9 @@ export async function readIfExtra(c: SnmpClient, now = Date.now()): Promise<Map<
     put('unknown', n(unknown, k));
     put('inMc', n(hInMc, k) ?? n(inMc, k)); put('inBc', n(hInBc, k) ?? n(inBc, k)); put('outMc', n(hOutMc, k) ?? n(outMc, k)); put('outBc', n(hOutBc, k) ?? n(outBc, k));
     put('inErr', n(inErr, k)); put('outErr', n(outErr, k)); put('inDisc', n(inDisc, k)); put('outDisc', n(outDisc, k));
+    if (cx) { put('inQDrops', n(cx[0], k)); put('outQDrops', n(cx[1], k)); put('resets', n(cx[2], k)); put('storm', stormTotal(cx[4], k)); put('portSec', n(cx[5], k)); }
     const d = n(duplex, k);
-    out.set(idx, { duplex: d === 3 ? 'full' : d === 2 ? 'half' : d === 1 ? 'unknown' : null, admin: n(admin, k) ?? null, totals, delta: null, dtSec: null, readAt: now });
+    out.set(idx, { reason: cx ? toStr(cx[3].get(k) ?? null) || null : undefined, duplex: d === 3 ? 'full' : d === 2 ? 'half' : d === 1 ? 'unknown' : null, admin: n(admin, k) ?? null, totals, delta: null, dtSec: null, readAt: now });
   }
   return out;
 }
@@ -357,6 +416,12 @@ export function linkWarnings(x: IfExtra, oper: number, speedMbps: number): { lev
     const bc = ((d.inBc ?? 0) + (d.outBc ?? 0)) / x.dtSec, mc = ((d.inMc ?? 0) + (d.outMc ?? 0)) / x.dtSec;
     if (bc >= 1000) out.push({ level: bc >= 5000 ? 'bad' : 'warn', text: `${Math.round(bc).toLocaleString('en-US')} broadcast packets per second. A sustained rate like this usually means a loop or a misbehaving host.` });
     if (mc >= 5000) out.push({ level: 'warn', text: `${Math.round(mc).toLocaleString('en-US')} multicast packets per second.` });
+    const span = x.dtSec < 120 ? x.dtSec + ' seconds' : Math.round(x.dtSec / 60) + ' minutes';
+    if ((d.outQDrops ?? 0) > 0) out.push({ level: 'warn', text: `${d.outQDrops!.toLocaleString('en-US')} packets were dropped from this port's output queue in the last ${span}. The port is congested: traffic is arriving faster than it can be sent.` });
+    if ((d.inQDrops ?? 0) > 0) out.push({ level: 'warn', text: `${d.inQDrops!.toLocaleString('en-US')} packets were dropped from the input queue in the last ${span}. The device could not keep up with what this port received.` });
+    if ((d.storm ?? 0) > 0) out.push({ level: 'warn', text: `Storm control suppressed ${d.storm!.toLocaleString('en-US')} packets in the last ${span}. Broadcast, multicast or unicast traffic on this port went over its configured limit.` });
+    if ((d.portSec ?? 0) > 0) out.push({ level: 'warn', text: `${d.portSec!.toLocaleString('en-US')} port security violation${d.portSec === 1 ? '' : 's'} in the last ${span}. A device with an unexpected MAC address sent traffic on this port.` });
+    if ((d.resets ?? 0) > 0) out.push({ level: 'warn', text: `This interface was reset ${d.resets} time${d.resets === 1 ? '' : 's'} in the last ${span}${x.reason ? ` (last state change: ${x.reason})` : ''}.` });
   }
   return out;
 }

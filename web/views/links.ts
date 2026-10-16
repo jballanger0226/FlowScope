@@ -6,7 +6,7 @@ import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, deb
 import { post } from '../api.js';
 import { correlate, verdict } from './correlate.js';
 import { attentionPanel, cards, cardsRow, issues, type Target } from './links_overview.js';
-import { hardwarePanel, hasHardware, hasOptics, linkQuality, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
+import { hardwarePanel, hasHardware, hasOptics, linkQuality, nbarPanel, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
 import { publicAddresses } from './ip_scope.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
@@ -675,12 +675,14 @@ function qualityGraphs(itf: Iface): VNode {
   const charts = [
     make('err', 'Errors (per second)', inOut('inErr', 'outErr'), `Errors on ${itf.name}`),
     make('disc', 'Discards (per second)', inOut('inDisc', 'outDisc'), `Discards on ${itf.name}`),
+    make('qd', 'Queue drops (per second)', inOut('inQDrops', 'outQDrops'), `Queue drops on ${itf.name}`),
+    make('guard', 'Storm control and port security (per second)', [...ser('Storm control', 'var(--s4)', 'storm'), ...ser('Port security', 'var(--s2)', 'portSec')], `Storm control and port security on ${itf.name}`),
     make('bc', 'Broadcast (packets per second)', inOut('inBc', 'outBc'), `Broadcast packets on ${itf.name}`),
     make('mc', 'Multicast (packets per second)', inOut('inMc', 'outMc'), `Multicast packets on ${itf.name}`),
     make('types', 'Error types (per second)', kinds.flatMap(([k, n, c]) => ser(n, c, k)), `Error types on ${itf.name}`)
   ].filter((c): c is NonNullable<typeof c> => c !== null);
   const hit = (...k: string[]): number[] => pts.filter(p => k.some(x => (p[x] ?? 0) > 0)).map(p => p.ts);
-  const match = cpuMatch([{ kind: 'Discards', ts: hit('inDisc', 'outDisc') }, { kind: 'Errors', ts: hit('inErr', 'outErr') }], from, to, fmtT);
+  const match = cpuMatch([{ kind: 'Discards', ts: hit('inDisc', 'outDisc') }, { kind: 'Errors', ts: hit('inErr', 'outErr') }, { kind: 'Queue drops', ts: hit('inQDrops', 'outQDrops') }], from, to, fmtT);
   if (match.chart && charts.length) charts.push(match.chart);
   return h('div', { class: 'col', style: 'gap:12px' },
     h('div', { class: 'row end' }, graphControls(), quality?.tier === 'h1' ? chip('hourly averages', 'info', 'The range is older than the per-read samples kept, so hourly summaries are shown') : null),
@@ -854,7 +856,7 @@ function ifBody(dev: Dev, itf: Iface): VNode {
       linkQuality(healthRes?.ifExtra.find(x => x.ifIndex === itf.ifIndex), (healthRes?.health?.sensors ?? []).filter(x => x.kind === 'optic' && x.ifIndex === itf.ifIndex), itf.speedMbps),
       qualityGraphs(itf)]
     : tab === 'hosts' ? [hostsPanel(dev, itf)]
-    : [classTable(itf),
+    : [classTable(itf), nbarPanel(healthRes?.extras?.nbar, itf.ifIndex),
       seriesLoading && !series ? spinner('Loading the graphs…') : seriesError ? note(seriesError, 'bad', true) : series ? graphs(series, itf) : null,
       streamsPanel(dev, itf)];
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:16px' }, body);
@@ -891,7 +893,7 @@ function tabBody(dev: Dev, tab: DevTab): VNode {
   const body = tab === 'overview' ? overviewPanel(dev)
     : tab === 'interfaces' ? ifTable(dev)
     : tab === 'hardware' ? hardwareTab(dev)
-    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes }), arpPanel(dev), neighborsPanel(dev))
+    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes, ifName: i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? '' }), arpPanel(dev), neighborsPanel(dev))
     : wlanPanel(dev);
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:14px' }, body);
 }

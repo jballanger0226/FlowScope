@@ -8,6 +8,7 @@ import { streamView } from './flows.js';
 import { isVlanInterface } from '../snmp/ports.js';
 import { DEFAULTS } from '../settings.js';
 import { linkWarnings } from '../snmp/health.js';
+import { daiReason, type Dai, type Nbar, type Processes, type Stack } from '../snmp/cisco_extra.js';
 
 export const MIBS = [
   { name: 'IF-MIB · ifXTable, ifTable', what: 'Interface names, speed, status, each interface\'s own MAC address, 64-bit octet counters and discards.' },
@@ -68,7 +69,12 @@ export function linkHealth(app: App, dev: number) {
     const i = ifs.get(ifIndex);
     return { ifIndex, ...x, warnings: i ? linkWarnings(x, i.oper, i.speedMbps) : [] };
   });
-  return { health: app.devices.health(dev), ifExtra: extra };
+  const dai = app.devices.data<Dai>(dev, 'dai');
+  const extras = {
+    procs: app.devices.data<Processes>(dev, 'procs'), stack: app.devices.data<Stack>(dev, 'stack'), nbar: app.devices.data<Nbar>(dev, 'nbar'),
+    dai: dai ? { ...dai, vlans: dai.vlans.map(v => ({ ...v, why: daiReason(v) })) } : null
+  };
+  return { health: app.devices.health(dev), ifExtra: extra, extras };
 }
 
 export function registerLinks(app: App): void {

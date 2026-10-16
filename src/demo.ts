@@ -91,6 +91,10 @@ function demoHealth(d: Dev, now: number): Health {
   } else if (d.name === 'dc-spine-01') h.stp = { rootId: '4096/' + d.mac, isRoot: true, rootPort: 0, rootCost: 0, topChanges: 4, sinceChangeSec: 9 * 86400, blockingPorts: 0, ports: 8 };
   else if (d.role === 'switch') h.stp = { rootId: '4096/00:1c:73:00:01:01', isRoot: false, rootPort: 1, rootCost: 4, topChanges: 6, sinceChangeSec: 5 * 86400, blockingPorts: 0, ports: 6 };
   if (d.name === 'core-rtr-01') h.ospf = [{ id: '10.255.0.2', address: '10.0.0.2', state: 'full', level: 'ok' }, { id: '10.255.0.5', address: '10.0.0.6', state: 'full', level: 'ok' }, { id: '10.255.0.9', address: '10.0.0.10', state: 'full', level: 'ok' }];
+  if (d.name === 'core-rtr-01') {
+    h.eigrp = [{ as: 1971, address: '10.0.0.14', ifIndex: 2, holdSec: 13, upText: '3w1d', srttMs: 1, retrans: 15, retries: 0, level: 'ok' }, { as: 1971, address: '10.0.0.18', ifIndex: 3, holdSec: 11, upText: '5d02h', srttMs: 4, retrans: 212, retries: 2, level: 'warn' }];
+    h.bfd = [{ id: 393217, address: '10.0.0.14', ifIndex: 2, state: 'up', level: 'ok', upSec: 21 * 86400, upCount: 1, diag: null, detectMs: 1500 }, { id: 393219, address: '10.0.0.18', ifIndex: 3, state: 'up', level: 'ok', upSec: 5 * 86400, upCount: 3, diag: 'control detection time expired', detectMs: 1500 }];
+  }
   if (d.name === 'wan-rtr-01') {
     h.ospf = [{ id: '10.255.0.1', address: '10.0.0.9', state: 'full', level: 'ok' }];
     h.bgpLocalAs = 65010;
@@ -117,7 +121,8 @@ function exRates(d: Dev, i: Ifc, t: number): Record<ExtraCounter, number> {
   return {
     fcs, align, symbol: 0, late, excessive: 0, collisions: mismatch ? 0.4 * (0.3 + wave(900, 7)) : 0, carrier: 0, tooLong: 0, unknown: 0.002 * (1 + wave(4000)),
     inMc: mc, inBc: bc, outMc: 2 * (0.7 + 0.6 * wave(2500)), outBc: storm ? bc * 0.3 : 1 * (0.6 + 0.8 * wave(2100)),
-    inErr: fcs + align, outErr: mismatch ? late : 0, inDisc: wave(11000) > 0.99 ? 0.01 : 0, outDisc
+    inErr: fcs + align, outErr: mismatch ? late : 0, inDisc: wave(11000) > 0.99 ? 0.01 : 0, outDisc,
+    outQDrops: busy ? outDisc * 0.8 : 0, inQDrops: 0, resets: 0, storm: storm && bc > 1000 ? bc * 0.05 : 0, portSec: 0
   };
 }
 const EXACC = new Map<string, { t: number; v: Record<string, number> }>();
@@ -506,7 +511,7 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
   if (twice) app.devices.saveIfExtra(id, demoIfExtra(d, ifIdx, now - 60_000));
   app.devices.saveIfExtra(id, demoIfExtra(d, ifIdx, now));
   const h = demoHealth(d, now);
-  app.devices.saveHealth(id, h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length ? h : null);
+  app.devices.saveHealth(id, h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length || h.eigrp?.length || h.bfd?.length ? h : null);
 }
 
 function seedHosts(app: App, net: Net): void {

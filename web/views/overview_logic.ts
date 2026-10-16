@@ -1,6 +1,7 @@
 type Level = 'ok' | 'warn' | 'bad' | 'off';
 /** The parts of the health read the Overview looks at, kept structural so this file has no dependency on the browser code. */
 interface OvHealth {
+  extras?: { stack: null | { problems: string[] }; dai: null | { vlans: { vlan: number; droppedNow: number | null; dhcpDenied: number; why: string }[] }; procs: null | { snmpOne: number | null } };
   ifExtra: { ifIndex: number; warnings: { level: Level; text: string }[] }[];
   health: null | {
     sensors: { kind: string; name: string; state: Level; stateText: string; ifIndex?: number }[];
@@ -8,6 +9,8 @@ interface OvHealth {
     stp: null | { sinceChangeSec: number | null; topChanges: number | null };
     ospf: { id: string; address: string; state: string; level: Level }[];
     bgp: { address: string; as: number | null; state: string; level: Level }[];
+    eigrp?: { as: number; address: string; level: Level; retries: number | null }[];
+    bfd?: { address: string; state: string; level: Level; diag: string | null }[];
   };
 }
 
@@ -52,6 +55,10 @@ export function issues(o: OvInput): Issue[] {
   for (const x of health?.ifExtra ?? []) if (names.has(x.ifIndex)) for (const w of x.warnings) if (w.level === 'bad' || w.level === 'warn') addIf(x.ifIndex, w.level, w.text);
   for (const s of health?.health?.sensors ?? []) if (s.kind === 'optic' && s.ifIndex !== undefined && names.has(s.ifIndex) && (s.state === 'bad' || s.state === 'warn')) addIf(s.ifIndex, s.state, `${s.name}: ${s.stateText}`);
   for (const [ifIndex, e] of perIf) out.push({ level: e.level, title: `${names.get(ifIndex)}: ${e.texts.length === 1 ? e.texts[0]! : plural(e.texts.length, 'link problem')}`, detail: e.texts.length === 1 ? 'See the error counters and optic readings for this interface.' : e.texts.join(' · '), target: { tab: 'interfaces', ifIndex, section: 'quality' } });
+  const ex = health?.extras;
+  for (const t of ex?.stack?.problems ?? []) out.push({ level: 'warn', title: 'Stack problem', detail: t, target: { tab: 'hardware' } });
+  for (const v of ex?.dai?.vlans ?? []) if ((v.droppedNow ?? 0) > 0) out.push({ level: 'warn', title: `ARP packets dropped on VLAN ${v.vlan}`, detail: `${plural(v.droppedNow!, 'packet')} since the last read. ${v.why}.`, target: { tab: 'network' } });
+  if ((ex?.procs?.snmpOne ?? 0) >= 10) out.push({ level: 'warn', title: 'SNMP engine is using the CPU', detail: `${ex!.procs!.snmpOne}% over the last minute. Polling is part of this device's load.`, target: { tab: 'hardware' } });
   const hl = health?.health;
   if (hl) {
     for (const s of hl.sensors) {
@@ -65,6 +72,8 @@ export function issues(o: OvInput): Issue[] {
     }
     for (const n of hl.ospf) if (n.level !== 'ok' && n.level !== 'off') out.push({ level: n.level === 'bad' ? 'bad' : 'warn', title: `OSPF neighbour ${n.id || n.address} is ${n.state}`, detail: n.address, target: { tab: 'network' } });
     for (const p of hl.bgp) if (p.level === 'bad' || p.level === 'warn') out.push({ level: p.level, title: `BGP peer ${p.address} is ${p.state}`, detail: p.as !== null ? `AS ${p.as}` : '', target: { tab: 'network' } });
+    for (const p of hl.eigrp ?? []) if (p.level === 'warn' || p.level === 'bad') out.push({ level: 'warn', title: `EIGRP neighbour ${p.address} is retransmitting`, detail: `AS ${p.as}${p.retries ? `, ${p.retries} retries on the current packet` : ''}. Packets to it are being lost.`, target: { tab: 'network' } });
+    for (const b of hl.bfd ?? []) if (b.level === 'bad' || b.level === 'warn') out.push({ level: b.level, title: `BFD session to ${b.address} is ${b.state}`, detail: b.diag ?? 'The fast failure detector for this neighbour is not up.', target: { tab: 'network' } });
     if (hl.stp && hl.stp.sinceChangeSec !== null && hl.stp.sinceChangeSec < 600 && hl.stp.topChanges) out.push({ level: 'warn', title: 'Spanning tree topology changed', detail: `${Math.round(hl.stp.sinceChangeSec / 60)} min ago, ${plural(hl.stp.topChanges, 'change')} in total.`, target: { tab: 'network' } });
   }
   if (o.wlan) for (const rd of o.wlan.radios) if (!rd.up) out.push({ level: 'warn', title: `Radio ${rd.band || rd.idx} is down`, detail: o.wlan.aps.find(a => a.mac === rd.apMac)?.name || rd.apMac, target: { tab: 'wifi' } });
@@ -86,7 +95,7 @@ export function cards(o: OvInput, all: Issue[]): Card[] {
     out.push({ tab: 'hardware', label: 'Hardware', level: c.level, headline: c.n ? plural(c.n, 'issue') : 'All within limits', lines: [sensors.length ? plural(sensors.length, 'sensor') : '', hl?.poe.length ? 'PoE monitored' : ''].filter(Boolean) });
   }
   const hl = o.health?.health; const c = count('network');
-  const lines = [o.neighbours !== null ? plural(o.neighbours, 'neighbour') : '', o.arp !== null ? plural(o.arp, 'ARP entry', 'ARP entries') : '', hl?.ospf.length ? plural(hl.ospf.length, 'OSPF neighbour') : '', hl?.bgp.length ? plural(hl.bgp.length, 'BGP peer') : '', hl?.stp ? 'spanning tree' : ''].filter(Boolean);
+  const lines = [o.neighbours !== null ? plural(o.neighbours, 'neighbour') : '', o.arp !== null ? plural(o.arp, 'ARP entry', 'ARP entries') : '', hl?.ospf.length ? plural(hl.ospf.length, 'OSPF neighbour') : '', hl?.bgp.length ? plural(hl.bgp.length, 'BGP peer') : '', hl?.eigrp?.length ? plural(hl.eigrp.length, 'EIGRP neighbour') : '', hl?.bfd?.length ? plural(hl.bfd.length, 'BFD session') : '', hl?.stp ? 'spanning tree' : ''].filter(Boolean);
   out.push({ tab: 'network', label: 'Neighbours and routing', level: c.level, headline: c.n ? plural(c.n, 'issue') : 'No issues', lines });
   if (o.dev.hasWlan && o.wlan) { const w = count('wifi'); out.push({ tab: 'wifi', label: 'Wi-Fi', level: w.level, headline: w.n ? plural(w.n, 'issue') : 'No issues', lines: [plural(o.wlan.aps.length, 'access point'), plural(o.wlan.clients.length, 'client')] }); }
   return out;
