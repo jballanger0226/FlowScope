@@ -33,6 +33,14 @@ export function multicastPlan(app: App, group: string, source: string, recs: Flo
   return buildPlan({ group, source, firstSeen, lastSeen, now: Date.now(), devices, flows });
 }
 
+const RT_PROTO: Record<number, string> = { 2: 'connected', 3: 'static', 8: 'RIP', 9: 'IS-IS', 13: 'OSPF', 14: 'BGP', 16: 'EIGRP', 17: 'DVMRP' };
+/** 255.255.255.0 as 24; an irregular mask is left as it is. */
+function maskLen(mask: string): string {
+  const n = mask.split('.').reduce((a, o) => a * 256 + Number(o), 0); let len = 0, x = n;
+  while (len < 32 && x >= 2 ** 31) { len++; x = (x * 2) % 2 ** 32; }
+  return x === 0 ? String(len) : mask;
+}
+
 export function registerMulticast(app: App): void {
   const w = app.web;
 
@@ -70,6 +78,16 @@ export function registerMulticast(app: App): void {
     for (const r of app.cdb.db.prepare('SELECT dev_id, ip, if_index FROM device_ips').all() as unknown as { dev_id: number; ip: string; if_index: number | null }[]) { if (r.if_index === null) continue; const a = ipsOf.get(r.dev_id) ?? new Map<string, number>(); a.set(r.ip, r.if_index); ipsOf.set(r.dev_id, a); }
     const peers: PimPeer[] = [];
     for (const o of app.devices.rows()) { if (o.id === id) continue; const om = app.devices.multicast(o.id); const ips = ipsOf.get(o.id); if (om && ips) peers.push({ name: o.name, mc: om, ips, ifName: namer(app, o.id, om) }); }
+    const own = new Set([d.ip, ...(ipsOf.get(id)?.keys() ?? [])]);
+    const devByIp = new Map<string, string>();
+    for (const o of app.devices.rows()) devByIp.set(o.ip, o.name);
+    for (const [devId, m2] of ipsOf) { const n = app.devices.row(devId)?.name; if (n) for (const ip of m2.keys()) devByIp.set(ip, n); }
+    const who = (ip: string | null): string | null => (ip ? (own.has(ip) ? 'this router' : devByIp.get(ip) ?? null) : null);
+    const igmp = (m.igmpInterfaces ?? []).map(i => ({ ifIndex: i.ifIndex, name: name(i.ifIndex), querier: i.querier, who: who(i.querier), self: !!i.querier && own.has(i.querier), version: i.version, intervalSec: i.queryIntervalSec, upSec: i.querierUpSec, expirySec: i.querierExpirySec, hosts: new Set(m.receivers.filter(r => r.ifIndex === i.ifIndex).map(r => r.lastReporter)).size }));
+    const rps = {
+      map: (m.rpSet ?? []).map(x => ({ range: `${x.group}/${maskLen(x.mask)}`, rp: x.rp, who: who(x.rp), self: own.has(x.rp), holdSec: x.holdSec, expirySec: x.expirySec })),
+      candidate: (m.candidateRps ?? []).map(x => ({ range: `${x.group}/${maskLen(x.mask)}`, rp: x.rp, self: own.has(x.rp) }))
+    };
     // Where the hosts named in this device's state are plugged in. IGMP reports the VLAN interface and the last host that reported, not the switch port,
     // so a reporter or a source is looked up in host tracking (ARP, MAC tables, DHCP snooping).
     const ips = new Set<string>();
@@ -85,13 +103,14 @@ export function registerMulticast(app: App): void {
     c.json({
       device: { id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device', model: modelText(app.devices.data<Entity>(id, 'entity')) }, readAt: m.readAt, stale: now - m.readAt > STALE_MS, source: m.source, truncated: m.truncated,
       routes: m.routes.map(r => ({
-        group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
+        group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', rpf: r.inIfIndex || r.upstream || r.rpf ? { inIf: r.inIfIndex ? name(r.inIfIndex) : null, neighbor: r.upstream, who: who(r.upstream), route: r.rpf ? `${r.rpf.prefix}/${maskLen(r.rpf.mask)}` : null, proto: r.rpf?.proto ? RT_PROTO[r.rpf.proto] ?? null : null, failures: r.rpfFail ?? null } : null, mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
           ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null, pimMode: pimMode.get(o.ifIndex) ?? null,
           members: (members.get(r.group + '|' + o.ifIndex) ?? []).map(x => ({ ip: x.ip, ageSec: Math.max(0, Math.round((now - x.lastSeen) / 1000)), sinceSec: Math.round((now - x.firstSeen) / 1000) })),
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))
       })),
+      igmp, rps,
       hosts, igmpHint: igmpHint(vendorOf(d.sys_object_id ?? '', d.sys_descr ?? '', (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.')), d.sys_descr ?? ''),
       load: (m.interfaces ?? []).filter(i => (i.inOctets ?? 0) > 0 || (i.outOctets ?? 0) > 0).map(i => ({ name: name(i.ifIndex), inBps: i.inBps, outBps: i.outBps, inOctets: i.inOctets, outOctets: i.outOctets, ttl: i.ttl, rateLimit: i.rateLimit }))
         .sort((a, b) => (b.inBps ?? 0) + (b.outBps ?? 0) - (a.inBps ?? 0) - (a.outBps ?? 0) || (b.inOctets ?? 0) + (b.outOctets ?? 0) - (a.inOctets ?? 0) - (a.outOctets ?? 0)),

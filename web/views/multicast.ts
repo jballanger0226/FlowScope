@@ -15,12 +15,18 @@ interface Join { reporter: string | null; expirySec: number | null; self: boolea
 interface IgmpHint { vendor: string; platform: string; command: string | null }
 interface Member { ip: string; ageSec: number; sinceSec: number }
 interface Out { ifIndex: number; name: string; pimMode?: string | null; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
+interface Rpf { inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null }
+interface IgmpIf { name: string; querier: string | null; who: string | null; self: boolean; version: number | null; intervalSec: number | null; upSec: number | null; expirySec: number | null; hosts: number }
+interface RpMap { range: string; rp: string; who: string | null; self: boolean; holdSec: number | null; expirySec: number | null }
 interface Route {
+  rpf?: Rpf | null;
   group: string; source: string; sharedTree: boolean; inIf: string | null; upstream: string | null; rp: string | null; bps: number | null; pkts: number | null; flags: string[]; protocol: number | null; mode?: 'sparse' | 'dense' | null; expirySec: number | null; out: Out[];
 }
 interface Detail {
   igmpHint?: IgmpHint;
   device: { id: number; name: string; ip: string; role: string; model?: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
+  igmp?: IgmpIf[];
+  rps?: { map: RpMap[]; candidate: { range: string; rp: string; self: boolean }[] };
   pimIssues?: { level: 'warn' | 'info'; kind: string; text: string }[];
   pim: { interfaces: { name: string; mode: string; dr: string | null }[]; neighbors: { address: string; ifName: string }[] };
   hosts?: Record<string, HostAt | null>;
@@ -149,7 +155,9 @@ function expanded(r: Route): VNode {
       h('span', null, r.sharedTree ? 'Shared tree (*,G)' : `Source ${r.source}`, !r.sharedTree && at(r.source) ? h('span', null, ' · plugged in at ', h('b', { class: 'mono' }, at(r.source))) : null),
       r.mode === 'dense' ? pimChip('dense') : r.mode === 'sparse' ? chip('PIM sparse', 'default', 'The route runs in PIM sparse mode: it is sent only where a receiver has joined.') : null,
       r.inIf ? h('span', null, 'Arrives on ', h('b', { class: 'mono' }, r.inIf)) : null,
-      r.upstream ? h('span', null, 'Upstream ', h('b', { class: 'mono' }, r.upstream)) : null,
+      r.upstream ? h('span', null, 'Upstream ', h('b', { class: 'mono' }, r.upstream), r.rpf?.who ? ` (${r.rpf.who})` : '') : null,
+      r.rpf?.route ? h('span', { title: 'Reverse path forwarding: the unicast route back to the source (or to the rendezvous point for a shared tree) decides which interface the router accepts this group on. Traffic on any other interface is dropped.' }, 'RPF route ', h('b', { class: 'mono' }, r.rpf.route), r.rpf.proto ? ` via ${r.rpf.proto}` : '') : null,
+      r.rpf?.failures ? chip(`${num(r.rpf.failures)} RPF drops`, 'warn', 'Packets for this route that arrived on an interface other than the RPF interface and were dropped. A counter since the route was created, so it shows that it happened, not that it is happening now.') : null,
       r.rp ? h('span', null, 'Rendezvous point ', h('b', { class: 'mono' }, r.rp)) : null,
       r.pkts !== null ? h('span', null, `${num(r.pkts)} packets`) : null,
       r.expirySec !== null ? h('span', null, r.expirySec === 0 ? 'route does not age out' : `route expires in ${sec(r.expirySec)}`) : null,
@@ -255,7 +263,35 @@ export function render(): VNode {
       detailError ? note(detailError, 'warn', true) : null,
       detail ? table(detail) : null,
       detail?.load?.length ? loadTable(detail.load) : null,
+      detail?.igmp?.length ? igmpTable(detail.igmp) : null,
+      detail?.rps && (detail.rps.map.length || detail.rps.candidate.length) ? rpTable(detail.rps) : null,
       detail && detail.pim.neighbors.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'PIM neighbours: ', detail.pim.neighbors.map(n => `${n.address} on ${n.ifName}`).join(', ')) : null) : null);
+}
+
+/** The IGMP querier on each interface: the router that sends the membership queries, which keeps memberships alive. */
+function igmpTable(list: IgmpIf[]): VNode {
+  return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'IGMP queriers'),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'on a segment with several routers, the one with the lowest address queries; hosts only answer queries')),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(120px,1fr) minmax(170px,1.4fr) 80px 110px 130px;--w:640px' },
+      h('div', { class: 'tr head' }, ...['Interface', 'Querier', 'Version', 'Query interval', 'Querier for'].map(t => h('span', null, t))),
+      list.map(i => h('div', { key: i.name, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, i.name),
+        h('span', { class: 'mono', style: 'font-size:12px' }, i.querier ? h('span', null, i.querier, ' ', i.self ? chip('this router', 'ok') : i.who ? chip(i.who, 'default') : null) : chip('none', i.hosts ? 'bad' : 'default', i.hosts ? 'Hosts joined here but no querier is reported, so their memberships are not refreshed' : 'No querier is reported on this interface')),
+        h('span', { class: 'mono', style: 'font-size:12px' }, i.version ? 'v' + i.version : '—'),
+        h('span', { class: 'mono', style: 'font-size:12px' }, i.intervalSec ? sec(i.intervalSec) : '—'),
+        h('span', { class: 'mono dim', style: 'font-size:12px' }, i.querier && i.upSec !== null ? ageText(i.upSec).replace(' ago', '') : '—'))))));
+}
+
+/** The rendezvous points the router knows and the group ranges they serve. */
+function rpTable(rps: NonNullable<Detail['rps']>): VNode {
+  return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Rendezvous points'),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'SNMP does not say whether a mapping is configured by hand or learned from Auto-RP or a bootstrap router')),
+    rps.map.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1fr) minmax(200px,1.6fr) 110px 110px;--w:600px' },
+      h('div', { class: 'tr head' }, ...['Group range', 'Rendezvous point', 'Hold time', 'Expires in'].map(t => h('span', null, t))),
+      rps.map.map(x => h('div', { key: x.range + x.rp, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.range),
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.rp, ' ', x.self ? chip('this router', 'ok') : x.who ? chip(x.who, 'default') : null),
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.holdSec !== null ? sec(x.holdSec) : '—'),
+        h('span', { class: 'mono dim', style: 'font-size:12px' }, x.expirySec ? sec(x.expirySec) : '—'))))) : null,
+    rps.candidate.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'This router is a candidate rendezvous point for ', rps.candidate.map(x => `${x.range} (${x.rp})`).join(', ')) : null);
 }
 
 /** Multicast bytes through each interface: replication multiplies it, so an interface can carry far more multicast out than came in. */

@@ -1,7 +1,7 @@
 import type { Multicast } from './multicast.js';
 
 /** One finding about the PIM setup of a device. `warn` can stop traffic, `info` is worth knowing. */
-export interface PimIssue { level: 'warn' | 'info'; kind: 'mismatch' | 'mixed' | 'no-rp'; text: string }
+export interface PimIssue { level: 'warn' | 'info'; kind: 'mismatch' | 'mixed' | 'no-rp' | 'no-querier' | 'rpf' | 'rp-unknown'; text: string }
 
 /** A device FlowScope also polls, so the far end of a PIM link can be looked up. `ips` maps each of its addresses to the interface it sits on. */
 export interface PimPeer { name: string; mc: Multicast; ips: Map<string, number>; ifName: (ix: number) => string }
@@ -50,5 +50,16 @@ export function pimIssues(mc: Multicast, ifName: (ix: number) => string, peers: 
     const dense = [...new Set(mc.routes.filter(r => r.protocol === 9 && !r.rp && !/^224\.0\.1\.(39|40)$/.test(r.group) && ((r.inIfIndex !== null && sd.has(r.inIfIndex)) || r.oifs.some(o => sd.has(o.ifIndex)))).map(r => r.group))];
     if (dense.length) out.push({ level: 'warn', kind: 'no-rp', text: `${dense.length === 1 ? 'A group runs' : dense.length + ' groups run'} dense on a sparse-dense interface because no rendezvous point is known for ${dense.length === 1 ? 'it' : 'them'}: ${dense.slice(0, 5).join(', ')}${dense.length > 5 ? ` and ${dense.length - 5} more` : ''}. Check that the RP is reachable and its group range covers ${dense.length === 1 ? 'it' : 'them'}.` });
   }
+
+  // an interface with joined hosts and no IGMP querier: nothing refreshes the memberships, so they time out and the group stops
+  const noQuerier = (mc.igmpInterfaces ?? []).filter(i => !i.querier && mc.receivers.some(r => r.ifIndex === i.ifIndex)).map(i => ifName(i.ifIndex));
+  if (noQuerier.length) out.push({ level: 'warn', kind: 'no-querier', text: `No IGMP querier is reported on ${noQuerier.slice(0, 4).join(', ')}${noQuerier.length > 4 ? ` and ${noQuerier.length - 4} more` : ''}, which has hosts that joined. Without a querier, memberships are not refreshed and groups stop after the timeout.` });
+
+  // packets dropped because they arrived on a different interface than the one the unicast route to the source points to
+  const failing = mc.routes.filter(r => (r.rpfFail ?? 0) > 0).sort((a, b) => (b.rpfFail ?? 0) - (a.rpfFail ?? 0));
+  if (failing.length) out.push({ level: 'warn', kind: 'rpf', text: `${failing.length} route${failing.length === 1 ? '' : 's'} dropped packets that arrived on the wrong interface (RPF check failed), most on ${failing[0]!.source === '0.0.0.0' ? failing[0]!.group : failing[0]!.source + ', ' + failing[0]!.group} (${failing[0]!.rpfFail!.toLocaleString('en-US')}). The unicast route back to the source points out a different interface than the one the traffic uses.` });
+
+  // sparse mode with no rendezvous point mapped at all
+  if (mc.rpSet && !mc.rpSet.length && !(mc.candidateRps ?? []).length && mc.pimInterfaces.some(p => p.mode === 'sparse') && !mc.routes.some(r => r.rp)) out.push({ level: 'info', kind: 'rp-unknown', text: 'PIM sparse mode is on, but this router lists no rendezvous point. That is normal when only source-specific multicast is used. Otherwise check the RP configuration.' });
   return out;
 }

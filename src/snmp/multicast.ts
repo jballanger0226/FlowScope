@@ -36,7 +36,15 @@ export interface McRoute {
   flags: string[];
   rp: string | null;
   oifs: McOif[];
+  /** Reverse path forwarding. The incoming interface and upstream neighbour above are the RPF interface and neighbour; these say which unicast route chose them. */
+  rpf?: { prefix: string; mask: string; proto: number | null } | null;
+  /** Packets that arrived on an interface other than the RPF interface and were dropped (ipMRouteDifferentInIfPackets). A counter since the route was created. */
+  rpfFail?: number | null;
 }
+/** IGMP on one interface (IGMP-STD-MIB igmpInterfaceTable). The querier is the router that sends the membership queries on that segment. */
+export interface McIgmpIf { ifIndex: number; querier: string | null; version: number | null; queryIntervalSec: number | null; querierUpSec: number | null; querierExpirySec: number | null }
+/** A group range and the rendezvous point serving it (PIM-MIB pimRPSetTable). The MIB does not say whether the mapping was configured, learned from Auto-RP or from a bootstrap router. */
+export interface McRpMap { group: string; mask: string; rp: string; holdSec: number | null; expirySec: number | null }
 export interface McReceiver { group: string; ifIndex: number; lastReporter: string | null; expirySec: number | null; self: boolean }
 export interface McPimIf { ifIndex: number; mode: 'dense' | 'sparse' | 'sparse-dense' | 'other'; dr: string | null }
 export interface McNeighbor { address: string; ifIndex: number }
@@ -56,6 +64,10 @@ export interface Multicast {
   receivers: McReceiver[];
   pimInterfaces: McPimIf[];
   neighbors: McNeighbor[];
+  igmpInterfaces?: McIgmpIf[];
+  rpSet?: McRpMap[];
+  /** Group ranges this router is itself a candidate rendezvous point for */
+  candidateRps?: { group: string; mask: string; rp: string }[];
   /** Multicast bytes in and out of each interface (IPMROUTE-STD-MIB). Absent in reads stored before it was collected */
   interfaces?: McIfLoad[];
   /** Names of the interfaces the tables mention, asked of the device by ifIndex. VLAN, tunnel and loopback interfaces are not in the stored interface list, so their names come from here. */
@@ -76,6 +88,9 @@ const IGMP_CACHE = '1.3.6.1.2.1.85.1.2.1';
 const PIM_IF = '1.3.6.1.3.61.1.1.2.1';
 const PIM_NBR = '1.3.6.1.3.61.1.1.3.1';
 const PIM_RP = '1.3.6.1.3.61.1.1.5.1';
+const PIM_RPSET = '1.3.6.1.3.61.1.1.6.1';
+const PIM_CAND = '1.3.6.1.3.61.1.1.11.1';
+const IGMP_IF = '1.3.6.1.2.1.85.1.1.1';
 
 /** Cisco route flags in the order of their columns (12 to 18 and 25 to 27); 1 is true, 2 is false. */
 const CFLAGS: [number, string][] = [[12, 'prune'], [13, 'sparse'], [14, 'connected'], [15, 'local'], [16, 'register'], [17, 'rp-tree'], [18, 'spt'], [25, 'join'], [26, 'msdp'], [27, 'proxy-join']];
@@ -102,6 +117,7 @@ const isIp = (s: string) => /^\d{1,3}(\.\d{1,3}){3}$/.test(s);
 /** `cisco` says whether to ask for Cisco's rate and flag table; other vendors are never asked for it. */
 export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = true): Promise<Multicast | null> {
   const [up, inIf, expiry, pkts, proto] = await Promise.all([4, 5, 7, 8, 11].map(n => col(c, `${ROUTE}.${n}`)));
+  const [rpfFail, rtProto, rtAddr, rtMask] = await Promise.all([9, 12, 13, 14].map(n => col(c, `${ROUTE}.${n}`)));
   const [nhState, nhPkts] = await Promise.all([6, 11].map(n => col(c, `${NEXTHOP}.${n}`)));
   const routes = new Map<string, McRoute>();
   let truncated = false;
@@ -123,6 +139,13 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   for (const [idx, v] of expiry) { const r = routes.get(keyOf(ip4(idx.split('.'), 0), ip4(idx.split('.'), 4))); if (r) r.expirySec = secs(v); }
   for (const [idx, v] of pkts) { const r = routes.get(keyOf(ip4(idx.split('.'), 0), ip4(idx.split('.'), 4))); if (r) r.pkts = num(v); }
   for (const [idx, v] of proto) { const r = routes.get(keyOf(ip4(idx.split('.'), 0), ip4(idx.split('.'), 4))); if (r) r.protocol = num(v); }
+
+  const byIdx = (idx: string): McRoute | undefined => { const p = idx.split('.'); return routes.get(keyOf(ip4(p, 0), ip4(p, 4))); };
+  for (const [idx, v] of rpfFail) { const r = byIdx(idx); if (r) r.rpfFail = num(v); }
+  for (const [idx, v] of rtAddr) {
+    const r = byIdx(idx), a = ipOf(v), m = ipOf(rtMask.get(idx)); if (!r || !a) continue;
+    r.rpf = { prefix: a, mask: m ?? '255.255.255.255', proto: num(rtProto.get(idx)) };
+  }
 
   // outgoing interface list: index is group.source.mask.ifIndex.nextHopAddress
   for (const [idx, v] of nhState) {
@@ -168,6 +191,19 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   const nbrIf = await col(c, `${PIM_NBR}.2`);
   const neighbors: McNeighbor[] = [...nbrIf].map(([idx, v]) => ({ address: idx, ifIndex: num(v) ?? 0 })).filter(n => isIp(n.address));
 
+  const igmpInterfaces = await readIgmpInterfaces(c);
+  // the rendezvous point mappings: pimRPSetTable is indexed component.group.mask.rp
+  const rpSet: McRpMap[] = [];
+  const [hold, expiry2] = await Promise.all([5, 6].map(n => col(c, `${PIM_RPSET}.${n}`)));
+  for (const k of new Set([...hold.keys(), ...expiry2.keys()])) {
+    const p = k.split('.'); if (p.length < 13) continue;
+    const g = ip4(p, 1), m = ip4(p, 5), rp = ip4(p, 9);
+    if (isIp(g) && isIp(rp)) rpSet.push({ group: g, mask: m, rp, holdSec: num(hold.get(k)), expirySec: secs(expiry2.get(k)) });
+  }
+  rpSet.sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.rp.localeCompare(b.rp, undefined, { numeric: true }));
+  const candidateRps: { group: string; mask: string; rp: string }[] = [];
+  for (const [idx, v] of await col(c, `${PIM_CAND}.3`)) { const p = idx.split('.'); const rp = ipOf(v); if (p.length >= 8 && rp) candidateRps.push({ group: ip4(p, 0), mask: ip4(p, 4), rp }); }
+
   // per-interface multicast bytes: HC counters when the device has them
   const [hcIn, hcOut, lIn, lOut, ttl, lim] = await Promise.all([7, 8, 5, 6, 2, 4].map(n => col(c, `${MC_IF}.${n}`)));
   const big = (v: SnmpValue | undefined): number | null => { if (v === undefined || v === null) return null; const b = toBigInt(v); return b === null ? null : Number(b); };
@@ -183,7 +219,7 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
   const used = [...routes.values()].flatMap(r => r.oifs.map(o => o.ifIndex)).concat(receivers.map(r => r.ifIndex));
   const down = await interfacesDown(c, used);
   const list = [...routes.values()].sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.source.localeCompare(b.source, undefined, { numeric: true }));
-  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, interfaces, names, down, truncated };
+  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, igmpInterfaces, rpSet, candidateRps, interfaces, names, down, truncated };
 }
 
 /** The last host to report each group on each interface (igmpCacheLastReporter), read on its own so it can be sampled often. */
@@ -287,4 +323,16 @@ export function withLoadRates(m: Multicast, prev: Multicast | null): Multicast {
   const rate = (a: number | null, b: number | null | undefined) => (a === null || b === null || b === undefined || a < b ? null : Math.round(((a - b) * 8) / dt));
   for (const i of m.interfaces) { const o = old.get(i.ifIndex); if (o) { i.inBps = rate(i.inOctets, o.inOctets); i.outBps = rate(i.outOctets, o.outOctets); } }
   return m;
+}
+
+/** IGMP per interface: the querier, the version and the query timers. Indexed by ifIndex. */
+export async function readIgmpInterfaces(c: SnmpClient): Promise<McIgmpIf[]> {
+  const [interval, version, querier, upTime, expiry] = await Promise.all([2, 4, 5, 7, 8].map(n => col(c, `${IGMP_IF}.${n}`)));
+  const out: McIgmpIf[] = [];
+  for (const k of new Set([...querier.keys(), ...version.keys()])) {
+    const ifIndex = Number(k); if (!Number.isInteger(ifIndex) || ifIndex <= 0) continue;
+    const q = ipOf(querier.get(k));
+    out.push({ ifIndex, querier: q && q !== '0.0.0.0' ? q : null, version: num(version.get(k)), queryIntervalSec: num(interval.get(k)), querierUpSec: secs(upTime.get(k)), querierExpirySec: secs(expiry.get(k)) });
+  }
+  return out.sort((a, b) => a.ifIndex - b.ifIndex);
 }

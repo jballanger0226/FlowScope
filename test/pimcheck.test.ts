@@ -27,3 +27,15 @@ test('a dense group on a sparse-dense interface with no RP is a warning, Auto-RP
   const x = pimIssues(mc([{ ifIndex: 1, mode: 'sparse-dense', dr: null }], { routes: [r('239.1.1.1', null), r('224.0.1.40', null), r('239.2.2.2', '10.0.0.9')] as never }), nm, []);
   assert.equal(x.length, 1); assert.equal(x[0]!.kind, 'no-rp'); assert.match(x[0]!.text, /239\.1\.1\.1/); assert.ok(!/224\.0\.1\.40|239\.2\.2\.2/.test(x[0]!.text));
 });
+
+test('no querier where hosts joined, RPF failures and a missing RP are reported', () => {
+  const route = { group: '239.1.1.1', source: '10.1.1.1', inIfIndex: 1, upstream: null, protocol: 8, pkts: null, bps: null, expirySec: null, flags: [], rp: null, oifs: [], rpfFail: 1234 };
+  const x = pimIssues(mc([{ ifIndex: 1, mode: 'sparse', dr: null }], {
+    igmpInterfaces: [{ ifIndex: 2, querier: null, version: 2, queryIntervalSec: 125, querierUpSec: null, querierExpirySec: null }, { ifIndex: 3, querier: null, version: 2, queryIntervalSec: 125, querierUpSec: null, querierExpirySec: null }],
+    receivers: [{ group: '239.1.1.1', ifIndex: 2, lastReporter: '10.0.0.5', expirySec: 10, self: false }], routes: [route] as never, rpSet: [], candidateRps: []
+  }), nm, []);
+  const k = x.map(i => i.kind).sort();
+  assert.deepEqual(k, ['no-querier', 'rp-unknown', 'rpf']);
+  assert.match(x.find(i => i.kind === 'no-querier')!.text, /Eth2/); assert.ok(!/Eth3/.test(x.find(i => i.kind === 'no-querier')!.text));
+  assert.match(x.find(i => i.kind === 'rpf')!.text, /1,234/);
+});

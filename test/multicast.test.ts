@@ -235,3 +235,27 @@ test('interfaces whose link is not up are found, so a route is not shown as forw
   assert.deepEqual(await interfacesDown(c, [78, 80, 0]), [78]);
   assert.deepEqual(await interfacesDown({} as SnmpClient, [78]), []);
 });
+
+test('reads the RPF route and failure counter of each route from the real walk', async () => {
+  const m = (await readMulticast(agent(FIX), 1))!;
+  const r = m.routes.find(x => x.group === '224.0.1.129' && x.source === '0.0.0.0')!;
+  assert.deepEqual(r.rpf, { prefix: '10.10.30.1', mask: '255.255.255.255', proto: r.rpf!.proto });
+  assert.equal(typeof r.rpfFail, 'number');
+});
+
+test('reads the IGMP querier per interface and the rendezvous point mappings', async () => {
+  const I = '1.3.6.1.2.1.85.1.1.1', S = '1.3.6.1.3.61.1.1.6.1', C = '1.3.6.1.3.61.1.1.11.1';
+  const rows: Record<string, SnmpValue> = {
+    ...FIX,
+    [`${I}.4.735`]: 2, [`${I}.5.735`]: '10.1.1.2', [`${I}.2.735`]: 125, [`${I}.7.735`]: 360000, [`${I}.8.735`]: 25000,
+    [`${I}.4.736`]: 3, [`${I}.5.736`]: '0.0.0.0',
+    [`${S}.5.1.224.0.0.0.240.0.0.0.10.10.30.1`]: 150, [`${S}.6.1.224.0.0.0.240.0.0.0.10.10.30.1`]: 12000,
+    [`${C}.3.239.0.0.0.255.0.0.0`]: '10.1.1.1'
+  };
+  const m = (await readMulticast(agent(rows), 1))!;
+  assert.deepEqual(m.igmpInterfaces, [
+    { ifIndex: 735, querier: '10.1.1.2', version: 2, queryIntervalSec: 125, querierUpSec: 3600, querierExpirySec: 250 },
+    { ifIndex: 736, querier: null, version: 3, queryIntervalSec: null, querierUpSec: null, querierExpirySec: null }]);
+  assert.deepEqual(m.rpSet, [{ group: '224.0.0.0', mask: '240.0.0.0', rp: '10.10.30.1', holdSec: 150, expirySec: 120 }]);
+  assert.deepEqual(m.candidateRps, [{ group: '239.0.0.0', mask: '255.0.0.0', rp: '10.1.1.1' }]);
+});
