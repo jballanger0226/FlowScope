@@ -80,6 +80,9 @@ function outChips(r: Route): VNode {
   return h('span', { class: 'mono', style: 'font-size:12px' }, fwd.slice(0, 4).map(o => o.name).join(', '), fwd.length > 4 ? ` +${fwd.length - 4}` : '', pruned ? h('span', { class: 'dim', title: 'Pruned: in the list but no one downstream wants the group' }, ` (${pruned} pruned)`) : null);
 }
 
+/** Shown wherever hosts that joined are listed: the router does not keep a full membership list for SNMP to read. */
+const INCOMPLETE = 'Not a complete list. The router keeps only the last host to report each group, so FlowScope collects reporters as they answer queries and can miss hosts that have not been the last to report. For the full membership, check the switch (on Cisco: show ip igmp snooping groups).';
+
 const ageText = (s: number): string => (s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129_600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`);
 
 /** One outgoing interface. The hosts that joined are every reporter seen over time, so a VLAN with many receivers is a collapsible list. */
@@ -87,8 +90,8 @@ function oilRow(r: Route, o: Out): VNode {
   const hk = `${keyOf(r)}|${o.ifIndex}`, members = o.members ?? [], many = members.length > 1, on = openHosts.has(hk);
   const joined = (): VNode | string => {
     if (o.loopback && !o.joins.some(j => j.reporter)) return 'the router joined the group itself';
-    if (many) return h('button', { type: 'button', class: 'rowbtn', 'aria-expanded': on, title: 'Hosts seen reporting this group on this interface. The router remembers only the last reporter, so FlowScope collects them over time.', onclick: () => toggleSet(openHosts, hk) }, `${on ? '▾' : '▸'} ${num(members.length)} hosts`);
-    if (o.joins.length) return o.joins.slice(0, 4).map(j => (j.self ? 'this router' : (j.reporter ?? '?') + (at(j.reporter) ? ` on ${at(j.reporter)}` : '')) + (j.expirySec !== null ? ` (${sec(j.expirySec)})` : '')).join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : '');
+    if (many) return h('button', { type: 'button', class: 'rowbtn', 'aria-expanded': on, title: INCOMPLETE, onclick: () => toggleSet(openHosts, hk) }, `${on ? '▾' : '▸'} ${num(members.length)} hosts`);
+    if (o.joins.length) return h('span', { title: INCOMPLETE }, o.joins.slice(0, 4).map(j => (j.self ? 'this router' : (j.reporter ?? '?') + (at(j.reporter) ? ` on ${at(j.reporter)}` : '')) + (j.expirySec !== null ? ` (${sec(j.expirySec)})` : '')).join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : ''));
     return h('span', { class: 'dim' }, o.neighbor ? 'via the neighbour' : 'none seen');
   };
   return h('div', { key: o.ifIndex },
@@ -99,6 +102,7 @@ function oilRow(r: Route, o: Out): VNode {
         h('span', { class: 'mono', style: 'font-size:12px' }, joined()),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts))),
     many && on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
+      note(INCOMPLETE, 'warn'),
       h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 120px 110px;--w:560px' },
         h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Last reported', 'Known for'].map(t => h('span', null, t))),
         members.map(m => h('div', { key: m.ip, class: 'tr' },
@@ -190,7 +194,7 @@ function summary(s: DevSummary): VNode {
   return h('div', { class: 'row', style: 'gap:12px;flex-wrap:wrap' },
     stat('Groups', num(s.groups), `${num(s.routes)} routes`),
     stat('Forwarding', num(s.forwarding), 'routes with receivers'),
-    stat('IGMP joins', num(s.receivers), 'hosts reported'));
+    stat('IGMP joins', num(s.receivers), 'last reporter per group'));
 }
 
 export function render(): VNode {
@@ -208,6 +212,7 @@ export function render(): VNode {
         cur ? chip(cur.source === 'cisco' ? 'IPMROUTE + Cisco rates' : 'IPMROUTE standard', 'default', cur.source === 'cisco' ? 'Rates and route flags come from CISCO-IPMROUTE-MIB' : 'The device does not publish rates; only the standard table was read') : null,
         btn('Refresh', { small: true, onclick: () => { void loadDevices().then(() => loadDetail()); } })),
       cur ? summary(cur) : null,
+      cur ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'Hosts that joined come from the router\'s IGMP cache over SNMP and are not a complete list. For the full membership, check the switch (on Cisco: show ip igmp snooping groups).') : null,
       cur?.truncated ? note('This device holds more routes than FlowScope keeps. The list is cut off.', 'warn') : null,
       h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },
         textInput(query, v => { query = v; page = 0; }, { placeholder: 'Search groups and source hosts: 239.1.1.1, 10.2.3.4, a port, a switch…', aria: 'Search groups and source hosts', width: '420px', id: 'mc-filter' }),
