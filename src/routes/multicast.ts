@@ -76,7 +76,7 @@ export function registerMulticast(app: App): void {
       routes: m.routes.map(r => ({
         group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
-          ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null,
+          ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null,
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))
       })),
