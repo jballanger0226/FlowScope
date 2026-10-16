@@ -6,6 +6,7 @@ import type { ClsPoint, IfPoint, TsStore } from '../store/types.js';
 import type { AppLog } from '../logger.js';
 import type { SnmpClient } from './client.js';
 import { readResources } from './resources.js';
+import { readMulticast } from './multicast.js';
 
 interface PrevIf { t: number; c: IfCounters }
 interface PrevCls { t: number; c: ClassCounters }
@@ -32,6 +33,10 @@ export class Poller {
   /** Hardware and link-quality reads are slower to change and heavier to ask for, so they run less often than the counters. */
   private healthAt = new Map<number, number>();
   private hottest = new Map<number, number | null>();
+  /** Multicast tables are large, so they are read every two minutes, and once an hour from a device that has none. */
+  private mcastAt = new Map<number, number>();
+  private mcastEvery = new Map<number, number>();
+  private mcastRunning = new Set<number>();
 
   constructor(private devs: DeviceService, private store: Pick<TsStore, 'insertSnmp'>, private log: AppLog, private o: PollerOpts, private hosts?: HostTracker) {}
 
@@ -43,7 +48,7 @@ export class Poller {
 
   /** Forget cached counters and structure for a device (after removal or re-discovery). */
   forget(devId: number): void {
-    this.due.delete(devId); this.fails.delete(devId); this.structure.delete(devId); this.structureAt.delete(devId); this.hostDue.delete(devId); this.refreshDue.delete(devId); this.resourcesAt.delete(devId); this.healthAt.delete(devId); this.hottest.delete(devId);
+    this.due.delete(devId); this.fails.delete(devId); this.structure.delete(devId); this.structureAt.delete(devId); this.hostDue.delete(devId); this.refreshDue.delete(devId); this.resourcesAt.delete(devId); this.healthAt.delete(devId); this.hottest.delete(devId); this.mcastAt.delete(devId); this.mcastEvery.delete(devId);
     for (const k of [...this.prevIf.keys()]) if (k.startsWith(devId + '/')) this.prevIf.delete(k);
     for (const k of [...this.prevCls.keys()]) if (k.startsWith(devId + '/')) this.prevCls.delete(k);
   }
@@ -79,6 +84,7 @@ export class Poller {
         if (due === undefined) this.hostDue.set(d.id, now + 10_000 + Math.floor(Math.random() * 30_000));
         else if (due <= now) void this.hostCycle(d, h);
       }
+      if (!this.mcastRunning.has(d.id) && this.mcastRunning.size < 2 && now - (this.mcastAt.get(d.id) ?? 0) >= (this.mcastEvery.get(d.id) ?? 0)) void this.mcastCycle(d);
       if (!this.refreshing) {
         const due = this.refreshDue.get(d.id);
         if (due === undefined) this.refreshDue.set(d.id, now + 120_000 + Math.floor(Math.random() * 600_000));
@@ -100,6 +106,20 @@ export class Poller {
       this.hosts!.fail(d.id, (e as Error).message);
       this.hostDue.set(d.id, Date.now() + Math.max(300, h.intervalSec) * 1000);
     } finally { c?.close(); this.hostRunning.delete(d.id); }
+  }
+
+  /** Reads the multicast routing tables on a session of their own, so the long walk never delays the counter polls. */
+  private async mcastCycle(d: DeviceRow): Promise<void> {
+    this.mcastRunning.add(d.id); this.mcastAt.set(d.id, Date.now());
+    let c: SnmpClient | null = null;
+    try {
+      c = this.devs.open(d);
+      const m = await readMulticast(c);
+      this.devs.saveMulticast(d.id, m);
+      this.mcastEvery.set(d.id, m ? 115_000 : 3600_000);
+      if (m) this.log.debug?.('snmp', `Multicast state from ${d.name}: ${m.routes.length} routes, ${m.receivers.length} IGMP receivers`);
+    } catch { this.mcastEvery.set(d.id, 600_000); /* optional: a device without the MIBs is simply skipped */ }
+    finally { c?.close(); this.mcastRunning.delete(d.id); }
   }
 
   /** Re-discovers a device so policies, VLAN names and interfaces added after the first discovery appear without anyone pressing a button. */

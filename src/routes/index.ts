@@ -10,6 +10,7 @@ import { registerAdmin } from './admin.js';
 import { registerSaml } from './saml.js';
 import { registerSystem } from './system.js';
 import { registerOverview } from './overview.js';
+import { registerMulticast } from './multicast.js';
 
 export function registerRoutes(app: App): void {
   registerAuth(app);
@@ -18,6 +19,7 @@ export function registerRoutes(app: App): void {
   registerOverview(app);
   registerFlows(app);
   registerLinks(app);
+  registerMulticast(app);
   registerPortFlows(app);
   registerReports(app);
   registerStorage(app);

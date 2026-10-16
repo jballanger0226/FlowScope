@@ -1,6 +1,7 @@
 import { enrichPath } from '../analysis/path.js';
 import { notExported } from '../analysis/exported.js';
 import { pathEnv } from './pathenv.js';
+import { multicastPlan } from './multicast.js';
 import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import { parseQuery } from '../query/tokens.js';
@@ -156,6 +157,11 @@ export function registerFlows(app: App): void {
       }
       multicast = { ...detail.multicast, location };
     }
-    c.json({ ...detail, multicast, activity: activity(recs, detail) });
+    // Where the group is expected to go, from the routers' own multicast state. NetFlow only shows the ingress side, so this fills in the receivers.
+    let plan: ReturnType<typeof multicastPlan> | null = null;
+    if (detail.multicast) {
+      try { plan = multicastPlan(app, detail.multicast.group, detail.multicast.source, recs, detail.t0, detail.t1); } catch (e) { app.log.warn('query', `Could not work out where a multicast stream goes: ${(e as Error).message}`); }
+    }
+    c.json({ ...detail, multicast, plan, activity: activity(recs, detail) });
   });
 }
