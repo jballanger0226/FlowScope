@@ -82,7 +82,8 @@ const secs = (v: SnmpValue | undefined): number | null => { const n = num(v); re
 const isIp = (s: string) => /^\d{1,3}(\.\d{1,3}){3}$/.test(s);
 
 /** Reads the multicast routing table. Returns null when the device publishes none of it. */
-export async function readMulticast(c: SnmpClient, now = Date.now()): Promise<Multicast | null> {
+/** `cisco` says whether to ask for Cisco's rate and flag table; other vendors are never asked for it. */
+export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = true): Promise<Multicast | null> {
   const [up, inIf, expiry, pkts, proto] = await Promise.all([4, 5, 7, 8, 11].map(n => col(c, `${ROUTE}.${n}`)));
   const [nhState, nhPkts] = await Promise.all([6, 11].map(n => col(c, `${NEXTHOP}.${n}`)));
   const routes = new Map<string, McRoute>();
@@ -116,10 +117,10 @@ export async function readMulticast(c: SnmpClient, now = Date.now()): Promise<Mu
   for (const r of routes.values()) r.oifs.sort((a, b) => a.ifIndex - b.ifIndex);
 
   // Cisco adds the measured rate and the flags
-  const bps = await col(c, `${CROUTE}.19`);
-  let cisco = false;
+  const bps = cisco ? await col(c, `${CROUTE}.19`) : EMPTY;
+  let haveCisco = false;
   if (bps.size) {
-    cisco = true;
+    haveCisco = true;
     for (const [idx, v] of bps) { const p = idx.split('.'); const r = routes.get(keyOf(ip4(p, 0), ip4(p, 4))); if (r) r.bps = num(v); }
     const flagCols = await Promise.all(CFLAGS.map(([n]) => col(c, `${CROUTE}.${n}`)));
     CFLAGS.forEach(([, name], i) => {
@@ -152,7 +153,7 @@ export async function readMulticast(c: SnmpClient, now = Date.now()): Promise<Mu
 
   if (!routes.size && !receivers.length) return null;
   const list = [...routes.values()].sort((a, b) => a.group.localeCompare(b.group, undefined, { numeric: true }) || a.source.localeCompare(b.source, undefined, { numeric: true }));
-  return { readAt: now, source: cisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, truncated };
+  return { readAt: now, source: haveCisco ? 'cisco' : 'standard', routes: list, receivers, pimInterfaces, neighbors, truncated };
 }
 
 /** What a device's multicast state says about one group: the routes for it and the interfaces its receivers sit behind. */

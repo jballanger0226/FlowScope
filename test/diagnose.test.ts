@@ -139,3 +139,36 @@ test('checks are listed by group, and vendors are told from the sysObjectID or t
   assert.equal(vendorOf('1.3.6.1.4.1.99999.1', 'Some box'), 'other');
   assert.equal(expectFor({ role: 'switch', cisco: false, objectId: '1.3.6.1.4.1.2011.2.23.1' }).sensors, 'must');
 });
+
+/* ------------------------------------------------------------------ multicast routing check, run on rows of a real Catalyst 9300 walk */
+import fs from 'node:fs';
+import path from 'node:path';
+const MC = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'test', 'fixtures', 'mcast-c9300.json'), 'utf8')) as Record<string, SnmpValue>;
+function mcDevice(rows: Record<string, SnmpValue>) {
+  return {
+    column: async (col: string) => { const m = new Map<string, SnmpValue>(); for (const [o, v] of Object.entries(rows)) if (o.startsWith(col + '.')) m.set(o.slice(col.length + 1), v); return m; },
+    get: async () => new Map() as never
+  };
+}
+const CAT = { role: 'switch', cisco: true, objectId: '1.3.6.1.4.1.9.1.2504' };
+
+test('multicast routing: a Layer 3 switch with the tables passes, with counts', async () => {
+  const c = byId(await runChecks(mcDevice(MC), CAT)).mcast!;
+  assert.equal(c.state, 'ok'); assert.equal(c.group, 'routing'); assert.equal(c.count, 25);
+  assert.match(c.detail, /25 routes for 13 groups/); assert.match(c.detail, /19 PIM interfaces/);
+});
+
+test('multicast routing: without the Cisco table or PIM-MIB it warns and says what is lost', async () => {
+  const noCisco = byId(await runChecks(mcDevice(Object.fromEntries(Object.entries(MC).filter(([o]) => !o.startsWith('1.3.6.1.4.1.9.10.')))), CAT)).mcast!;
+  assert.equal(noCisco.state, 'warn'); assert.match(noCisco.detail, /no rates/); assert.match(noCisco.hint ?? '', /CISCO-IPMROUTE-MIB/);
+  const noPim = byId(await runChecks(mcDevice(Object.fromEntries(Object.entries(MC).filter(([o]) => !o.startsWith('1.3.6.1.3.61.')))), CAT)).mcast!;
+  assert.equal(noPim.state, 'warn'); assert.match(noPim.detail, /no rendezvous points/);
+});
+
+test('multicast routing: a device that routes no multicast is not applicable; access points are not asked', async () => {
+  const none = byId(await runChecks(mcDevice({}), CAT)).mcast!;
+  assert.equal(none.state, 'na'); assert.match(none.detail, /does not route multicast/);
+  const ap = byId(await runChecks(mcDevice({}), { role: 'ap', cisco: false, objectId: '1.3.6.1.4.1.14823.1.1.1', descr: 'ArubaOS Instant' }));
+  assert.equal(ap.mcast, undefined);
+  assert.equal(expectFor({ role: 'switch', cisco: false, objectId: '1.3.6.1.4.1.8072.3.2.10', descr: 'Linux' }).mcast, false, 'a plain Layer 2 switch is not asked');
+});

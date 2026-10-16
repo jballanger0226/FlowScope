@@ -114,7 +114,7 @@ export class Poller {
     let c: SnmpClient | null = null;
     try {
       c = this.devs.open(d);
-      const m = await readMulticast(c);
+      const m = await readMulticast(c, Date.now(), (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.'));
       this.devs.saveMulticast(d.id, m);
       this.mcastEvery.set(d.id, m ? 115_000 : 3600_000);
       if (m) this.log.debug?.('snmp', `Multicast state from ${d.name}: ${m.routes.length} routes, ${m.receivers.length} IGMP receivers`);
