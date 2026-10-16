@@ -429,7 +429,7 @@ export function diffExtra(prev: IfExtra | undefined, cur: IfExtra): IfExtra {
   return { ...cur, delta, dtSec: Math.round(dt) };
 }
 
-/** Plain-language problems with a link, from its latest read. Half duplex on a fast link, errors still arriving, and broadcast or multicast storms. */
+/** Plain-language problems with a link, from its latest read. Half duplex on a fast link, errors still arriving, broadcast storms, and anything storm control suppressed. */
 export function linkWarnings(x: IfExtra, oper: number, speedMbps: number): { level: Level; text: string }[] {
   const out: { level: Level; text: string }[] = [];
   if (oper === 1 && x.duplex === 'half' && speedMbps >= 1000) out.push({ level: 'bad', text: 'Half duplex on a gigabit or faster link. Almost always a duplex mismatch or a bad cable.' });
@@ -440,9 +440,9 @@ export function linkWarnings(x: IfExtra, oper: number, speedMbps: number): { lev
     if (bad > 0) out.push({ level: bad >= 100 ? 'bad' : 'warn', text: `${bad} frame errors (CRC, alignment or symbol) arrived in the last ${x.dtSec < 120 ? x.dtSec + ' seconds' : Math.round(x.dtSec / 60) + ' minutes'}. Check the cable, the optic and the duplex setting.` });
     const late = (d.late ?? 0) + (d.excessive ?? 0);
     if (late > 0) out.push({ level: 'bad', text: `${late} late or excessive collisions in the last interval. That only happens on half duplex links, so check for a duplex mismatch.` });
-    const bc = ((d.inBc ?? 0) + (d.outBc ?? 0)) / x.dtSec, mc = ((d.inMc ?? 0) + (d.outMc ?? 0)) / x.dtSec;
+    // Multicast is never flagged by its rate alone: video and market data are meant to be busy. A multicast flood shows up as storm control drops, queue drops or discards below.
+    const bc = ((d.inBc ?? 0) + (d.outBc ?? 0)) / x.dtSec;
     if (bc >= 1000) out.push({ level: bc >= 5000 ? 'bad' : 'warn', text: `${Math.round(bc).toLocaleString('en-US')} broadcast packets per second. A sustained rate like this usually means a loop or a misbehaving host.` });
-    if (mc >= 5000) out.push({ level: 'warn', text: `${Math.round(mc).toLocaleString('en-US')} multicast packets per second.` });
     const span = x.dtSec < 120 ? x.dtSec + ' seconds' : Math.round(x.dtSec / 60) + ' minutes';
     if ((d.outQDrops ?? 0) > 0) out.push({ level: 'warn', text: `${d.outQDrops!.toLocaleString('en-US')} packets were dropped from this port's output queue in the last ${span}. The port is congested: traffic is arriving faster than it can be sent.` });
     if ((d.inQDrops ?? 0) > 0) out.push({ level: 'warn', text: `${d.inQDrops!.toLocaleString('en-US')} packets were dropped from the input queue in the last ${span}. The device could not keep up with what this port received.` });

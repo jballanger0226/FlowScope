@@ -142,6 +142,14 @@ test('interface link quality: totals, deltas and warnings', async () => {
   assert.deepEqual(linkWarnings({ ...a, duplex: 'full', delta: null }, 1, 1000), []);
 });
 
+test('a busy multicast port is not flagged by its rate alone', () => {
+  const x = { readAt: 1, totals: {}, delta: { inMc: 3_000_000, outMc: 3_000_000 }, dtSec: 60, duplex: 'full', admin: 1 } as unknown as IfExtra;   // 100,000 multicast packets per second
+  assert.deepEqual(linkWarnings(x, 1, 10_000), []);
+  // but storm control actually suppressing packets still is
+  const w = linkWarnings({ ...x, delta: { ...x.delta, storm: 40 } } as IfExtra, 1, 10_000);
+  assert.equal(w.length, 1); assert.match(w[0].text, /Storm control/);
+});
+
 test('vendor CPU, memory and session readers', async () => {
   const fg = await readResources(agent({ '1.3.6.1.4.1.12356.101.4.1.3.0': 23, '1.3.6.1.4.1.12356.101.4.1.4.0': 61, '1.3.6.1.4.1.12356.101.4.1.5.0': 4194304, '1.3.6.1.4.1.12356.101.4.1.8.0': 5120 }), '1.3.6.1.4.1.12356.101.1.1', 1);
   assert.equal(fg!.cpuPct, 23); assert.equal(fg!.memPct, 61); assert.equal(fg!.memTotal, 4294967296); assert.equal(fg!.sessions, 5120); assert.match(fg!.source, /FORTINET/);
