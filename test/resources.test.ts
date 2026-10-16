@@ -162,3 +162,14 @@ test('stored resources, interface MACs and subnets come back through the device 
   cdb.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('a front-panel port is kept even when the device reports it with a virtual interface type', async () => {
+  const rows: Record<string, SnmpValue> = {
+    '1.3.6.1.2.1.2.2.1.2.78': 'TwentyFiveGigE1/1/14', '1.3.6.1.2.1.31.1.1.1.1.78': 'Twe1/1/14', '1.3.6.1.2.1.2.2.1.3.78': 53, '1.3.6.1.2.1.2.2.1.8.78': 1,
+    '1.3.6.1.2.1.2.2.1.2.90': 'Vlan90', '1.3.6.1.2.1.31.1.1.1.1.90': 'Vl90', '1.3.6.1.2.1.2.2.1.3.90': 53, '1.3.6.1.2.1.2.2.1.8.90': 1,
+    '1.3.6.1.2.1.2.2.1.2.91': 'Loopback0', '1.3.6.1.2.1.31.1.1.1.1.91': 'Lo0', '1.3.6.1.2.1.2.2.1.3.91': 24, '1.3.6.1.2.1.2.2.1.8.91': 1
+  };
+  const c = { column: async (col: string) => { const m = new Map<string, SnmpValue>(); for (const [o, v] of Object.entries(rows)) if (o.startsWith(col + '.')) m.set(o.slice(col.length + 1), v); return m; } } as unknown as SnmpClient;
+  const r = await readInterfaces(c, false);
+  assert.deepEqual(r.map(i => i.name), ['Twe1/1/14'], 'the port stays; the VLAN and loopback interfaces are still hidden');
+});

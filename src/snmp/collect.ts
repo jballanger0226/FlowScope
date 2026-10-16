@@ -57,6 +57,9 @@ export function macText(v: SnmpValue | undefined): string {
  * `keepVlans`: routers and firewalls carry their traffic on VLAN subinterfaces, which usually have no description. They are kept there,
  * where on a switch the same interface types are the per-VLAN virtual interfaces that nobody watches.
  */
+/** A front-panel port by name (Gi1/0/1, Te1/1/1, Twe1/1/14, Hu1/0/49, Eth1/1, ...). Some devices report these with a virtual interface type, and they must not be dropped as if they were VLAN or tunnel interfaces. */
+export const PORT_NAME = /^(Fa|Gi|Te|Twe|Fo|Hu|Eth|Ap|Ten|Twenty|Forty|Hundred|Gig|Fast)[a-z]*\d/i;
+
 export async function readInterfaces(c: SnmpClient, keepVlans = false): Promise<IfaceInfo[]> {
   const [descr, type, speed, oper, name, high, alias, phys] = await Promise.all([
     c.column(OID.ifDescr), c.column(OID.ifType), c.column(OID.ifSpeed), c.column(OID.ifOperStatus),
@@ -69,7 +72,7 @@ export async function readInterfaces(c: SnmpClient, keepVlans = false): Promise<
     if (!Number.isInteger(idx)) continue;
     const t = num(type.get(k));
     const vlanType = t === 135 || t === 136;
-    if (IF_TYPE_IGNORED.has(t) && !toStr(alias.get(k) ?? null) && !(keepVlans && vlanType)) continue;
+    if (IF_TYPE_IGNORED.has(t) && !toStr(alias.get(k) ?? null) && !(keepVlans && vlanType) && !PORT_NAME.test(toStr(name.get(k) ?? null))) continue;
     out.push({
       index: idx, name: toStr(name.get(k) ?? null) || toStr(d), descr: toStr(d), alias: toStr(alias.get(k) ?? null), speedMbps: speedMbpsOf(num(high.get(k)), num(speed.get(k))),
       oper: num(oper.get(k), 4), type: t, mac: macText(phys.get(k))
