@@ -39,6 +39,20 @@ export function vendorOf(objectId = '', descr = '', cisco = false): Vendor {
   return /freebsd|linux|opnsense|pfsense|net-snmp/i.test(descr) ? 'netsnmp' : 'other';
 }
 
+/**
+ * Where to see the full IGMP snooping membership on a switch, which SNMP does not give. Only commands known to be right are listed; any other
+ * vendor gets none, and the page then points at the switch's IGMP snooping table in general.
+ */
+export function igmpHint(vendor: Vendor, descr = ''): { vendor: Vendor; platform: string; command: string | null } {
+  switch (vendor) {
+    case 'cisco': return { vendor, platform: /nx-os/i.test(descr) ? 'NX-OS' : /ios[ -]?xe|iosxe/i.test(descr) ? 'IOS XE' : 'IOS', command: 'show ip igmp snooping groups' };
+    case 'juniper': return { vendor, platform: 'Junos', command: 'show igmp snooping membership' };
+    case 'arista': return { vendor, platform: 'EOS', command: 'show ip igmp snooping groups' };
+    case 'h3c': return { vendor, platform: 'Comware', command: 'display igmp-snooping group' };
+    default: return { vendor, platform: '', command: null };
+  }
+}
+
 /** Which MIBs this kind of device should be expected to publish. Everything else is not looked for, so a Cisco switch is never asked about Juniper's MIBs. */
 export interface Expect {
   vendor: Vendor; ap: boolean; l2: boolean; l3: boolean;

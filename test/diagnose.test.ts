@@ -202,3 +202,13 @@ test('Cisco tables: ones the device does not publish are not applicable and say 
   assert.equal(expectFor({ role: 'switch', cisco: true, objectId: '1.3.6.1.4.1.9.1.2504', descr: 'Cisco' }).cSwitch, true);
   assert.equal(expectFor({ role: 'router', cisco: true, objectId: '1.3.6.1.4.1.9.1.1', descr: 'Cisco' }).cSwitch, false, 'a router has no DHCP snooping or stack');
 });
+
+test('where to find the full IGMP snooping membership depends on the vendor', async () => {
+  const { igmpHint } = await import('../src/snmp/diagnose.js');
+  assert.deepEqual(igmpHint('cisco', 'Cisco IOS Software [Cupertino], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.4'), { vendor: 'cisco', platform: 'IOS XE', command: 'show ip igmp snooping groups' });
+  assert.equal(igmpHint('cisco', 'Cisco NX-OS(tm) n9000, Software').platform, 'NX-OS');
+  assert.equal(igmpHint('cisco', 'Cisco IOS Software, C3750 Software').platform, 'IOS');
+  assert.equal(igmpHint('juniper', 'Juniper Networks, Inc. ex4300-48t').command, 'show igmp snooping membership');
+  assert.equal(igmpHint('h3c', '').command, 'display igmp-snooping group');
+  assert.equal(igmpHint('mikrotik', 'RouterOS').command, null, 'a vendor with no known command gets none, not a guess');
+});

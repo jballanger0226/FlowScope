@@ -2,6 +2,7 @@ import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import type { FlowRecord } from '../collector/types.js';
 import { int } from './util.js';
+import { igmpHint, vendorOf } from '../snmp/diagnose.js';
 import { buildPlan, type Plan } from '../snmp/multicast_plan.js';
 
 /** A multicast state older than this is shown as out of date */
@@ -83,7 +84,7 @@ export function registerMulticast(app: App): void {
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))
       })),
-      hosts,
+      hosts, igmpHint: igmpHint(vendorOf(d.sys_object_id ?? '', d.sys_descr ?? '', (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.')), d.sys_descr ?? ''),
       load: (m.interfaces ?? []).filter(i => (i.inOctets ?? 0) > 0 || (i.outOctets ?? 0) > 0).map(i => ({ name: name(i.ifIndex), inBps: i.inBps, outBps: i.outBps, inOctets: i.inOctets, outOctets: i.outOctets, ttl: i.ttl, rateLimit: i.rateLimit }))
         .sort((a, b) => (b.inBps ?? 0) + (b.outBps ?? 0) - (a.inBps ?? 0) - (a.outBps ?? 0) || (b.inOctets ?? 0) + (b.outOctets ?? 0) - (a.inOctets ?? 0) - (a.outOctets ?? 0)),
       pim: { interfaces: m.pimInterfaces.map(p => ({ name: name(p.ifIndex), mode: p.mode, dr: p.dr })), neighbors: m.neighbors.map(n => ({ address: n.address, ifName: name(n.ifIndex) })) }
