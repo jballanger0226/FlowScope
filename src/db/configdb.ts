@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { secureDataDir, secureDbFiles } from '../perms.js';
 
+/** Append only. A database remembers how many of these it has run, so a new one goes at the end, never in the middle. */
 const MIGRATIONS: string[] = [
   `
   CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -187,10 +188,6 @@ const MIGRATIONS: string[] = [
   ALTER TABLE class_defs ADD COLUMN sets TEXT;
   `,
   `
-  -- strict-priority queues (cbQosQueueingCfgPriorityEnabled), so a priority class nearing its limit can be flagged before it starts dropping
-  ALTER TABLE class_defs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
-  `,
-  `
   -- each interface's own MAC address (so a MAC seen in a flow can be named), the netmask of each device address, and the latest uptime / CPU / memory / disk reading of each device
   ALTER TABLE interfaces ADD COLUMN mac TEXT NOT NULL DEFAULT '';
   ALTER TABLE device_ips ADD COLUMN mask TEXT NOT NULL DEFAULT '';
@@ -261,7 +258,12 @@ const MIGRATIONS: string[] = [
   ALTER TABLE iface_extra_1h ADD COLUMN resets INTEGER;
   ALTER TABLE iface_extra_1h ADD COLUMN storm INTEGER;
   ALTER TABLE iface_extra_1h ADD COLUMN port_sec INTEGER;
+  `,
   `
+  -- strict-priority queues (cbQosQueueingCfgPriorityEnabled), so a priority class nearing its limit can be flagged before it starts dropping
+  ALTER TABLE class_defs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+  `
+
 ];
 
 export class ConfigDb {
