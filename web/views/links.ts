@@ -700,6 +700,8 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
   const bands = evs.map(e => ({ a: e.a - s.step / 2, b: e.b + s.step / 2 }));
   const fmtT = axisTime(spanMs);
   const mk = (pick: (p: SeriesRes['classes'][0]['points'][0]) => number): Series[] => shown.map(c => ({ name: c.cls, color: classColor(c.cls, names), points: c.points.map(p => ({ t: p.ts, v: pick(p) })) }));
+  const speedBps = (itf.speedMbps || 0) * 1e6;
+  const clsUtil: Series[] = speedBps > 0 ? mk(p => 100 * p.sentBps / speedBps) : [];
   const peak = (c: SeriesRes['classes'][0]) => Math.max(0, ...c.points.map(p => p.dropPct));
   const dropTs = [...new Set(s.classes.flatMap(c => c.points.filter(p => p.dropPps > 0 || p.dropPct > 0).map(p => p.ts)))];
   const match = cpuMatch([{ kind: 'Queue drops', ts: dropTs }, { kind: 'Discards', ts: s.util.points.filter(p => p.disc > 0).map(p => p.ts) }], from, to, fmtT);
@@ -713,19 +715,19 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
         h('i', { class: 'sw', style: `background:${classColor(c.cls, names)};margin:0` }), h('span', null, c.cls), h('span', { class: 'dim' }, 'peak ' + pct(peak(c), 2))))) : null,
     match.note,
     chartGrid((names.length ? 4 : 2) + (match.chart ? 1 : 0), size => [
+      lineChart({
+        ...size, sync: 'iface', onZoom: zoomIf, title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut)), ...clsUtil.flatMap(c => c.points.map(p => p.v))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
+        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }, ...clsUtil], aria: `Utilisation of ${itf.name}, with each queue class`
+      }),
+      lineChart({
+        ...size, sync: 'iface', onZoom: zoomIf, title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)), ...mk(p => p.sentBps).flatMap(c => c.points.map(p => p.v)))), from, to, fmtT,
+        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }, ...mk(p => p.sentBps)], aria: `Throughput of ${itf.name} in bits per second, with each queue class`
+      }),
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Packets dropped (% of the class)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '%', series: mk(p => p.dropPct), from, to, threshold: dropThr, bands, fmtT, fmtV: v => pct(v, 2), aria: `Drop percentage per class on ${itf.name}` }) : null,
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Bytes dropped (per second)', unit: v => bytes(v) + '/s', series: mk(p => p.dropBps / 8), from, to, bands, fmtT, aria: `Bytes dropped per class on ${itf.name}` }) : null,
-      lineChart({
-        ...size, sync: 'iface', onZoom: zoomIf, title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
-        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }], aria: `Utilisation of ${itf.name}`
-      }),
-      lineChart({
-        ...size, sync: 'iface', onZoom: zoomIf, title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)))), from, to, fmtT,
-        series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }], aria: `Throughput of ${itf.name} in bits per second`
-      }),
       match.chart ? match.chart.build(size) : null
     ]),
-    h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
+    h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Utilisation and throughput also draw a line for each queue class that is switched on above (what the class sent). Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
     h('div', { class: 'col', style: 'gap:6px' },
       h('b', null, 'Drop events above the threshold'),
       evs.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:150px 210px 90px 110px 1fr;--w:760px' }, evs.slice(0, 30).map((e, i) => h('div', { key: i, class: 'tr' },
