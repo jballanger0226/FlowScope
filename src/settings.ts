@@ -29,6 +29,13 @@ export const DEFAULTS = {
   /** Limits on where SNMP-role users can send stored credentials. Empty allows any address. */
   snmpAccess: { allowedNets: '' },
   alerts: { util: 90, drop: 1 },
+  /** Automatic HTTPS certificate from an ACME CA (Let's Encrypt or an internal one). Secrets are stored encrypted. */
+  acme: {
+    enabled: false, preset: 'letsencrypt' as 'letsencrypt' | 'letsencrypt-staging' | 'custom', directoryUrl: '', email: '', tosAgreed: false,
+    names: [] as string[], challenge: 'http-01' as 'http-01' | 'dns-01', httpPort: 80,
+    dns: { provider: 'manual' as 'manual' | 'cloudflare', cloudflareTokenEnc: '', waitSec: 30 },
+    eabKid: '', eabHmacEnc: '', caPem: '', keyType: 'ecdsa-p256', autoRenew: true, renewDays: 30
+  },
   /** Reading MAC address tables, ARP and LLDP/CDP from the polled devices to find which port a host is on. */
   hosts: { enabled: true, intervalSec: 300, keepDays: 14 },
   aaa: {
