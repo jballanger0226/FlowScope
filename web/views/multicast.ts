@@ -21,6 +21,7 @@ interface Route {
 interface Detail {
   igmpHint?: IgmpHint;
   device: { id: number; name: string; ip: string; role: string; model?: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
+  pimIssues?: { level: 'warn' | 'info'; kind: string; text: string }[];
   pim: { interfaces: { name: string; mode: string; dr: string | null }[]; neighbors: { address: string; ifName: string }[] };
   hosts?: Record<string, HostAt | null>;
   load?: { name: string; inBps: number | null; outBps: number | null; inOctets: number | null; outOctets: number | null; ttl: number | null; rateLimit: number | null }[];
@@ -119,8 +120,8 @@ function oilRow(r: Route, o: Out): VNode {
   const hk = `${keyOf(r)}|${o.ifIndex}`, members = o.members ?? [], many = members.length > 1, on = openHosts.has(hk);
   const joined = (): VNode | string => {
     if (o.loopback && !o.joins.some(j => j.reporter)) return 'the router joined the group itself';
-    if (many) return h('button', { type: 'button', class: 'rowbtn', 'aria-expanded': on, title: incomplete(), onclick: () => toggleSet(openHosts, hk) }, `${on ? '▾' : '▸'} ${num(members.length)} hosts`);
-    if (o.joins.length) return h('span', { title: incomplete() }, o.joins.slice(0, 4).map(j => (j.self ? 'this router' : (j.reporter ?? '?') + (at(j.reporter) ? ` on ${at(j.reporter)}` : '')) + (j.expirySec !== null ? ` (${sec(j.expirySec)})` : '')).join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : ''));
+    if (many) return h('button', { type: 'button', class: 'rowbtn', 'aria-expanded': on, title: o.neighbor ? undefined : incomplete(), onclick: () => toggleSet(openHosts, hk) }, `${on ? '▾' : '▸'} ${num(members.length)} hosts`);
+    if (o.joins.length) return h('span', { title: o.neighbor ? undefined : incomplete() }, o.joins.slice(0, 4).map(j => (j.self ? 'this router' : (j.reporter ?? '?') + (at(j.reporter) ? ` on ${at(j.reporter)}` : '')) + (j.expirySec !== null ? ` (${sec(j.expirySec)})` : '')).join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : ''));
     return h('span', { class: 'dim' }, o.neighbor ? 'via the neighbour' : 'none seen');
   };
   return h('div', { key: o.ifIndex },
@@ -131,7 +132,7 @@ function oilRow(r: Route, o: Out): VNode {
         h('span', { class: 'mono', style: 'font-size:12px' }, joined()),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts))),
     many && on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
-      note(incomplete(), 'warn'),
+      o.neighbor ? null : note(incomplete(), 'warn'),
       h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 120px 110px;--w:560px' },
         h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Last reported', 'Known for'].map(t => h('span', null, t))),
         members.map(m => h('div', { key: m.ip, class: 'tr' },
@@ -243,6 +244,7 @@ export function render(): VNode {
         btn('Refresh', { small: true, onclick: () => { void loadDevices().then(() => loadDetail()); } })),
       cur ? summary(cur) : null,
       detail ? pimSummary(detail) : null,
+      ...(detail?.pimIssues ?? []).map(i => note(i.text, i.level === 'warn' ? 'warn' : 'info')),
       cur ? h('div', { class: 'dim', style: 'font-size:12.5px' }, `Hosts that joined come from the router's IGMP cache over SNMP and are not a complete list. For the full membership, ${whereToLook()}.`) : null,
       cur?.truncated ? note('This device holds more routes than FlowScope keeps. The list is cut off.', 'warn') : null,
       h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },

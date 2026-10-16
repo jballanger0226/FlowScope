@@ -1,3 +1,4 @@
+import { pimIssues, type PimPeer } from '../snmp/pimcheck.js';
 import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import type { FlowRecord } from '../collector/types.js';
@@ -64,6 +65,11 @@ export function registerMulticast(app: App): void {
     const joins = new Map<string, typeof m.receivers>();
     for (const r of m.receivers) { const k = r.group + '|' + r.ifIndex; const a = joins.get(k) ?? []; a.push(r); joins.set(k, a); }
     const now = Date.now();
+    // the other polled devices, so the far end of each PIM link can be compared
+    const ipsOf = new Map<number, Map<string, number>>();
+    for (const r of app.cdb.db.prepare('SELECT dev_id, ip, if_index FROM device_ips').all() as unknown as { dev_id: number; ip: string; if_index: number | null }[]) { if (r.if_index === null) continue; const a = ipsOf.get(r.dev_id) ?? new Map<string, number>(); a.set(r.ip, r.if_index); ipsOf.set(r.dev_id, a); }
+    const peers: PimPeer[] = [];
+    for (const o of app.devices.rows()) { if (o.id === id) continue; const om = app.devices.multicast(o.id); const ips = ipsOf.get(o.id); if (om && ips) peers.push({ name: o.name, mc: om, ips, ifName: namer(app, o.id, om) }); }
     // Where the hosts named in this device's state are plugged in. IGMP reports the VLAN interface and the last host that reported, not the switch port,
     // so a reporter or a source is looked up in host tracking (ARP, MAC tables, DHCP snooping).
     const ips = new Set<string>();
@@ -89,6 +95,7 @@ export function registerMulticast(app: App): void {
       hosts, igmpHint: igmpHint(vendorOf(d.sys_object_id ?? '', d.sys_descr ?? '', (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.')), d.sys_descr ?? ''),
       load: (m.interfaces ?? []).filter(i => (i.inOctets ?? 0) > 0 || (i.outOctets ?? 0) > 0).map(i => ({ name: name(i.ifIndex), inBps: i.inBps, outBps: i.outBps, inOctets: i.inOctets, outOctets: i.outOctets, ttl: i.ttl, rateLimit: i.rateLimit }))
         .sort((a, b) => (b.inBps ?? 0) + (b.outBps ?? 0) - (a.inBps ?? 0) - (a.outBps ?? 0) || (b.inOctets ?? 0) + (b.outOctets ?? 0) - (a.inOctets ?? 0) - (a.outOctets ?? 0)),
+      pimIssues: pimIssues(m, name, peers),
       pim: { interfaces: m.pimInterfaces.map(p => ({ name: name(p.ifIndex), mode: p.mode, dr: p.dr })), neighbors: m.neighbors.map(n => ({ address: n.address, ifName: name(n.ifIndex) })) }
     });
   });

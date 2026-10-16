@@ -522,13 +522,19 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
     const wob = Math.round(((Math.sin(now / 600_000 + id) + 1) / 2) * 3);
     app.devices.saveData(id, 'procs', { readAt: now, top: [{ name: 'linux_iosd-imag', pid: 7813, five: 9 + wob, one: 8, fiveMin: 7 }, { name: 'fed main event', pid: 6121, five: 6, one: 5, fiveMin: 5 }, { name: 'SNMP ENGINE', pid: 4172, five: 3 + wob, one: 4, fiveMin: 3 }, { name: 'IP Input', pid: 220, five: 1, one: 1, fiveMin: 1 }], snmpFive: 3 + wob, snmpOne: 4 }, now);
   }
+  if (d.name === 'dc-leaf-07') {
+    // the far end of the spine's downlink, running dense where the spine runs sparse
+    const up = ifIdx('Eth1/52') ?? 0;
+    app.cdb.db.prepare('UPDATE device_ips SET if_index = ? WHERE dev_id = ? AND ip = ?').run(up, id, d.ip);
+    app.devices.saveMulticast(id, { readAt: now, source: 'standard', routes: [], receivers: [], pimInterfaces: [{ ifIndex: up, mode: 'dense', dr: '10.255.1.7' }], neighbors: [{ address: '10.255.1.1', ifIndex: up }], truncated: false });
+  }
   if (d.name === 'dc-spine-01') {
     // multicast state: video and market-data groups from a handful of encoders, receivers on both downlinks
     const e7 = ifIdx('Eth1/7') ?? 0, e9 = ifIdx('Eth1/9') ?? 0;
     const routes = [] as any[]; const receivers = [] as any[];
     for (let g = 0; g < 130; g++) {
       const gi = Math.floor(g / 5), group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`; const src = `10.9.0.${30 + (g % 9)}`;
-      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: g % 11 === 0 ? 9 : 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: '10.255.0.1',
+      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: g % 11 === 0 ? 9 : 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: g % 11 === 0 ? null : '10.255.0.1',
         oifs: [{ ifIndex: e9, forwarding: g % 5 !== 0, pkts: 80_000 * (g + 1) }] });
       if (g % 3 === 0) receivers.push({ group, ifIndex: e9, lastReporter: `10.1.4.${20 + (g % 40)}`, expirySec: 200, self: false });
     }
