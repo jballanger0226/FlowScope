@@ -7,6 +7,7 @@ import { BUILD } from '../buildinfo.js';
 import { HttpError } from '../server/http.js';
 import { AuthError, ROLE_RANK } from '../auth/service.js';
 import { CertError } from '../tls/manager.js';
+import { AcmeError } from '../tls/acme.js';
 import type { KeyType } from '../tls/x509.js';
 import type { AaaSettings, Provider, Role, Service } from '../settings.js';
 import { inContainer } from '../config.js';
@@ -18,7 +19,7 @@ const KEY_TYPES: KeyType[] = ['ecdsa-p256', 'ecdsa-p384', 'ecdsa-p521', 'rsa-204
 
 async function guard<T>(fn: () => T | Promise<T>): Promise<T> {
   try { return await fn(); } catch (e) {
-    if (e instanceof CertError) throw new HttpError(400, e.message);
+    if (e instanceof CertError || e instanceof AcmeError) throw new HttpError(400, e.message);
     if (e instanceof AuthError) throw new HttpError(e.status, e.message);
     throw e;
   }
@@ -167,6 +168,37 @@ export function registerAdmin(app: App): void {
     c.json({ status: app.certs.status() });
   });
   w.post('/api/admin/cert/discard', 'admin', c => { app.certs.discardStaged(); app.log.audit(who(c), 'Discarded the staged HTTPS certificate'); c.json({ status: app.certs.status() }); });
+
+  /* ---- Automatic certificate (ACME) ---- */
+  const oneOf = <T extends string>(v: unknown, list: readonly T[], what: string): T => { if (!list.includes(v as T)) throw new HttpError(400, `${what} must be one of: ${list.join(', ')}`); return v as T; };
+  w.get('/api/admin/acme', 'admin', c => c.json(app.acme.status()));
+  w.put('/api/admin/acme', 'admin', async c => {
+    const b = await c.body<Record<string, any>>(100_000);
+    const secret = (v: unknown) => (v === null ? null : typeof v === 'string' && v.trim() ? str(v, 2000) : undefined);
+    const names = Array.isArray(b.names) ? b.names.map((x: unknown) => str(x, 255)) : str(b.names, 4000).split(/[\s,;]+/).filter(Boolean);
+    await guard(() => app.acme.configure({
+      enabled: b.enabled === true, preset: oneOf(b.preset, ['letsencrypt', 'letsencrypt-staging', 'custom'] as const, 'preset'), directoryUrl: str(b.directoryUrl, 500), email: str(b.email, 255), tosAgreed: b.tosAgreed === true,
+      names, challenge: oneOf(b.challenge, ['http-01', 'dns-01'] as const, 'challenge'), httpPort: int(b.httpPort, 80, 1, 65535),
+      dns: { provider: oneOf(b.dnsProvider, ['manual', 'cloudflare'] as const, 'DNS provider'), waitSec: int(b.dnsWaitSec, 30, 0, 600) }, cloudflareToken: secret(b.cloudflareToken),
+      eabKid: str(b.eabKid, 500), eabHmac: secret(b.eabHmac), caPem: str(b.caPem, 100_000), keyType: str(b.keyType, 20), autoRenew: b.autoRenew !== false, renewDays: int(b.renewDays, 30, 1, 60)
+    }));
+    app.log.audit(who(c), `Saved the automatic certificate (ACME) settings: ${b.enabled === true ? 'on' : 'off'}, ${str(b.preset, 30)}, ${names.join(', ') || 'no names'}, ${str(b.challenge, 10)}`);
+    if (b.enabled === true && app.cfg.tls === 'auto') void app.acme.tick();
+    c.json(app.acme.status());
+  });
+  /** Starts the request and answers as soon as it is clear whether it can run, because the CA can take a minute or two. The page follows progress from the status. */
+  const startAcme = async (c: { json(v: unknown): void }, run: () => Promise<void>, what: string, user: string): Promise<void> => {
+    if (app.cfg.tls !== 'auto') throw new HttpError(400, 'HTTPS is switched off for this installation (FLOWSCOPE_TLS=off), so there is no certificate to manage here.');
+    const job = run();
+    const early = await Promise.race([job.then(() => null, (e: Error) => e), new Promise<null>(res => setTimeout(() => res(null), 1500))]);
+    job.catch(() => undefined);
+    if (early instanceof Error) throw new HttpError(400, early.message);
+    app.log.audit(user, what);
+    c.json(app.acme.status());
+  };
+  w.post('/api/admin/acme/issue', 'admin', c => startAcme(c, () => app.acme.issue(), 'Requested an HTTPS certificate from the ACME CA', who(c)));
+  w.post('/api/admin/acme/continue', 'admin', c => startAcme(c, () => app.acme.proceed(), 'Continued the ACME request after adding the DNS records', who(c)));
+  w.post('/api/admin/acme/cancel', 'admin', c => { app.acme.cancel(); app.log.audit(who(c), 'Cancelled the ACME request'); c.json(app.acme.status()); });
 
   /* ---- AAA ---- */
   w.get('/api/admin/aaa', 'admin', c => c.json({ aaa: maskAaa(app.settings.get('aaa')), callback: `${app.cfg.publicUrl || ''}/api/auth/saml/acs` }));

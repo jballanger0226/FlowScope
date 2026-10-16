@@ -11,6 +11,7 @@ import { Settings, type CollectSettings } from './settings.js';
 import { AppLog } from './logger.js';
 import { AuthService } from './auth/service.js';
 import { CertManager } from './tls/manager.js';
+import { AcmeService } from './tls/acme_service.js';
 import { CredentialStore } from './snmp/creds.js';
 import { DeviceService } from './snmp/devices.js';
 import { Discovery } from './snmp/discovery.js';
@@ -33,7 +34,7 @@ export const VERSION = '0.1.0';
 /** The running application: owns every service and wires them together. */
 export class App {
   readonly startedAt = Date.now();
-  cdb!: ConfigDb; secrets!: Secrets; settings!: Settings; log!: AppLog; auth!: AuthService; certs!: CertManager;
+  cdb!: ConfigDb; secrets!: Secrets; settings!: Settings; log!: AppLog; auth!: AuthService; certs!: CertManager; acme!: AcmeService;
   creds!: CredentialStore; devices!: DeviceService; discovery!: Discovery; poller!: Poller; hosts!: HostTracker; collector!: FlowCollector; store!: SwitchableStore; web!: WebServer;
   initialAdminPassword: string | null = null;
   saml = new SamlState();
@@ -61,6 +62,11 @@ export class App {
     this.log = new AppLog(this.cdb, this.settings, cfg.logLevel);
     this.auth = new AuthService(this.cdb, this.settings, this.secrets, this.log);
     this.certs = new CertManager(this.cdb, this.secrets, this.log);
+    this.acme = new AcmeService({
+      settings: this.settings, secrets: this.secrets, log: this.log, bind: cfg.bind, httpPort: () => this.ports.http,
+      install: async (certPem, keyPem, apply) => { await this.certs.stagePem({ certPem, keyPem }); if (apply) this.web.reloadTls(this.certs.apply()); },
+      active: () => { const a = this.certs.status().active; return a ? { notBefore: a.notBefore, notAfter: a.notAfter, fingerprint: a.fingerprint, selfSigned: a.selfSigned } : null; }
+    });
     this.creds = new CredentialStore(this.cdb, this.secrets, this.settings);
     this.collectCache = this.settings.get('collect');
     this.store = new SwitchableStore(await this.openStore(this.resolveBackend(), cfg.clickhouseWaitSec));
@@ -219,6 +225,8 @@ export class App {
     every(60_000, () => this.syncExporters());
     every(3600_000, () => this.auth.sweep());
     every(3600_000, () => { try { this.devices.pruneResourceHistory(this.settings.get('retention').sH); } catch { /* retried next hour */ } });
+    this.web.acmeChallenge = t => this.acme.challengeBody(t);
+    if (cfg.tls === 'auto') every(5 * 60_000, () => this.acme.tick().then(() => undefined));
     every(6 * 3600_000, () => { const a = this.certs.status().active; if (a && a.daysLeft < 30) this.log.warn('cert', `The HTTPS certificate expires in ${a.daysLeft} days`); });
     void this.store.maintain(this.settings.get('retention')).catch(() => undefined);
     this.log.info('app', `FlowScope ${describeVersion(VERSION)} started. Web: ${this.ports.https ? 'https://:' + this.ports.https : ''} ${this.ports.http ? 'http://:' + this.ports.http : ''}; flow ports: ${this.collector.boundPorts.join(', ')}; data: ${cfg.dataDir}`);

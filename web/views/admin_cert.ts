@@ -4,6 +4,7 @@ import { redraw } from '../state.js';
 import { btn, chip, field, kv, msg, note, select, seg, spinner, textArea, textInput } from '../components.js';
 import { stamp } from '../util.js';
 import { download } from '../util.js';
+import * as acme from './admin_acme.js';
 
 interface Cert { slot: string; subject: string; issuer: string; sans: string[]; notBefore: number; notAfter: number; fingerprint: string; keyDesc: string; selfSigned: boolean; createdAt: number; chainLength: number; format: string; expired: boolean; daysLeft: number }
 interface Csr { cn: string; sans: string[]; keyDesc: string; createdAt: number; csrPem: string }
@@ -21,6 +22,7 @@ const KEY_LABEL: Record<string, string> = { 'ecdsa-p256': 'ECDSA P-256 (recommen
 export async function load(): Promise<void> {
   try { st = await get<Status>('/api/admin/cert'); err = ''; if (!csrCn) csrCn = location.hostname; } catch (e) { err = (e as Error).message; }
   redraw();
+  void acme.load();
 }
 
 function readFile(f: File | undefined, as: 'text' | 'b64', done: (s: string, name: string) => void): void {
@@ -83,6 +85,7 @@ export function render(): VNode {
   const ready = fmt === 'pem' ? (checks[0].state === 'ok' && checks[1].state !== 'bad') : !!p12 && !!p12Pw;
   return h('section', { 'aria-label': 'HTTPS certificate', class: 'col', style: 'gap:16px' },
     s.tls === 'off' ? note('HTTPS is switched off for this installation (FLOWSCOPE_TLS=off), usually because a reverse proxy in front of it provides HTTPS. Certificates installed here are stored but not used.', 'warn') : null,
+    acme.render(),
     h('div', { class: 'split' },
       h('div', { class: 'mainp', style: 'flex-basis:460px' }, certCard('Installed certificate', s.active, 'None installed'),
         s.staged ? h('div', { class: 'col', style: 'gap:10px' }, certCard('Staged, not yet in use', s.staged, ''),

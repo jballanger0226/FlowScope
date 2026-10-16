@@ -72,6 +72,8 @@ export class WebServer {
   private routes: Route[] = [];
   private servers: (http.Server | https.Server)[] = [];
   private tlsServers: https.Server[] = [];
+  /** Answers /.well-known/acme-challenge/<token> on the plain-HTTP listener while an ACME certificate request is being checked. Returns the body, or undefined when the token is not open. */
+  acmeChallenge: ((token: string) => string | undefined) | null = null;
   /** How many reverse proxies stand in front (0 = none, the socket address is used). */
   trustProxy = 0;
   private statics = new Map<string, { etag: string; body: Buffer; gz?: Buffer }>();
@@ -250,6 +252,9 @@ export class WebServer {
     }
     if (o.httpPort !== undefined) {
       const s = http.createServer((req, res) => {
+        const ch = this.acmeChallenge ? /^\/\.well-known\/acme-challenge\/([A-Za-z0-9_-]+)$/.exec((req.url || '').split('?')[0]!) : null;
+        const body = ch ? this.acmeChallenge!(ch[1]!) : undefined;
+        if (body !== undefined) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(body); return; }
         if (o.redirectToHttps && out.https) {
           const host = String(req.headers.host || '').replace(/:\d+$/, '');
           res.writeHead(308, { Location: `https://${host}${out.https === 443 ? '' : ':' + out.https}${req.url || '/'}` }); res.end(); return;
