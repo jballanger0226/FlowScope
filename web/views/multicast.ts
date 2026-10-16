@@ -26,7 +26,9 @@ interface Detail {
 let devs: DevSummary[] | null = null; let devError = '';
 let devId = 0; let detail: Detail | null = null; let detailError = ''; let loading = false;
 let query = ''; let onlyForwarding = false; let hideIdle = false;
-const open = new Set<string>();
+const open = new Set<string>();            // routes whose details are shown (group|source)
+const openGroups = new Set<string>();      // groups whose sources are listed
+const closedWhileSearching = new Set<string>();
 const SIZES = [25, 50, 100, 250, 500];
 let page = 0; let pageSize = 50;
 /** Where a host is plugged in, as found by host tracking: "dist-sw-01 Gi1/0/12" */
@@ -38,7 +40,7 @@ export function enter(p: URLSearchParams): void {
   const d = Number(p.get('dev'));
   if (Number.isInteger(d) && d > 0 && d !== devId) { devId = d; detail = null; }
   if (p.has('q')) query = p.get('q') ?? '';
-  const g = p.get('g'); if (g) { open.add(g); query = query || g; }
+  const g = p.get('g'); if (g) { openGroups.add(g); query = query || g; }
   void loadDevices().then(() => { if (devId) void loadDetail(); });
 }
 
@@ -57,7 +59,7 @@ async function loadDetail(): Promise<void> {
   if (my === seq) { loading = false; redraw(); }
 }
 
-function pickDevice(v: string): void { page = 0; devId = Number(v); detail = null; open.clear(); void loadDetail(); }
+function pickDevice(v: string): void { page = 0; devId = Number(v); detail = null; open.clear(); openGroups.clear(); closedWhileSearching.clear(); void loadDetail(); }
 
 const rate = (r: Route): string => (r.bps === null ? '—' : r.bps === 0 ? '0' : bps(r.bps));
 const sec = (s: number | null): string => (s === null ? '—' : s < 90 ? `${s}s` : `${Math.round(s / 60)}m`);
@@ -97,32 +99,66 @@ function expanded(r: Route): VNode {
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts)))))) : note('Nothing is joined downstream of this router, so it forwards this group nowhere.', 'info'));
 }
 
+interface Grp { group: string; routes: Route[] }
+
+const toggleSet = (set: Set<string>, k: string): void => { if (set.has(k)) set.delete(k); else set.add(k); redraw(); };
+const keyDown = (fn: () => void) => (e: KeyboardEvent): void => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } };
+/** Searching opens the groups that match, so the matching sources are in view; a group closed by hand stays closed. */
+const groupOpen = (g: string): boolean => (query ? !closedWhileSearching.has(g) : openGroups.has(g));
+const toggleGroup = (g: string): void => { if (query) toggleSet(closedWhileSearching, g); else toggleSet(openGroups, g); };
+
+/** One route as a row, opening its details (arrival interface, outgoing interfaces and the hosts that joined). */
+function routeRow(r: Route, cols: string, lead: VNode[]): VNode {
+  const k = keyOf(r), on = open.has(k);
+  return h('div', { key: k }, h('div', { class: 'tr', role: 'button', tabindex: 0, 'aria-expanded': on, style: 'cursor:pointer', onclick: () => toggleSet(open, k), onkeydown: keyDown(() => toggleSet(open, k)) },
+    h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾' : '▸'), ...lead,
+    h('span', { class: 'mono', style: 'font-size:12px' }, r.inIf ?? '—'), outChips(r),
+    h('span', { class: 'mono', style: 'font-size:12px' }, rate(r)), h('span', { class: 'mono dim', style: 'font-size:12px' }, r.rp ?? '—')), on ? expanded(r) : null);
+}
+const sourceCell = (r: Route): VNode => h('span', { class: 'mono', style: 'font-size:12px' }, r.sharedTree ? h('span', { class: 'dim', title: 'Any source: the shared tree (*,G)' }, '* (any source)') : r.source, !r.sharedTree && at(r.source) ? h('span', { class: 'dim' }, ` · ${at(r.source)}`) : null);
+
+function groupRows(g: Grp): VNode {
+  const cols = '28px minmax(120px,1fr) minmax(110px,1fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
+  const list = g.routes;
+  // a group with one route needs no middle level: its row opens the route directly
+  if (list.length === 1) return routeRow(list[0]!, cols, [h('span', { class: 'mono', style: 'font-weight:600' }, g.group), sourceCell(list[0]!)]);
+  const on = groupOpen(g.group);
+  const fwd = new Set<string>(); for (const r of list) for (const o of r.out) if (o.forwarding) fwd.add(o.name);
+  const arrives = [...new Set(list.map(r => r.inIf).filter((x): x is string => !!x))];
+  const total = list.some(r => r.bps !== null) ? list.reduce((a, r) => a + (r.bps ?? 0), 0) : null;
+  const rps = [...new Set(list.map(r => r.rp).filter((x): x is string => !!x))];
+  const sub = 'minmax(150px,1.2fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
+  const sorted = [...list].sort((a, b) => (b.bps ?? -1) - (a.bps ?? -1) || a.source.localeCompare(b.source, undefined, { numeric: true }));
+  return h('div', { key: 'g|' + g.group },
+    h('div', { class: 'tr', role: 'button', tabindex: 0, 'aria-expanded': on, style: 'cursor:pointer', onclick: () => toggleGroup(g.group), onkeydown: keyDown(() => toggleGroup(g.group)) },
+      h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾' : '▸'),
+      h('span', { class: 'mono', style: 'font-weight:600' }, g.group),
+      h('span', { class: 'mono', style: 'font-size:12px' }, chip(`${num(list.length)} sources`, 'default', 'Click to list the sources of this group')),
+      h('span', { class: 'mono', style: 'font-size:12px' }, arrives.slice(0, 2).join(', ') + (arrives.length > 2 ? ` +${arrives.length - 2}` : '') || '—'),
+      h('span', { class: 'mono', style: 'font-size:12px' }, [...fwd].slice(0, 4).join(', ') || h('span', { class: 'dim' }, 'nowhere'), fwd.size > 4 ? ` +${fwd.size - 4}` : ''),
+      h('span', { class: 'mono', style: 'font-size:12px' }, total === null ? '—' : total === 0 ? '0' : bps(total)),
+      h('span', { class: 'mono dim', style: 'font-size:12px' }, rps.length ? rps[0] + (rps.length > 1 ? ` +${rps.length - 1}` : '') : '—')),
+    on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 28px;border-left:2px solid var(--line);padding-left:10px' },
+      h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:28px ${sub};--w:760px` },
+        h('div', { class: 'tr head' }, ...['', 'Source', 'Arrives on', 'Sent out of', 'Rate', 'Rendezvous point'].map(t => h('span', null, t))),
+        sorted.map(r => routeRow(r, cols, [sourceCell(r)]))))) : null);
+}
+
 function table(d: Detail): VNode {
   const rows = d.routes.filter(r => matches(r, query) && (!onlyForwarding || r.out.some(o => o.forwarding)) && (!hideIdle || (r.bps ?? 1) > 0));
-  const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const by = new Map<string, Route[]>();
+  for (const r of rows) { const a = by.get(r.group); if (a) a.push(r); else by.set(r.group, [r]); }
+  const groups: Grp[] = [...by].map(([group, routes]) => ({ group, routes }));
+  const pages = Math.max(1, Math.ceil(groups.length / pageSize));
   if (page >= pages) page = pages - 1;
-  const shown = rows.slice(page * pageSize, (page + 1) * pageSize);
+  const shown = groups.slice(page * pageSize, (page + 1) * pageSize);
   const cols = '28px minmax(120px,1fr) minmax(110px,1fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
   return h('div', null,
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:900px` },
       h('div', { class: 'tr head' }, ...['', 'Group', 'Source', 'Arrives on', 'Sent out of', 'Rate', 'Rendezvous point'].map(t => h('span', null, t))),
-      shown.map(r => {
-        const k = keyOf(r), on = open.has(k);
-        return h('div', { key: k }, h('div', {
-          class: 'tr', role: 'button', tabindex: 0, 'aria-expanded': on, style: 'cursor:pointer',
-          onclick: () => { if (on) open.delete(k); else open.add(k); redraw(); },
-          onkeydown: (e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (on) open.delete(k); else open.add(k); redraw(); } }
-        },
-        h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾' : '▸'),
-        h('span', { class: 'mono', style: 'font-weight:600' }, r.group),
-        h('span', { class: 'mono', style: 'font-size:12px' }, r.sharedTree ? h('span', { class: 'dim', title: 'Any source: the shared tree (*,G)' }, '* (any source)') : r.source),
-        h('span', { class: 'mono', style: 'font-size:12px' }, r.inIf ?? '—'),
-        outChips(r),
-        h('span', { class: 'mono', style: 'font-size:12px' }, rate(r)),
-        h('span', { class: 'mono dim', style: 'font-size:12px' }, r.rp ?? '—')), on ? expanded(r) : null);
-      }),
+      shown.map(groupRows),
       !shown.length ? empty(d.routes.length ? 'No routes match the filter.' : 'This device holds no multicast routes.') : null)),
-    rows.length ? pager(rows.length, pages, page * pageSize + 1, page * pageSize + shown.length) : null);
+    groups.length ? pager(groups.length, pages, page * pageSize + 1, page * pageSize + shown.length) : null);
 }
 
 function summary(s: DevSummary): VNode {
@@ -176,7 +212,7 @@ function loadTable(list: NonNullable<Detail['load']>): VNode {
 /** Rows per page and the page buttons. The search runs over every route of the device, not only the page on screen. */
 function pager(total: number, pages: number, from: number, to: number): VNode {
   return h('div', { class: 'row', style: 'gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between', role: 'navigation', 'aria-label': 'Pages' },
-    h('span', { class: 'dim', style: 'font-size:12.5px' }, `${num(from)}–${num(to)} of ${num(total)} route${total === 1 ? '' : 's'}`),
+    h('span', { class: 'dim', style: 'font-size:12.5px' }, `${num(from)}–${num(to)} of ${num(total)} group${total === 1 ? '' : 's'}`),
     h('div', { class: 'row', style: 'gap:8px;align-items:center' },
       h('span', { class: 'dim', style: 'font-size:12.5px' }, 'Rows per page'),
       select(String(pageSize), SIZES.map(n => [String(n), String(n)] as [string, string]), v => { pageSize = Number(v); page = 0; redraw(); }, { aria: 'Rows per page', width: '84px' }),
