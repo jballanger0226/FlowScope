@@ -117,10 +117,10 @@ export function registerMulticast(app: App): void {
         for (const [host, info] of hostMap) { ips.add(host); const e = a.find(x => x.ip === host); if (e) { e.via = 'both'; e.recent = info.recent; } else a.push({ ip: host, lastSeen: null, firstSeen: null, via: 'netflow', recent: info.recent }); }
       }
     }
-    const hosts: Record<string, { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null } | null> = {};
+    const hosts: Record<string, { dev: string; devId: number; ifIndex: number; port: string; vlan: number; confidence: string; neighbor: string | null } | null> = {};
     for (const ip of [...ips].slice(0, 2500)) {
       const a = app.hosts.locate(ip).attach;
-      hosts[ip] = a && a.edge ? { dev: a.dev, port: a.ifName, vlan: a.vlan, confidence: a.confidence, neighbor: a.neighbor } : null;
+      hosts[ip] = a && a.edge ? { dev: a.dev, devId: a.devId, ifIndex: a.ifIndex, port: a.ifName, vlan: a.vlan, confidence: a.confidence, neighbor: a.neighbor } : null;
     }
     // the router on the other end of each route's RPF link, when it is polled too: its name and interface, and whether it forwards the group towards this router
     const lossIf = new Set(multicastLoss(m, peers).map(l => l.ifIndex));

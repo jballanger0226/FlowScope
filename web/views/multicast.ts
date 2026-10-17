@@ -11,7 +11,7 @@ import { ago, bps, num, stamp } from '../util.js';
  */
 
 interface DevSummary { id: number; name: string; ip: string; role: string; readAt: number; stale: boolean; source: 'cisco' | 'standard'; routes: number; groups: number; receivers: number; forwarding: number; truncated: boolean }
-interface HostAt { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null }
+interface HostAt { dev: string; devId?: number; ifIndex?: number; port: string; vlan: number; confidence: string; neighbor: string | null }
 interface Join { reporter: string | null; expirySec: number | null; self: boolean }
 interface IgmpHint { vendor: string; platform: string; command: string | null }
 interface Member { ip: string; ageSec: number; sinceSec: number | null; via?: 'snmp' | 'netflow' | 'both'; approx?: boolean }
@@ -53,6 +53,16 @@ const SIZES = [25, 50, 100, 250, 500];
 let page = 0; let pageSize = 50;
 /** Where a host is plugged in, as found by host tracking: "dist-sw-01 Gi1/0/12" */
 const at = (ip: string | null): string => { const a = ip ? detail?.hosts?.[ip] : null; return a ? `${a.dev} ${a.port}` : ''; };
+/** Where a host is plugged in: the port name only (the page is already about one device), with buttons to its Flows by port and to its interface in Network health. */
+function portCell(ip: string): VNode {
+  const a = detail?.hosts?.[ip];
+  if (!a) return h('span', { class: 'dim', style: 'font-size:12px' }, 'not located');
+  const stop = (fn: () => void) => (e: Event): void => { e.stopPropagation(); fn(); };
+  return h('span', { class: 'row', style: 'gap:8px;align-items:center;flex-wrap:wrap', title: `${a.dev}, VLAN ${a.vlan}` },
+    h('span', { class: 'mono', style: 'font-size:12px' }, a.port),
+    a.devId !== undefined && a.ifIndex !== undefined ? btn('Flows', { small: true, kind: 'ghost', title: `Flows by port: the busiest flows entering or leaving ${a.port} on ${a.dev}`, aria: `Flows through ${a.port}`, onclick: stop(() => go('ports', { dev: a.devId!, if: a.ifIndex! })) }) : null,
+    btn('Interface', { small: true, kind: 'ghost', title: `Open ${a.port} on ${a.dev} in Network health`, aria: `Interface details for ${a.port}`, onclick: stop(() => go('links', { dev: a.dev, if: a.port })) }));
+}
 let seq = 0;
 
 export function enter(p: URLSearchParams): void {
@@ -185,7 +195,7 @@ function oilRow(r: Route, o: Out): VNode {
         h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Seen by', 'Last reported', 'Known for'].map(t => h('span', null, t))),
         members.map(m => h('div', { key: m.ip, class: 'tr' },
           h('span', { class: 'mono', style: 'font-size:12px' }, m.ip),
-          h('span', { class: 'mono', style: 'font-size:12px' }, at(m.ip) || h('span', { class: 'dim' }, 'not located')),
+          portCell(m.ip),
           h('span', null, viaChip(m.via)),
           h('span', { style: 'font-size:12px' }, m.approx ? h('span', { class: 'dim', title: 'NetFlow gives a window, not a time' }, m.ageSec <= 300 ? 'within 5 min' : 'within 30 min') : m.ageSec < 150 ? chip('now', 'ok', 'Reported in the last two minutes') : h('span', { class: 'dim' }, ageText(m.ageSec))),
           h('span', { class: 'dim', style: 'font-size:12px' }, m.sinceSec === null ? '—' : ageText(m.sinceSec).replace(' ago', ''))))))) : null);
