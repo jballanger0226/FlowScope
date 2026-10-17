@@ -47,7 +47,7 @@ interface Detail {
   igmp?: IgmpIf[];
   rps?: { inUse?: { rp: string; who: string | null; self: boolean; up: boolean; groups: string[]; sinceSec: number | null }[]; map: RpMap[]; candidate: { range: string; rp: string; self: boolean }[] };
   pimIssues?: { level: 'warn' | 'info'; kind: string; text: string }[];
-  pim: { interfaces: { name: string; mode: string; dr: string | null }[]; neighbors: { address: string; ifName: string }[] };
+  pim: { interfaces: { name: string; mode: string; dr: string | null; passive?: boolean }[]; neighbors: { address: string; ifName: string }[] };
   hosts?: Record<string, HostAt | null>;
   load?: { name: string; inBps: number | null; outBps: number | null; inOctets: number | null; outOctets: number | null; ttl: number | null; rateLimit: number | null }[];
 }
@@ -150,14 +150,16 @@ const pimChip = (mode: string | null | undefined): VNode | null => (mode === 'de
 
 /** The PIM modes the router runs, as a line above the table; dense and sparse-dense are flagged, since they change what a receiver gets. */
 function pimSummary(d: Detail): VNode | null {
-  const n = new Map<string, number>(); for (const p of d.pim.interfaces) n.set(p.mode, (n.get(p.mode) ?? 0) + 1);
-  if (!n.size) return null;
+  const n = new Map<string, number>(); let passive = 0;
+  for (const p of d.pim.interfaces) { if (p.passive) passive++; else n.set(p.mode, (n.get(p.mode) ?? 0) + 1); }
+  if (!n.size && !passive) return null;
   const flagged = (n.get('dense') ?? 0) + (n.get('sparse-dense') ?? 0) > 0;
-  const text = [...n].map(([m, k]) => `${num(k)} ${m}`).join(', ');
+  const text = [...[...n].map(([m, k]) => `${num(k)} ${m}`), ...(passive ? [`${num(passive)} passive`] : [])].join(', ');
   const dense = d.routes.filter(r => r.mode === 'dense').length;
   return h('div', { class: 'row', style: 'gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px' },
     h('span', { class: 'dim' }, 'PIM interfaces:'), h('span', { class: 'mono' }, text),
     n.get('dense') ? pimChip('dense') : null, n.get('sparse-dense') ? pimChip('sparse-dense') : null,
+    passive ? h('span', { class: 'dim', title: 'ip pim passive: the interface faces hosts, sends no PIM messages and elects no designated router, so its mode does not count' }, 'passive interfaces are left out of the mode checks') : null,
     dense ? h('span', { class: 'dim' }, `${num(dense)} route${dense === 1 ? ' runs' : 's run'} in dense mode`) : null,
     flagged ? h('span', { class: 'dim' }, 'Receivers behave differently here: hover a flag for how.') : null);
 }

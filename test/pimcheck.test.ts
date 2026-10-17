@@ -85,3 +85,12 @@ test('a few wrong-interface drops against a busy route are minor, a large share 
   const x = pimIssues(minor, nm, []).find(i => i.kind === 'rpf')!;
   assert.equal(x.level, 'info'); assert.match(x.text, /equal-cost/);
 });
+
+test('passive interfaces (no designated router, as the SVIs of an SD-Access edge answer) do not make a mix of PIM modes', () => {
+  const sd = (ifIndex: number, dr: string | null): McPimIf => ({ ifIndex, mode: 'sparse-dense', dr });
+  // 3061 and 3058 are `ip pim passive` (the PIM-MIB says sparse-dense with no DR); the LISP interface runs sparse and has a DR
+  const edge = mc([sd(3061, null), sd(3058, null), { ifIndex: 4102, mode: 'sparse', dr: '10.10.56.16' }]);
+  assert.deepEqual(pimIssues(edge, nm, []), []);
+  // an interface with a DR that really runs another mode still counts
+  assert.equal(pimIssues(mc([sd(3061, null), sd(3062, '10.1.1.1'), { ifIndex: 4102, mode: 'sparse', dr: '10.10.56.16' }]), nm, [])[0]!.kind, 'mixed');
+});

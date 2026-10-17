@@ -104,3 +104,18 @@ test('a device that is not Cisco is not asked for DHCP snooping, and its binding
     assert.equal((e.cdb.db.prepare('SELECT COUNT(*) AS n FROM dhcp_bindings').get() as { n: number }).n, 0);
   } finally { await e.done(); }
 });
+
+test('operating VLANs: the VLANs hosts were really seen in on a port, most hosts first (an 802.1X port is not in its configured VLAN)', async () => {
+  const e = await env();
+  try {
+    const id = addSwitch(e, 'acc-sw-01', '1.3.6.1.4.1.9.1.2000');
+    const now = Date.now();
+    const ins = e.cdb.db.prepare('INSERT INTO fdb(dev_id, mac, vlan, if_index, first_seen, last_seen, since) VALUES (?,?,?,?,?,?,?)');
+    ins.run(id, '00:50:56:00:00:01', 3089, 1, now, now, now); ins.run(id, '00:50:56:00:00:02', 3089, 1, now, now, now); ins.run(id, '00:50:56:00:00:03', 3040, 1, now, now, now);
+    ins.run(id, '00:50:56:00:00:04', 10, 2, now, now, now);
+    ins.run(id, '00:50:56:00:00:05', 3089, 2, now - 7 * 86400_000, now - 7 * 86400_000, now - 7 * 86400_000);   // long gone
+    const ov = new HostTracker(e.cdb, e.devs, e.log).operatingVlans(id);
+    assert.deepEqual(ov.get(1), [{ vlan: 3089, hosts: 2 }, { vlan: 3040, hosts: 1 }]);
+    assert.deepEqual(ov.get(2), [{ vlan: 10, hosts: 1 }]);
+  } finally { await e.done(); }
+});

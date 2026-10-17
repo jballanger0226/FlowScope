@@ -1,7 +1,7 @@
 import type { Multicast } from '../snmp/multicast.js';
 import { lookupFib, type Fib } from '../snmp/fib.js';
 import { rpfSignificant } from '../snmp/multicast.js';
-import { multicastLoss, pimIssues, type PimPeer } from '../snmp/pimcheck.js';
+import { multicastLoss, pimIssues, passivePim, type PimPeer } from '../snmp/pimcheck.js';
 import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
 import type { FlowRecord } from '../collector/types.js';
@@ -89,7 +89,8 @@ export function registerMulticast(app: App): void {
     const underInfo = (g: string): { group: string; sources: { source: string; pkts: number | null }[] } => ({ group: g, sources: (dm?.routes ?? []).filter(x => x.group === g).map(x => ({ source: x.source, pkts: x.pkts })) });
     const ifs = new Map(app.devices.interfaces(id).map(i => [i.ifIndex, i.oper] as const)), downSet = new Set(m.down ?? []);
     const isDown = (ix: number): boolean => ifs.has(ix) ? ifs.get(ix) !== 1 : downSet.has(ix);
-    const pimMode = new Map(m.pimInterfaces.map(p => [p.ifIndex, p.mode] as const));
+    const passiveIf = passivePim(m.pimInterfaces);
+    const pimMode = new Map(m.pimInterfaces.filter(p => !passiveIf.has(p.ifIndex)).map(p => [p.ifIndex, p.mode] as const));
     const nbr = new Map(m.neighbors.map(n => [n.ifIndex, n.address]));
     const joins = new Map<string, typeof m.receivers>();
     for (const r of m.receivers) { const k = r.group + '|' + r.ifIndex; const a = joins.get(k) ?? []; a.push(r); joins.set(k, a); }
@@ -183,7 +184,7 @@ export function registerMulticast(app: App): void {
       load: (m.interfaces ?? []).filter(i => (i.inOctets ?? 0) > 0 || (i.outOctets ?? 0) > 0).map(i => ({ name: name(i.ifIndex), inBps: i.inBps, outBps: i.outBps, inOctets: i.inOctets, outOctets: i.outOctets, ttl: i.ttl, rateLimit: i.rateLimit }))
         .sort((a, b) => (b.inBps ?? 0) + (b.outBps ?? 0) - (a.inBps ?? 0) - (a.outBps ?? 0) || (b.inOctets ?? 0) + (b.outOctets ?? 0) - (a.inOctets ?? 0) - (a.outOctets ?? 0)),
       pimIssues: parts.flatMap(x => pimIssues(x.mc, name, x.vrf ? [] : peers).map(i => (x.vrf ? { ...i, text: `VRF ${x.vrf}: ${i.text}` } : i))),
-      pim: { interfaces: m.pimInterfaces.map(p => ({ name: name(p.ifIndex), mode: p.mode, dr: p.dr })), neighbors: m.neighbors.map(n => ({ address: n.address, ifName: name(n.ifIndex) })) }
+      pim: { interfaces: m.pimInterfaces.map(p => ({ name: name(p.ifIndex), mode: p.mode, dr: p.dr, passive: passiveIf.has(p.ifIndex) })), neighbors: m.neighbors.map(n => ({ address: n.address, ifName: name(n.ifIndex) })) }
     });
   });
 }

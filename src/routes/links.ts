@@ -59,6 +59,7 @@ export async function linkDevices(app: App, minutes: number) {
   const mcastLoad = new Map<number, Map<number, { inBps: number | null; outBps: number | null }>>();
   for (const dv of app.devices.list()) { const m = app.devices.multicast(dv.id); if (m?.interfaces?.length) mcastLoad.set(dv.id, new Map(m.interfaces.map(x => [x.ifIndex, x]))); }
   const counts = app.hosts.portCounts();
+  const opVl = new Map(app.devices.list().map(d => [d.id, app.hosts.operatingVlans(d.id)] as const));
   const vmaps = new Map(app.devices.list().map(d => [d.id, app.devices.vrfMaps(d.id)] as const));
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
@@ -69,6 +70,9 @@ export async function linkDevices(app: App, minutes: number) {
       const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
       // VLAN and SVI interfaces carry routed traffic for a whole subnet and are never listed under "needs attention"
       const vlanIf = isVlanInterface(i);
+      // an access port whose hosts sit in other VLANs than the configured one authenticates them (802.1X / MAB): the VLANs they are in are the ones in effect
+      const seen = i.portMode === 'access' || i.portMode === 'pvid' ? (opVl.get(d.id)?.get(i.ifIndex) ?? []).filter(x => x.vlan !== i.voiceVlan) : [];
+      const dynamic = seen.filter(x => x.vlan !== i.vlan).map(x => x.vlan);
       // how full the busiest strict-priority queue is, and how much of the link multicast takes (the larger of in and out)
       let prioPct: number | null = null;
       for (const def of i.classes) { if (!def.priority || def.cls.startsWith('in:')) continue; const lim = limitBps(def.bw, i.speedMbps); const k = cls.find(x => x.cls === def.cls); if (lim && k) prioPct = Math.max(prioPct ?? 0, 100 * k.sentBps / lim); }
@@ -76,8 +80,8 @@ export async function linkDevices(app: App, minutes: number) {
       const mcastPct = mcastBps !== null && i.speedMbps > 0 ? 100 * mcastBps / (i.speedMbps * 1e6) : null;
       return {
         ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
-        portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList,
-        isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0, ...((): { vrf: string; vrfVia: string } | Record<string, never> => { const vm = vmaps.get(d.id); const x = vm ? ifaceVrf(i, vm.direct, vm.byVlan) : null; return x ? { vrf: x.vrf, vrfVia: x.via } : {}; })(),
+        portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList, ...(dynamic.length ? { opVlans: dynamic.map(v => ({ vlan: v, name: app.vlanName(v), hosts: seen.find(x => x.vlan === v)?.hosts ?? 0 })) } : {}),
+        isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0, ...((): { vrf: string; vrfVia: string } | Record<string, never> => { const vm = vmaps.get(d.id); const x = vm ? ifaceVrf(dynamic.length ? { ...i, vlan: dynamic[0]! } : i, vm.direct, vm.byVlan) : null; return x ? { vrf: x.vrf, vrfVia: x.via } : {}; })(),
         utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
         classes: i.classes.map(def => {
           const k = cls.find(x => x.cls === def.cls);

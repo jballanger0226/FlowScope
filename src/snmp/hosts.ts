@@ -80,6 +80,10 @@ export class HostTracker {
     if (cisco) { try { binds = await readDhcpBindings(c); } catch (e) { notes.push(`DHCP snooping not read: ${(e as Error).message}`); } }
     const vlans = new Set<number>();
     for (const p of ports.values()) { if (p.mode === 'access' || p.mode === 'pvid') { if (p.vlan) vlans.add(p.vlan); if (p.voice) vlans.add(p.voice); } else if (p.mode === 'trunk' && p.vlan) vlans.add(p.vlan); }
+    // Ports that authenticate users (802.1X, MAB) put each host in the VLAN the RADIUS server names, not the one configured on the port, so the MAC tables
+    // of every VLAN the switch routes (it has an SVI for it) and every VLAN a lease was seen in are read too
+    for (const p of ports.values()) if (p.mode === 'svi' && p.vlan) vlans.add(p.vlan);
+    for (const b of binds) if (b.vlan) vlans.add(b.vlan);
     if (!vlans.size) vlans.add(1);
     let fdb: Awaited<ReturnType<typeof readFdb>>;
     try { fdb = await readFdb(c, { cisco, vlans: [...vlans], forVlan: v => c.forVlan(v) }); }
@@ -176,6 +180,14 @@ export class HostTracker {
   portCounts(): Map<string, number> {
     const rows = this.db.prepare('SELECT dev_id AS d, if_index AS i, COUNT(DISTINCT mac) AS n FROM fdb WHERE last_seen >= ? GROUP BY dev_id, if_index').all(this.activeSince()) as unknown as { d: number; i: number; n: number }[];
     return new Map(rows.map(r => [`${r.d}/${r.i}`, r.n]));
+  }
+
+  /** The VLANs hosts were really seen in on each port lately (the MAC table is per VLAN), most hosts first. A port with 802.1X is in the VLAN the RADIUS server gave, which differs from the configured one. */
+  operatingVlans(devId: number): Map<number, { vlan: number; hosts: number }[]> {
+    const rows = this.db.prepare('SELECT if_index AS i, vlan AS v, COUNT(DISTINCT mac) AS n FROM fdb WHERE dev_id = ? AND last_seen >= ? GROUP BY if_index, vlan ORDER BY n DESC, vlan').all(devId, this.activeSince()) as unknown as { i: number; v: number; n: number }[];
+    const out = new Map<number, { vlan: number; hosts: number }[]>();
+    for (const r of rows) { const a = out.get(r.i) ?? []; a.push({ vlan: r.v, hosts: r.n }); out.set(r.i, a); }
+    return out;
   }
 
   neighborsOf(devId: number, ifIndex: number): { proto: string; name: string; port: string; ip: string; kind: string; caps: string }[] {

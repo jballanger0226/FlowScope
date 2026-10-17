@@ -16,7 +16,7 @@ interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: nu
 interface Iface {
   mac: string; addresses: string[];
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
-  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans';
+  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[];
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
@@ -350,6 +350,9 @@ function vlanCellBase(i: Iface): VNode {
   if (i.isVlanIf || i.portMode === 'svi') return h('span', { class: 'muted' }, i.vlan ? `SVI for VLAN ${vlanLabel(i.vlan, i.vlanName)}` : 'SVI');
   if (i.portMode === 'trunk') return h('span', { class: 'col', style: 'gap:1px' }, h('span', null, h('span', { class: 'tag' }, 'trunk'), i.vlan ? ` native ${vlanLabel(i.vlan, i.vlanName)}` : ''), i.vlanList ? h('span', { class: 'dim mono', style: 'font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: `Allowed VLANs: ${i.vlanList}` }, `allowed ${i.vlanList}`) : null);
   if (i.portMode === 'routed') return h('span', { class: 'muted' }, 'routed port');
+  if (i.opVlans?.length) return h('span', { class: 'col', style: 'gap:1px' },
+    h('span', { title: 'Hosts on this port are in a different VLAN than the one configured, which is what an authenticating port (802.1X / MAB, VLAN from RADIUS) does' }, i.opVlans.map((o, n) => h('span', { style: 'font-weight:600' }, (n ? ', ' : '') + vlanLabel(o.vlan, o.name))), ' ', h('span', { class: 'tag' }, 'dynamic')),
+    h('span', { class: 'dim', style: 'font-size:11px' }, `configured ${vlanLabel(i.vlan, i.vlanName)}`), i.voiceVlan ? h('span', { class: 'dim', style: 'font-size:11px' }, `voice ${vlanLabel(i.voiceVlan, i.voiceVlanName)}`) : null);
   if (i.vlan) return h('span', { class: 'col', style: 'gap:1px' }, h('span', { style: 'font-weight:600' }, vlanLabel(i.vlan, i.vlanName)), i.voiceVlan ? h('span', { class: 'dim', style: 'font-size:11px' }, `voice ${vlanLabel(i.voiceVlan, i.voiceVlanName)}`) : null);
   return h('span', { class: 'dim' }, '—');
 }
@@ -362,7 +365,7 @@ function termMatches(i: Iface, raw: string): boolean {
   if (!t) return true;
   if (/^\d{1,4}$/.test(t)) {
     const n = Number(t);
-    if (i.vlan === n || i.voiceVlan === n || (i.portMode === 'trunk' && vlanIn(i.vlanList, n))) return true;
+    if (i.vlan === n || i.voiceVlan === n || i.opVlans?.some(o => o.vlan === n) || (i.portMode === 'trunk' && vlanIn(i.vlanList, n))) return true;
     if (vlanOnly) return false;
     return i.name.split(/\D+/).includes(t) || i.alias.split(/\D+/).includes(t);
   }
@@ -741,6 +744,12 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
   const clsUtil: Series[] = speedBps > 0 ? mk(p => 100 * p.sentBps / speedBps) : [];
   const peak = (c: SeriesRes['classes'][0]) => Math.max(0, ...c.points.map(p => p.dropPct));
   const dropTs = [...new Set(s.classes.flatMap(c => c.points.filter(p => p.dropPps > 0 || p.dropPct > 0).map(p => p.ts)))];
+  // drops of the whole interface, which exist with or without a service policy; each queue class that dropped something adds its own line
+  const stepSec = Math.max(1, s.step / 1000);
+  const discSeries: Series = { name: 'Interface discards', color: 'var(--bad)', points: s.util.points.map(p => ({ t: p.ts, v: p.disc / stepSec })) };
+  const classDrops: Series[] = shown.filter(c => c.points.some(p => p.dropPps > 0)).map(c => ({ name: c.cls, color: classColor(c.cls, names), points: c.points.map(p => ({ t: p.ts, v: p.dropPps })) }));
+  const discPeriods: { a: number; b: number; pkts: number }[] = [];
+  for (const p of s.util.points) if (p.disc > 0) { const l = discPeriods[discPeriods.length - 1]; if (l && p.ts - l.b <= s.step * 1.5) { l.b = p.ts; l.pkts += p.disc; } else discPeriods.push({ a: p.ts, b: p.ts, pkts: p.disc }); }
   const match = cpuMatch([{ kind: 'Queue drops', ts: dropTs }, { kind: 'Discards', ts: s.util.points.filter(p => p.disc > 0).map(p => p.ts) }], from, to, fmtT);
   return h('div', { class: 'col', style: 'gap:14px' },
     h('div', { class: 'row end' },
@@ -751,7 +760,7 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
       s.classes.map(c => h('button', { key: c.cls, type: 'button', class: 'cbtn', 'aria-pressed': !hidden.has(c.cls), onclick: () => { if (hidden.has(c.cls)) hidden.delete(c.cls); else hidden.add(c.cls); redraw(); } },
         h('i', { class: 'sw', style: `background:${classColor(c.cls, names)};margin:0` }), h('span', null, c.cls), h('span', { class: 'dim' }, 'peak ' + pct(peak(c), 2))))) : null,
     match.note,
-    chartGrid((names.length ? 4 : 2) + (match.chart ? 1 : 0), size => [
+    chartGrid(3 + (names.length ? 2 : 0) + (match.chart ? 1 : 0), size => [
       lineChart({
         ...size, sync: 'iface', onZoom: zoomIf, title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut)), ...clsUtil.flatMap(c => c.points.map(p => p.v))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
         series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }, ...clsUtil], aria: `Utilisation of ${itf.name}, with each queue class`
@@ -760,13 +769,19 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
         ...size, sync: 'iface', onZoom: zoomIf, title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)), ...mk(p => p.sentBps).flatMap(c => c.points.map(p => p.v)))), from, to, fmtT,
         series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }, ...mk(p => p.sentBps)], aria: `Throughput of ${itf.name} in bits per second, with each queue class`
       }),
+      lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Packets dropped (per second)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '/s', series: [discSeries, ...classDrops], from, to, bands, fmtT, fmtV: v => (v < 10 ? v.toFixed(2) : v.toFixed(0)) + ' pkts/s', aria: `Packets dropped on ${itf.name}: the interface as a whole and each queue class that dropped` }),
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Packets dropped (% of the class)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '%', series: mk(p => p.dropPct), from, to, threshold: dropThr, bands, fmtT, fmtV: v => pct(v, 2), aria: `Drop percentage per class on ${itf.name}` }) : null,
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Bytes dropped (per second)', unit: v => bytes(v) + '/s', series: mk(p => p.dropBps / 8), from, to, bands, fmtT, aria: `Bytes dropped per class on ${itf.name}` }) : null,
       match.chart ? match.chart.build(size) : null
     ]),
-    h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Utilisation and throughput also draw a line for each queue class that is switched on above (what the class sent). Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
+    h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Utilisation and throughput also draw a line for each queue class that is switched on above (what the class sent). Packets dropped starts from the interface\'s own discards, with a line for each class that dropped. Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
     h('div', { class: 'col', style: 'gap:6px' },
       h('b', null, 'Drop events above the threshold'),
+      !names.length ? (discPeriods.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:150px 210px 90px 1fr;--w:640px' }, discPeriods.slice(-30).reverse().map((e, i) => h('div', { key: i, class: 'tr' },
+        h('span', null, h('i', { class: 'sw', style: 'background:var(--bad)' }), 'Interface discards'),
+        h('span', { class: 'mono', style: 'font-size:12px' }, `${dayClock(e.a)} → ${clock(e.b + s.step)}`), h('span', { class: 'muted' }, dur(e.b - e.a + s.step)),
+        h('span', { class: 'muted' }, `${num(e.pkts)} packets discarded`)))))
+        : h('span', { class: 'dim' }, 'No packets were discarded on this interface in this window (it has no queue classes, so only its own discard counters are shown).')) :
       evs.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:150px 210px 90px 110px 1fr;--w:760px' }, evs.slice(0, 30).map((e, i) => h('div', { key: i, class: 'tr' },
         h('span', null, h('i', { class: 'sw', style: `background:${classColor(e.cls, names)}` }), e.cls),
         h('span', { class: 'mono', style: 'font-size:12px' }, `${dayClock(e.a)} → ${clock(e.b + s.step)}`), h('span', { class: 'muted' }, dur(e.b - e.a + s.step)),

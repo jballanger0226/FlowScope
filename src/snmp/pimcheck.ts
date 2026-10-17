@@ -8,6 +8,14 @@ export interface PimPeer { name: string; mc: Multicast; ips: Map<string, number>
 
 const known = (m: string | undefined): m is 'dense' | 'sparse' | 'sparse-dense' => m === 'dense' || m === 'sparse' || m === 'sparse-dense';
 
+/**
+ * PIM passive interfaces (`ip pim passive`, the host-facing SVIs of an SD-Access fabric) answer the PIM-MIB with a mode (sparse-dense) but never elect a designated router,
+ * so they have none, while every interface really running PIM has one (itself, if it has no neighbour). Without any DR in the table (a device that does not report it) none is assumed passive.
+ */
+export function passivePim(list: { ifIndex: number; dr: string | null }[]): Set<number> {
+  return list.some(p => p.dr) ? new Set(list.filter(p => !p.dr).map(p => p.ifIndex)) : new Set();
+}
+
 /** Multicast that one end of a PIM link sends and the other end does not receive. Both ends count multicast per interface, so on a routed link the two rates should agree. */
 export interface McLoss { ifIndex: number; peer: string; peerIf: string; inBps: number; outBps: number }
 export function multicastLoss(mc: Multicast, peers: PimPeer[]): McLoss[] {
@@ -34,7 +42,10 @@ const mbps = (b: number): string => (b >= 1e9 ? (b / 1e9).toFixed(2) + ' Gbps' :
  */
 export function pimIssues(mc: Multicast, ifName: (ix: number) => string, peers: PimPeer[]): PimIssue[] {
   const out: PimIssue[] = [];
-  const mine = new Map(mc.pimInterfaces.map(p => [p.ifIndex, p.mode] as const));
+  // a passive interface sends no PIM messages, so its mode says nothing about how traffic is forwarded
+  const passive = passivePim(mc.pimInterfaces);
+  const running = mc.pimInterfaces.filter(p => !passive.has(p.ifIndex));
+  const mine = new Map(running.map(p => [p.ifIndex, p.mode] as const));
 
   for (const n of mc.neighbors) {
     const my = mine.get(n.ifIndex);
@@ -55,15 +66,15 @@ export function pimIssues(mc: Multicast, ifName: (ix: number) => string, peers: 
   for (const l of multicastLoss(mc, peers)) out.push({ level: 'warn', kind: 'link-loss', text: `Multicast is lost between ${l.peer} ${l.peerIf} and ${ifName(l.ifIndex)}: ${l.peer} sends ${mbps(l.outBps)} out of it and this router receives ${mbps(l.inBps)}. Look at errors, discards and multicast limits on both interfaces.` });
 
   // loopbacks are the router's own addresses, so only interfaces that carry traffic count towards a mix
-  const modes = new Set(mc.pimInterfaces.filter(p => !/^(lo|loopback)\d+$/i.test(ifName(p.ifIndex))).map(p => p.mode).filter(known));
+  const modes = new Set(running.filter(p => !/^(lo|loopback)\d+$/i.test(ifName(p.ifIndex))).map(p => p.mode).filter(known));
   if (modes.size > 1) {
     const by = new Map<string, string[]>();
-    for (const p of mc.pimInterfaces) if (known(p.mode) && !/^(lo|loopback)\d+$/i.test(ifName(p.ifIndex))) by.set(p.mode, [...(by.get(p.mode) ?? []), ifName(p.ifIndex)]);
+    for (const p of running) if (known(p.mode) && !/^(lo|loopback)\d+$/i.test(ifName(p.ifIndex))) by.set(p.mode, [...(by.get(p.mode) ?? []), ifName(p.ifIndex)]);
     out.push({ level: 'info', kind: 'mixed', text: `This router runs more than one PIM mode: ${[...by].map(([m, l]) => `${m} on ${l.length > 3 ? l.slice(0, 3).join(', ') + ` and ${l.length - 3} more` : l.join(', ')}`).join('; ')}.` });
   }
 
-  if (mc.pimInterfaces.some(p => p.mode === 'sparse-dense')) {
-    const sd = new Set(mc.pimInterfaces.filter(p => p.mode === 'sparse-dense').map(p => p.ifIndex));
+  if (running.some(p => p.mode === 'sparse-dense')) {
+    const sd = new Set(running.filter(p => p.mode === 'sparse-dense').map(p => p.ifIndex));
     // 224.0.1.39 and .40 are Auto-RP itself and are meant to run dense
     const dense = [...new Set(mc.routes.filter(r => r.protocol === 9 && !r.rp && !/^224\.0\.1\.(39|40)$/.test(r.group) && ((r.inIfIndex !== null && sd.has(r.inIfIndex)) || r.oifs.some(o => sd.has(o.ifIndex)))).map(r => r.group))];
     if (dense.length) out.push({ level: 'warn', kind: 'no-rp', text: `${dense.length === 1 ? 'A group runs' : dense.length + ' groups run'} dense on a sparse-dense interface because no rendezvous point is known for ${dense.length === 1 ? 'it' : 'them'}: ${dense.slice(0, 5).join(', ')}${dense.length > 5 ? ` and ${dense.length - 5} more` : ''}. Check that the RP is reachable and its group range covers ${dense.length === 1 ? 'it' : 'them'}.` });
