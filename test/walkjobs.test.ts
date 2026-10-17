@@ -106,3 +106,13 @@ test('a walk in an SNMP context says so in its status and exports', async () => 
   const d2 = await settle(jobs, jobs.start(dev, fakeClient(SAMPLE).c, '', 'netops').id);
   assert.equal(jobView(d2).context, ''); assert.doesNotMatch(exportRows(d2, d2.rows, 'xml', '').body, /context=/);
 });
+
+test('a walk step that times out is repeated asking for fewer rows, and only a device that stays silent fails it', async () => {
+  const { bulkStep, SnmpError } = await import('../src/snmp/client.js');
+  const asked: number[] = [];
+  const slow = async (rep: number) => { asked.push(rep); if (rep > 5) throw new SnmpError('timeout', 'timeout'); return 'rows'; };
+  const r = await bulkStep(slow, 20, 20, async () => {});
+  assert.deepEqual(asked, [20, 10, 5]); assert.equal(r.rows, 'rows'); assert.equal(r.rep, 10, 'it creeps back up after a success');
+  await assert.rejects(bulkStep(async () => { throw new SnmpError('timeout', 'timeout'); }, 20, 20, async () => {}, 4), /timeout/);
+  await assert.rejects(bulkStep(async () => { throw new SnmpError('no access', 'auth'); }, 20, 20, async () => {}), /no access/);
+});

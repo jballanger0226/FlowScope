@@ -74,6 +74,22 @@ function classify(e: Error): SnmpError {
 }
 
 /** A thin promise wrapper over a net-snmp session. */
+/**
+ * One step of a long walk that survives a device that is slow to answer (a busy switch takes longer for big GETBULK replies): on a timeout the step is
+ * repeated asking for fewer rows each time, after a short pause, and only a device that stays silent through every attempt fails the walk. After a
+ * success the number of rows asked for creeps back up. Returns the rows and the number to ask for next.
+ */
+export async function bulkStep<T>(fetch: (rep: number) => Promise<T>, rep: number, maxRep: number, sleep: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)), attempts = 6): Promise<{ rows: T; rep: number }> {
+  let r = rep;
+  for (let n = 1; ; n++) {
+    try { return { rows: await fetch(r), rep: Math.min(maxRep, r * 2) }; }
+    catch (e) {
+      if (!(e instanceof SnmpError) || e.kind !== 'timeout' || n >= attempts) throw e;
+      r = Math.max(1, Math.floor(r / 2)); await sleep(500 * n);
+    }
+  }
+}
+
 export class SnmpClient {
   private s: any;
   closed = false;
@@ -142,11 +158,13 @@ export class SnmpClient {
     if (leaf) { onRows([leaf]); return 'done'; }
     const prefix = oid ? oid + '.' : '';
     let cur = oid || '1.0';   // an empty OID is the whole tree: start just before 1.0.8802 (LLDP), the lowest OID a device is likely to have
+    let rep = maxRep;
     for (;;) {
-      const vbs = await new Promise<any[]>((resolve, reject) => {
+      const step = await bulkStep(r => new Promise<any[]>((resolve, reject) => {
         const cb = (err: Error | null, v: any[]) => err ? reject(classify(err)) : resolve(v ?? []);
-        if (this.cred.version === 'v1') this.s.getNext([cur], cb); else this.s.getBulk([cur], 0, maxRep, cb);
-      });
+        if (this.cred.version === 'v1') this.s.getNext([cur], cb); else this.s.getBulk([cur], 0, r, cb);
+      }), rep, maxRep);
+      const vbs = step.rows; rep = step.rep;
       const batch: VarBind[] = [];
       let end = false;
       // GETBULK hands back one array of varbinds per OID asked about (the repeaters), where GETNEXT hands back plain varbinds
