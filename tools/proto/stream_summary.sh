@@ -10,6 +10,7 @@
 # Environment: DB (default flowscope), CH_ARGS (extra clickhouse-client arguments, e.g. "--user x --password y").
 set -euo pipefail
 DB="${DB:-flowscope}"
+CH_ARGS="${CH_ARGS:-}"
 ch() { clickhouse-client $CH_ARGS --database "$DB" "$@"; }
 q()  { ch --multiquery --query "$1"; }
 
