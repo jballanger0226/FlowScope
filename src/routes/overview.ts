@@ -16,8 +16,8 @@ const LOG_WINDOW_HOURS = 24;
 const FLOW_WINDOW_MIN = 60;
 /** A device that has been up for less than this has restarted recently. */
 const RECENT_RESTART_SEC = 3600;
-/** The flow searches are the slowest part of the page, and several people may open it at once, so their answers are reused for this long. */
-const FLOW_CACHE_MS = 30_000;
+/** The flow searches are the slowest part of the page, and several people may open it at once, so their answers are reused for this long (and a stale answer is served while the next one is computed). */
+const FLOW_CACHE_MS = 60_000;
 
 type StreamView = ReturnType<typeof streamView>;
 interface FlowSummary {
@@ -34,12 +34,23 @@ export function registerOverview(app: App): void {
   const w = app.web;
   let cache: { at: number; value: FlowSummary } | null = null;
 
+  // The flow boxes are the slowest part of the page, so a visit never waits for them once they have been computed: the last answer is served at once and, when it is older
+  // than FLOW_CACHE_MS, one refresh starts in the background (never two at the same time). Only the very first visit after a start waits.
+  let inflight: Promise<FlowSummary> | null = null;
   async function flowSummary(now: number): Promise<FlowSummary> {
-    if (cache && now - cache.at < FLOW_CACHE_MS) return cache.value;
+    if (cache) {
+      if (now - cache.at >= FLOW_CACHE_MS && !inflight) { inflight = computeFlows(now).finally(() => { inflight = null; }); inflight.catch(() => { /* kept the old answer */ }); }
+      return cache.value;
+    }
+    inflight ??= computeFlows(now).finally(() => { inflight = null; });
+    return inflight;
+  }
+
+  async function computeFlows(now: number): Promise<FlowSummary> {
     const range = { from: now - FLOW_WINDOW_MIN * 60_000, to: now + 60_000 };
     const localIps = app.localIps();
     const [top, traffic, ttl, qos, talk] = await Promise.allSettled([
-      app.store.searchStreams({ range, conds: [], sort: 'bytes', dir: 'desc', limit: TOP, localIps }),
+      app.store.searchStreams({ range, conds: [], sort: 'bytes', dir: 'desc', limit: TOP, countTotal: false, localIps }),
       app.store.report({ range, tier: chooseTier(app, range, undefined), dims: ['proto', 'svc'], prefix: 32, bidir: false, conds: [], sortBy: 'bytes', topN: 20000, localIps }),
       app.store.searchStreams({ range, conds: [{ kind: 'ttl', mode: 'expired' }], sort: 'time', dir: 'desc', limit: 1, localIps }),
       app.store.searchStreams({ range, conds: [{ kind: 'qos', mode: 'changed' }], sort: 'time', dir: 'desc', limit: 1, localIps }),

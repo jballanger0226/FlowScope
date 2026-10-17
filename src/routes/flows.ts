@@ -56,6 +56,11 @@ function activity(recs: { ts0: number; ts1: number; bytes: number; srcIp: string
   return { t0: d.t0, t1: d.t0 + span, fwd: fwd.map(Math.round), rev: rev.map(Math.round) };
 }
 
+/** A range up to this long is counted exactly without being asked; a wider one gets a lower bound. */
+const STREAM_EXACT_MS = 6 * 3600_000;
+/** The most recent flow records a wide time-sorted list looks at. */
+const STREAM_SCAN_CAP = 3_000_000;
+
 export function registerFlows(app: App): void {
   const w = app.web;
 
@@ -70,7 +75,11 @@ export function registerFlows(app: App): void {
     // preview=N: answer quickly from the newest N flow records. The page says when that left older records out ("partial"), and the client then asks again for everything.
     const preview = int(c.query.get('preview'), 0, 0, 20_000);
     const localIpList = app.localIps();
-    const page = await app.store.searchStreams({ range, conds: parsed.conds, sort, dir, limit, offset, recent: preview || undefined, localIps: localIpList });
+    // Building every stream of a wide range is what takes the memory, and the exact total needs all of them. A list by time looks at the newest records only, and the
+    // total is a lower bound ("200+") until the person asks for the count (count=1) or the range is short enough to be cheap.
+    const wide = range.to - range.from > STREAM_EXACT_MS;
+    const exact = c.query.get('count') === '1' || !wide;
+    const page = await app.store.searchStreams({ range, conds: parsed.conds, sort, dir, limit, offset, recent: preview || undefined, maxRecords: sort === 'time' && !exact ? STREAM_SCAN_CAP : undefined, countTotal: exact, localIps: localIpList });
     const user = c.user().username;
     // health of the first rows: a quick hop analysis of each stream (loss between hops, slow links) without the SNMP lookups
     const localIps = new Set(localIpList);
@@ -93,7 +102,7 @@ export function registerFlows(app: App): void {
       } catch { /* leave the status blank */ }
     }));
     if (q.trim() && !page.partial) app.log.info('query', `Flow search: ${q.trim()} (${page.total} result${page.total === 1 ? '' : 's'})`, user);
-    c.json({ rows: page.rows.map(r => ({ ...streamView(app, r), health: health.get(r.skey) ?? null, qosVerdict: verdicts.get(r.skey) ?? null })), total: page.total, truncated: page.truncated, partial: !!page.partial, offset, scanned: page.partial ? preview : null, errors: parsed.errors, range, tier: page.tier });
+    c.json({ rows: page.rows.map(r => ({ ...streamView(app, r), health: health.get(r.skey) ?? null, qosVerdict: verdicts.get(r.skey) ?? null })), total: page.total, totalExact: page.totalExact !== false, capped: !!page.capped, scanCap: page.capped ? STREAM_SCAN_CAP : null, truncated: page.truncated, partial: !!page.partial, offset, scanned: page.partial ? preview : null, errors: parsed.errors, range, tier: page.tier });
   });
 
   // One stream with its hops. The stream id contains punctuation, so it goes in the query string.

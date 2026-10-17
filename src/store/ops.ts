@@ -284,9 +284,13 @@ export class SqliteOps {
       args.push(...a);
     }
     const cand = sets.length ? `WHERE skey IN (${sets.join(' INTERSECT ')})` : '';
-    const recent = q.recent && q.recent > 0 ? Math.trunc(q.recent) : 0;
-    // a preview reads only the newest records; it is partial when more matching records exist than it reads
-    const partial = recent > 0 && Number((this.db.prepare(`WITH f AS (${union}) SELECT COUNT(*) AS n FROM (SELECT 1 FROM f ${cand} LIMIT ${recent + 1})`).get(...args) as { n: number }).n) > recent;
+    const preview = q.recent && q.recent > 0 ? Math.trunc(q.recent) : 0;
+    const cap = !preview && q.maxRecords && q.maxRecords > 0 ? Math.trunc(q.maxRecords) : 0;
+    const recent = preview || cap;
+    const exactTotal = q.countTotal !== false;
+    // a preview or a cap reads only the newest records; it is partial (or capped) when more matching records exist than it reads
+    const more = recent > 0 && Number((this.db.prepare(`WITH f AS (${union}) SELECT COUNT(*) AS n FROM (SELECT 1 FROM f ${cand} LIMIT ${recent + 1})`).get(...args) as { n: number }).n) > recent;
+    const partial = !!preview && more, capped = !!cap && more;
     // exact conditions on the stream's initiator direction
     const exact: string[] = []; const exArgs: SqlArg[] = [];
     let qosCond = '', ttlCond = '';
@@ -323,13 +327,15 @@ export class SqliteOps {
                MAX(d.tx) AS tx, MAX(d.txi) AS txi, MIN(d.ttl_lo) AS ttl_lo
         FROM d JOIN i ON i.skey = d.skey GROUP BY d.skey)
       SELECT i.skey AS skey, i.src_ip, i.dst_ip, i.proto, i.sport, i.dport, t.t0, t.t1, t.b, t.p, t.fb, t.fp, t.exps, t.vlan, t.fl, t.d_in, t.d_min, t.d_max, t.d_post, t.tx, t.txi, t.ttl_lo,
-             (CASE WHEN t.nd > 1 OR t.rm = 1 THEN 1 ELSE 0 END) AS qchg, COUNT(*) OVER () AS total
+             (CASE WHEN t.nd > 1 OR t.rm = 1 THEN 1 ELSE 0 END) AS qchg${exactTotal ? ', COUNT(*) OVER () AS total' : ''}
       FROM i JOIN t ON t.skey = i.skey
       WHERE 1 = 1 ${exact.length ? 'AND ' + exact.join(' AND ') : ''} ${qosCond} ${ttlCond}
       ORDER BY ${order} ${q.dir === 'asc' ? 'ASC' : 'DESC'}, t.t1 DESC
       LIMIT ? OFFSET ?`;
-    const rows = this.db.prepare(sql).all(...args, ...exArgs, q.limit, Math.max(0, Math.trunc(q.offset ?? 0))) as unknown as Record<string, number | string | null>[];
-    const total = rows.length ? Number(rows[0].total) : 0;
+    const all = this.db.prepare(sql).all(...args, ...exArgs, q.limit + (exactTotal ? 0 : 1), Math.max(0, Math.trunc(q.offset ?? 0))) as unknown as Record<string, number | string | null>[];
+    const extra = !exactTotal && all.length > q.limit;
+    const rows = extra ? all.slice(0, q.limit) : all;
+    const total = exactTotal ? (rows.length ? Number(rows[0].total) : 0) : (q.offset ?? 0) + rows.length + (extra ? 1 : 0);
     const out: StreamRow[] = rows.map(r => ({
       skey: String(r.skey), srcIp: String(r.src_ip), dstIp: String(r.dst_ip), proto: Number(r.proto), sport: Number(r.sport), dport: Number(r.dport),
       t0: Number(r.t0), t1: Number(r.t1), bytes: Number(r.b), pkts: Number(r.p), fwdBytes: Number(r.fb), revBytes: Number(r.b) - Number(r.fb),
@@ -340,7 +346,7 @@ export class SqliteOps {
       dscpIn: r.d_in === null ? Number(r.d_min) : Number(r.d_in),
       dscpOut: Number(r.qchg) === 1 ? (r.d_post !== null ? Number(r.d_post) : (Number(r.d_max) !== Number(r.d_in ?? r.d_min) ? Number(r.d_max) : Number(r.d_min))) : null
     }));
-    return { rows: out, total, truncated: total > (q.offset ?? 0) + out.length, tier: 'raw', partial };
+    return { rows: out, total, truncated: total > (q.offset ?? 0) + out.length, tier: 'raw', partial, capped, totalExact: exactTotal };
   }
 
   streamRecords(skey: string, range: TimeRange): (FlowRecord & { primary: boolean })[] {

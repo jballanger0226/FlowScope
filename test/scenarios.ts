@@ -27,6 +27,24 @@ export interface Sut extends Omit<TsStore, 'kind' | 'streamRecords' | 'stats'> {
 export type Mk = () => Promise<{ s: Sut; done: () => Promise<void> | void }>;
 
 export function scenarios(label: string, mk: Mk): void {
+  test(label + ': a capped list reads the newest records only, and the total can be a lower bound', async () => {
+    const t = await mk();
+    try {
+      await t.s.insertFlows([1, 2, 3, 4, 5].map(i => rec({ srcIp: `10.7.0.${i}`, sport: 4000 + i, ts0: NOW - 60_000 + i * 1000, ts1: NOW - 60_000 + i * 1000 + 500 })));
+      const all = await t.s.searchStreams(q());
+      assert.equal(all.total, 5); assert.equal(all.totalExact, true); assert.equal(all.capped, false);
+      // looks at the newest 3 records: three streams, newest first, and it says older ones were left out
+      const cap = await t.s.searchStreams(q([], { maxRecords: 3 }));
+      assert.deepEqual(cap.rows.map(r => r.srcIp), ['10.7.0.5', '10.7.0.4', '10.7.0.3']); assert.equal(cap.capped, true);
+      assert.equal((await t.s.searchStreams(q([], { maxRecords: 50 }))).capped, false);
+      // without an exact count, one extra row says more exist
+      const p1 = await t.s.searchStreams(q([], { limit: 2, countTotal: false }));
+      assert.equal(p1.rows.length, 2); assert.equal(p1.totalExact, false); assert.equal(p1.truncated, true); assert.equal(p1.total, 3);
+      const last = await t.s.searchStreams(q([], { limit: 2, offset: 4, countTotal: false }));
+      assert.equal(last.rows.length, 1); assert.equal(last.truncated, false); assert.equal(last.total, 5);
+    } finally { await t.done(); }
+  });
+
   test(label + ': multi-exporter flows count bytes once and list all exporters', async () => {
     const t = await mk();
     try {

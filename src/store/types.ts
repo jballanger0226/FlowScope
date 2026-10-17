@@ -36,6 +36,10 @@ export interface StreamQuery {
   offset?: number;
   /** Preview: only look at the most recent N flow records that match, so a first answer comes back fast. Streams are then built from those records alone. */
   recent?: number;
+  /** Look at no more than the newest N matching flow records, however wide the range. The page then says `capped`. Unlike `recent` this is the final answer, not a preview. */
+  maxRecords?: number;
+  /** Count every matching stream (the whole result must be built to know). Default true; without it the page holds one extra row to say whether more exist, and `total` is only a lower bound. */
+  countTotal?: boolean;
   /** Addresses owned by our own routers. Traffic addressed to them is not reported as TTL-expired. */
   localIps?: string[];
 }
@@ -59,7 +63,7 @@ export interface StreamRow {
   dscpOut: number | null;
 }
 
-export interface StreamPage { rows: StreamRow[]; total: number; truncated: boolean; tier: 'raw'; /** A preview (`recent`) left older matching records out. */ partial?: boolean }
+export interface StreamPage { rows: StreamRow[]; total: number; truncated: boolean; tier: 'raw'; /** A preview (`recent`) left older matching records out. */ partial?: boolean; /** `maxRecords` left older matching records out. */ capped?: boolean; /** `total` is the exact number of streams (false: at least this many). */ totalExact?: boolean }
 
 export type ReportDim = 'srcMac' | 'dstMac' | 'vlan' | 'inIf' | 'srcIp' | 'dstIp' | 'proto' | 'dscp' | 'qos' | 'sport' | 'dport' | 'svc' | 'flags';
 
