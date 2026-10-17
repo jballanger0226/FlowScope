@@ -877,7 +877,7 @@ function devTabs(dev: Dev, tab: DevTab): VNode {
 }
 /** Jump to what an Overview item is about: its tab, and for an interface problem the interface and the section with the detail. */
 function openTarget(dev: Dev, t: Target): void {
-  if (t.multicast) { go('multicast', { dev: dev.id }); return; }
+  if (t.multicast) { go('multicast', { dev: dev.id, t: 'rpf' }); return; }
   if (t.ifIndex !== undefined) { if (t.section) ifTab = t.section; select_(dev.id, t.ifIndex, t.tab); } else { devTab = t.tab; redraw(); }
   window.scrollTo({ top: 0 });
 }

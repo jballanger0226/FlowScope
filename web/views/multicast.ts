@@ -1,7 +1,7 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { go, redraw } from '../state.js';
-import { lineChart } from '../components.js';
+import { lineChart, tabs } from '../components.js';
 import { btn, chip, empty, heading, note, select, spinner, stat, status as statusEl, textInput, toggle } from '../components.js';
 import { ago, bps, num, stamp } from '../util.js';
 
@@ -45,6 +45,8 @@ let devs: DevSummary[] | null = null; let devError = '';
 let devId = 0; let detail: Detail | null = null; let detailError = ''; let loading = false;
 let query = ''; let onlyForwarding = false; let hideIdle = false;
 const open = new Set<string>();            // routes whose details are shown (group|source)
+type Tab = 'routes' | 'load' | 'rpf' | 'igmp';
+let tab: Tab = 'routes';
 const openLoad = new Set<string>();        // interfaces in the load table whose groups are shown
 const openHosts = new Set<string>();       // outgoing interfaces whose host list is open
 const openGroups = new Set<string>();      // groups whose sources are listed
@@ -69,8 +71,9 @@ export function enter(p: URLSearchParams): void {
   page = 0;
   const d = Number(p.get('dev'));
   if (Number.isInteger(d) && d > 0 && d !== devId) { devId = d; detail = null; }
+  const t = p.get('t'); if (t === 'routes' || t === 'load' || t === 'rpf' || t === 'igmp') tab = t;
   if (p.has('q')) query = p.get('q') ?? '';
-  const g = p.get('g'); if (g) { openGroups.add(g); query = g; }
+  const g = p.get('g'); if (g) { openGroups.add(g); query = g; tab = 'routes'; }
   void loadDevices().then(() => { if (devId) void loadDetail(); });
 }
 
@@ -354,18 +357,34 @@ export function render(): VNode {
       cur ? fullListNote() : null,
       detail?.routeSource === 'pim' ? note('This device does not publish the standard multicast routing table (IPMROUTE-STD-MIB), as NX-OS does not. The groups and sources below come from PIM, so they have no incoming or outgoing interfaces, rates or RPF information. Use the device\'s CLI (show ip mroute) for those.', 'info') : null,
       cur?.truncated ? note('This device holds more routes than FlowScope keeps. The list is cut off.', 'warn') : null,
-      h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },
-        textInput(query, v => { query = v; page = 0; }, { placeholder: 'Search groups and source hosts: 239.1.1.1, 10.2.3.4, a port, a switch…', aria: 'Search groups and source hosts', width: '420px', id: 'mc-filter' }),
-        toggle('Only groups with receivers', onlyForwarding, () => { onlyForwarding = !onlyForwarding; page = 0; redraw(); }),
-        cur?.source === 'cisco' ? toggle('Hide idle routes', hideIdle, () => { hideIdle = !hideIdle; page = 0; redraw(); }, { onText: 'Hiding idle', offText: 'Showing idle' }) : null),
+      detail ? tabBar(detail) : null,
       loading && !detail ? spinner('Loading routes…') : null,
       detailError ? note(detailError, 'warn', true) : null,
-      detail ? table(detail) : null,
-      detail ? rpfSection(detail) : null,
-      detail?.load?.length ? loadTable(detail.load, detail.routes, !!detail.truncated) : null,
-      detail?.igmp?.length ? igmpTable(detail.igmp) : null,
-      detail?.rps && (detail.rps.map.length || detail.rps.candidate.length || detail.rps.inUse?.length) ? rpTable(detail.rps) : null,
-      detail && detail.pim.neighbors.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'PIM neighbours: ', detail.pim.neighbors.map(n => `${n.address} on ${n.ifName}`).join(', ')) : null) : null);
+      detail && tab === 'routes' ? h('div', { class: 'col', style: 'gap:14px' },
+        h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },
+          textInput(query, v => { query = v; page = 0; }, { placeholder: 'Search groups and source hosts: 239.1.1.1, 10.2.3.4, a port, a switch…', aria: 'Search groups and source hosts', width: '420px', id: 'mc-filter' }),
+          toggle('Only groups with receivers', onlyForwarding, () => { onlyForwarding = !onlyForwarding; page = 0; redraw(); }),
+          cur?.source === 'cisco' ? toggle('Hide idle routes', hideIdle, () => { hideIdle = !hideIdle; page = 0; redraw(); }, { onText: 'Hiding idle', offText: 'Showing idle' }) : null),
+        table(detail)) : null,
+      detail && tab === 'load' ? (detail.load?.length ? loadTable(detail.load, detail.routes, !!detail.truncated) : empty('This device publishes no per-interface multicast counters.')) : null,
+      detail && tab === 'rpf' ? (rpfSection(detail) ?? empty('No wrong-interface drops now, and none in the last 24 hours.')) : null,
+      detail && tab === 'igmp' ? h('div', { class: 'col', style: 'gap:14px' },
+        detail.igmp?.length ? igmpTable(detail.igmp) : null,
+        detail.rps && (detail.rps.map.length || detail.rps.candidate.length || detail.rps.inUse?.length) ? rpTable(detail.rps) : null,
+        detail.pim.neighbors.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'PIM neighbours: ', detail.pim.neighbors.map(n => `${n.address} on ${n.ifName}`).join(', ')) : null,
+        !detail.igmp?.length && !(detail.rps && (detail.rps.map.length || detail.rps.candidate.length || detail.rps.inUse?.length)) && !detail.pim.neighbors.length ? empty('This device published no IGMP querier, rendezvous point or PIM neighbour information.') : null) : null) : null);
+}
+
+/** The sections of the page, one tab each: the routes themselves, the load on each interface, wrong-interface drops, and the IGMP and rendezvous point setup. */
+function tabBar(d: Detail): VNode {
+  const dropping = d.routes.filter(r => (r.rpf?.failuresNew ?? 0) > 0).length;
+  const items: { id: Tab; label: string }[] = [
+    { id: 'routes', label: `Routes (${num(new Set(d.routes.map(r => r.group)).size)} groups)` },
+    { id: 'load', label: `Interface load${d.load?.length ? ` (${num(d.load.length)})` : ''}` },
+    { id: 'rpf', label: dropping ? `RPF drops (${num(dropping)} now)` : 'RPF drops' },
+    { id: 'igmp', label: 'IGMP and rendezvous points' }
+  ];
+  return tabs('Multicast sections', items.map(i => ({ ...i, on: tab === i.id })), id => { tab = id as Tab; redraw(); });
 }
 
 /** What NetFlow contributed to the host lists, so an empty result can be told from a feed that does not carry IGMP. */
@@ -391,7 +410,7 @@ function rpfSection(d: Detail): VNode | null {
     now.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) minmax(100px,0.8fr) 110px 120px 140px;--w:760px' },
       h('div', { class: 'tr head' }, ...['Group', 'Source', 'Arrives on', 'Since last read', 'Share of packets', 'Since route created'].map(t => h('span', null, t))),
       now.slice(0, 15).map(r => h('div', { key: keyOf(r), class: 'tr' },
-        h('span', { class: 'mono', style: 'font-size:12px' }, linkBtn(r.group, `Show ${r.group} in the table`, () => { query = r.group; page = 0; redraw(); window.scrollTo({ top: 0 }); })),
+        h('span', { class: 'mono', style: 'font-size:12px' }, linkBtn(r.group, `Show ${r.group} in the table`, () => { query = r.group; page = 0; tab = 'routes'; redraw(); window.scrollTo({ top: 0 }); })),
         h('span', { class: 'mono', style: 'font-size:12px' }, r.sharedTree ? '* (any source)' : r.source), h('span', { class: 'mono', style: 'font-size:12px' }, r.inIf ?? '—'),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(r.rpf!.failuresNew)), h('span', { class: 'mono', style: 'font-size:12px' }, r.rpf!.failuresShare != null ? h('span', null, `${r.rpf!.failuresShare}% `, r.rpf!.failuresMajor ? chip('high', 'warn', 'A large share of what the route carried: drops this size point to a changed route or two paths both sending the group') : h('span', { class: 'dim', title: 'A small share, typical of equal-cost paths with multicast multipath' }, 'minor')) : '—'), h('span', { class: 'mono dim', style: 'font-size:12px' }, num(r.rpf!.failures)))))) : h('span', { class: 'dim', style: 'font-size:12.5px' }, 'No route is dropping at the moment.'),
     now.length > 15 ? h('span', { class: 'dim', style: 'font-size:12px' }, `${num(now.length - 15)} more routes are dropping.`) : null);
@@ -463,10 +482,21 @@ function loadTable(list: NonNullable<Detail['load']>, routes: Route[], truncated
     if (!gs.length) return h('div', { class: 'dim', style: 'padding:6px 16px 10px 34px;font-size:12px' }, 'No route in this list arrives on or is sent out of this interface.' + (truncated ? ' The route list was cut off, so some may be missing.' : ''));
     return h('div', { style: 'padding:2px 16px 10px 34px' }, h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) 80px 110px;--w:480px' },
       h('div', { class: 'tr head' }, ...['Group', 'Source', 'Direction', 'Rate'].map(t => h('span', null, t))),
-      gs.slice(0, cap).map(g => { const t = total(g.routes); return h('div', { key: `${g.group}|${g.dir}`, class: 'tr' },
-        h('span', { class: 'mono', style: mono }, g.group), g.routes.length === 1 ? sourceCell(g.routes[0]!) : h('span', { class: 'mono dim', style: mono }, `${num(g.routes.length)} sources`),
-        h('span', { class: 'dim', style: mono, title: g.dir === 'in' ? 'The group arrives on this interface' : 'The group is sent out of this interface' }, g.dir === 'in' ? 'arrives' : 'sent out'),
-        h('span', { class: 'mono', style: mono }, t === null ? '—' : t === 0 ? '0' : bps(t))); }))),
+      gs.slice(0, cap).map(g => {
+        const t = total(g.routes), k = `${name}|${g.group}|${g.dir}`, on = openLoad.has(k), many = g.routes.length > 1;
+        const srcs = [...g.routes].sort((x, y) => (y.bps ?? -1) - (x.bps ?? -1));
+        return h('div', { key: k },
+          h('div', { class: 'tr', role: many ? 'button' : undefined, tabindex: many ? 0 : undefined, 'aria-expanded': many ? on : undefined, style: many ? 'cursor:pointer' : undefined,
+            onclick: many ? () => toggleSet(openLoad, k) : undefined, onkeydown: many ? keyDown(() => toggleSet(openLoad, k)) : undefined },
+            h('span', { class: 'mono', style: mono }, many ? h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾ ' : '▸ ') : null, g.group),
+            many ? h('span', { class: 'mono dim', style: mono }, `${num(g.routes.length)} sources`) : sourceCell(g.routes[0]!),
+            h('span', { class: 'dim', style: mono, title: g.dir === 'in' ? 'The group arrives on this interface' : 'The group is sent out of this interface' }, g.dir === 'in' ? 'arrives' : 'sent out'),
+            h('span', { class: 'mono', style: mono }, t === null ? '—' : t === 0 ? '0' : bps(t))),
+          on ? h('div', { style: 'padding:2px 0 8px 22px' }, h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(160px,1fr) 110px 90px;--w:360px' },
+            h('div', { class: 'tr head' }, ...['Source', 'Rate', 'Share'].map(x => h('span', null, x))),
+            srcs.slice(0, 100).map(r => h('div', { key: r.source, class: 'tr' }, sourceCell(r), h('span', { class: 'mono', style: mono }, rate(r)),
+              h('span', { class: 'mono dim', style: mono }, t && r.bps !== null ? `${Math.round((r.bps / t) * 100)}%` : '—')))),
+            srcs.length > 100 ? h('div', { class: 'dim', style: 'font-size:12px;padding:4px 16px' }, `${num(srcs.length - 100)} more sources not shown`) : null)) : null); }))),
       gs.length > cap ? h('div', { class: 'dim', style: 'font-size:12px;padding-top:4px' }, `${num(gs.length - cap)} more groups not shown; use the search above to find one`) : null);
   };
   return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Multicast load by interface'),

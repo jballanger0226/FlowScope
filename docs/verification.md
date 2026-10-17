@@ -67,3 +67,6 @@ The Multicast routing check now counts IGMP queriers, rendezvous points and rout
 
 ### Multicast load by interface
 Rate in and out are the routes' own rates added up for each interface (routes arriving on it, and routes with it as a forwarding outgoing interface), because on a Catalyst the interface's multicast byte counter can sit far below the real traffic (hardware-switched streams, as `show ip mroute count` shows 8,000 pps per source). The interface counter is the fallback, and is in the tooltip. Bytes are always the interface counter. Check: compare Rate in for a VLAN with the sum of `kbits per second` in `show ip mroute count` for routes arriving on it.
+
+### Multicast page sections
+The page keeps the device picker, counts, PIM summary and warnings on top, and splits the rest into tabs: Routes (search, filters and the route table), Interface load (open an interface for its groups, and a group for its sources), RPF drops (graph and the routes dropping now) and IGMP and rendezvous points (queriers, RP mappings, PIM neighbours). `#/multicast?dev=<id>&t=rpf|load|igmp|routes` opens a tab; the Needs-attention entry for RPF drops opens the RPF tab, and picking a group from the drop list returns to Routes.
