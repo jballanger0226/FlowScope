@@ -19,6 +19,8 @@ const PREVIEW = 2000;
 const PAGE_SIZES = [100, 200, 500, 1000, 2000];
 let page = 0; let pageSize = 200;
 let partial = false;
+/** The total is only a lower bound ("200+") on a wide range until the person asks for the exact count; a capped list looked at the newest records only. */
+let totalExact = true, capped = false, scanCap = 0, wantCount = false;
 const follow = new Follower(() => bigRange(), () => redraw(), id => pick(id));
 let live = false; let liveTimer: number | undefined;
 
@@ -56,13 +58,13 @@ function syncHash(): void {
 }
 
 let seq = 0;
-type Reply = { rows: Row[]; total: number; truncated: boolean; partial: boolean; errors: string[] };
+type Reply = { rows: Row[]; total: number; totalExact?: boolean; capped?: boolean; scanCap?: number | null; truncated: boolean; partial: boolean; errors: string[] };
 async function load(quiet = false, keepPage = false): Promise<void> {
   const my = ++seq;
-  if (!keepPage) page = 0;
+  if (!keepPage) { page = 0; if (!quiet) wantCount = false; }
   if (!quiet) { loading = true; loadError = ''; redraw(); }
-  const base = { range, q: fullQuery(), sort: sort.key, dir: sort.dir, limit: pageSize, offset: page * pageSize };
-  const apply = (r: Reply) => { rows = r.rows; total = r.total; truncated = r.truncated; errors = r.errors; };
+  const base = { range, q: fullQuery(), sort: sort.key, dir: sort.dir, limit: pageSize, offset: page * pageSize, ...(wantCount ? { count: 1 } : {}) };
+  const apply = (r: Reply) => { rows = r.rows; total = r.total; totalExact = r.totalExact !== false; capped = !!r.capped; scanCap = r.scanCap ?? 0; truncated = r.truncated; errors = r.errors; };
   try {
     // First page of a fresh search: show the newest records straight away, then fetch everything in the background
     if (!quiet && page === 0) {
@@ -160,8 +162,9 @@ function list(): VNode {
       btn('Show only these', { kind: 'danger', onclick: () => { ttlOnly = true; void load(); redraw(); } })) : null,
     partial ? h('div', { class: 'note warn row', role: 'status', style: 'gap:10px' }, h('span', { 'aria-hidden': 'true', class: 'spin' }),
       h('span', null, h('b', null, 'Not everything has loaded yet. '), `This is the newest ${num(PREVIEW)} flow records. The rest of the time range is still loading, so byte and packet totals and the stream count will change when it finishes.`)) : null,
+    capped && !loading ? h('div', { class: 'note warn' }, h('b', null, 'Showing the newest streams. '), `A range this wide holds more than the ${num(scanCap)} flow records FlowScope looks at for a list, so older streams are left out. Narrow the time range or add a filter to see them, or sort by bytes or packets to rank everything.`) : null,
     h('div', { class: 'row', style: 'justify-content:space-between;color:var(--muted)' },
-      h('span', { 'aria-live': 'polite' }, loading ? 'Searching…' : countText()),
+      h('span', { 'aria-live': 'polite', class: 'row', style: 'gap:8px' }, loading ? 'Searching…' : countText(), !loading && !partial && !totalExact && total > 0 ? btn('Count all', { small: true, kind: 'ghost', title: 'Count every matching stream. On a wide range this can take a while.', onclick: () => { wantCount = true; void load(false, true); } }) : null),
       pager(false)),
     loadError ? note(loadError, 'bad', true) : null,
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${COLS};--w:1470px` },
@@ -189,16 +192,17 @@ function countText(): string {
   if (partial) return `${num(rows.length)} stream${rows.length === 1 ? '' : 's'} so far`;
   if (!total) return '0 streams';
   const from = page * pageSize + 1, to = page * pageSize + rows.length;
-  return `${num(from)}–${num(to)} of ${num(total)} stream${total === 1 ? '' : 's'}`;
+  return `${num(from)}–${num(to)} of ${num(total)}${totalExact ? '' : '+'} stream${total === 1 ? '' : 's'}`;
 }
 
 function pager(bottom: boolean): VNode {
   const pages = Math.max(1, Math.ceil(total / pageSize));
+  const pageText = totalExact ? `Page ${num(page + 1)} of ${num(pages)}` : `Page ${num(page + 1)}`;
   const busy = loading || partial;   // the totals are not final until the full answer is in
   return h('div', { class: 'row', style: 'gap:8px', role: 'navigation', 'aria-label': bottom ? 'Pages (bottom)' : 'Pages' },
     bottom ? null : [h('span', null, 'Rows per page'), select(String(pageSize), PAGE_SIZES.map(n => [String(n), String(n)] as [string, string]), v => { pageSize = Number(v); void load(); }, { aria: 'Rows per page', width: '84px' })],
     btn('‹ Previous', { small: true, kind: 'ghost', disabled: busy || page === 0, onclick: () => goPage(page - 1) }),
-    h('span', { class: 'mono', style: 'font-size:12px' }, partial ? '…' : `Page ${num(page + 1)} of ${num(pages)}`),
+    h('span', { class: 'mono', style: 'font-size:12px' }, partial ? '…' : pageText),
     btn('Next ›', { small: true, kind: 'ghost', disabled: busy || page + 1 >= pages, onclick: () => goPage(page + 1) }));
 }
 

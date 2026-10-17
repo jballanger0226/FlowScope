@@ -32,6 +32,21 @@ const nul = (v: number | null | undefined): number | null => (typeof v === 'numb
 
 /* ------------------------------------------------------------------ http client */
 
+/**
+ * Limits for the searches and reports that read raw flow records over a wide range. Without them one request for a week of flows builds every stream in memory and
+ * takes the whole machine with it. Past external_group_by / external_sort ClickHouse spills to disk instead of RAM; past max_memory_usage or max_execution_time the query
+ * fails with an error that is turned into advice. Tune with FLOWSCOPE_CH_QUERY_MEMORY_MB (default 4096) and FLOWSCOPE_CH_QUERY_SECONDS (default 90).
+ */
+export function queryLimits(env: NodeJS.ProcessEnv = process.env): Record<string, number> {
+  const mb = Math.max(256, Number(env.FLOWSCOPE_CH_QUERY_MEMORY_MB) || 4096), sec = Math.max(5, Number(env.FLOWSCOPE_CH_QUERY_SECONDS) || 90);
+  return { max_memory_usage: mb * 1048576, max_bytes_before_external_group_by: Math.floor(mb * 1048576 * 0.4), max_bytes_before_external_sort: Math.floor(mb * 1048576 * 0.4), max_execution_time: sec };
+}
+/** A limit that was hit, in words the person can act on. */
+function limitError(e: unknown): Error {
+  const m = e instanceof Error ? e.message : String(e);
+  if (/MEMORY_LIMIT_EXCEEDED|memory limit|TIMEOUT_EXCEEDED|Timeout exceeded|too slow|\b(159|241)\b/i.test(m)) return new Error('This search covers too much data to answer within the limits set for it. Narrow the time range or add a filter (an address, port or protocol).');
+  return e instanceof Error ? e : new Error(m);
+}
 interface ChOpts { settings?: Record<string, string | number>; body?: string; noDb?: boolean; timeoutMs?: number }
 
 class ChClient {
@@ -66,8 +81,8 @@ class ChClient {
 
   async exec(sql: string, o: ChOpts = {}): Promise<void> { await this.raw(sql, o); }
 
-  async rows<T = Record<string, any>>(sql: string): Promise<T[]> {
-    const t = await this.raw(sql + '\nFORMAT JSONEachRow');
+  async rows<T = Record<string, any>>(sql: string, settings?: Record<string, string | number>): Promise<T[]> {
+    const t = await this.raw(sql + '\nFORMAT JSONEachRow', settings ? { settings } : {});
     const out: T[] = [];
     for (const line of t.split('\n')) if (line) out.push(JSON.parse(line));
     return out;
@@ -274,9 +289,14 @@ class ClickHouseStore implements TsStore {
     if (!q.range || !Number.isFinite(q.range.from) || !Number.isFinite(q.range.to)) throw new Error('invalid time range');
     const inRange = `ts1 BETWEEN ${N(q.range.from)} AND ${N(q.range.to)}`;
     const cand = q.conds.filter(c => c.kind !== 'qos' && !(c.kind === 'ttl' && c.mode === 'ok')).map(c => `AND skey IN (SELECT skey FROM flow_raw WHERE ${inRange} AND ${recordPred(c, RAW, q.localIps)})`).join('\n');
-    const recent = q.recent && q.recent > 0 ? Math.trunc(q.recent) : 0;
-    // a preview reads only the newest records; it is partial when more matching records exist than it reads
-    const partial = recent > 0 && Number((await this.c.rows<Record<string, any>>(`SELECT count() AS n FROM (SELECT 1 FROM flow_raw WHERE ${inRange} ${cand} LIMIT ${recent + 1})`))[0]?.n ?? 0) > recent;
+    const preview = q.recent && q.recent > 0 ? Math.trunc(q.recent) : 0;
+    const cap = !preview && q.maxRecords && q.maxRecords > 0 ? Math.trunc(q.maxRecords) : 0;
+    const recent = preview || cap;
+    const lim = queryLimits();
+    // a preview or a cap reads only the newest records; it is partial (or capped) when more matching records exist than it reads
+    const more = recent > 0 && Number((await this.c.rows<Record<string, any>>(`SELECT count() AS n FROM (SELECT 1 FROM flow_raw WHERE ${inRange} ${cand} LIMIT ${recent + 1})`, lim).catch(e => { throw limitError(e); }))[0]?.n ?? 0) > recent;
+    const partial = !!preview && more, capped = !!cap && more;
+    const exactTotal = q.countTotal !== false;
     const tx = rawTtlSql(q.localIps);
     let ttlCond = '';
     const exact: string[] = [];
@@ -316,13 +336,15 @@ class ClickHouseStore implements TsStore {
       SELECT i.k AS skey, i.i_ip AS src_ip, i.i_dip AS dst_ip, i.i_pr AS proto, i.i_sp AS sport, i.i_dp AS dport,
              t.tt0 AS t0, t.tt1 AS t1, t.tb AS b, t.tp AS p, t.tfb AS fb, t.tfp AS fp, t.texps AS exps, t.tvl AS vlan, t.tfl AS fl,
              t.tdin AS d_in, t.tdmin AS d_min, t.tdmax AS d_max, t.tdpost AS d_post, t.trm AS rm, t.ttx AS tx, t.ttxi AS txi, t.tttl AS ttl_lo,
-             if(t.tnd > 1 OR t.trm = 1, 1, 0) AS qchg, count() OVER () AS total
+             if(t.tnd > 1 OR t.trm = 1, 1, 0) AS qchg${exactTotal ? ', count() OVER () AS total' : ''}
       FROM i INNER JOIN t ON t.k = i.k
       WHERE 1 = 1 ${exact.length ? 'AND ' + exact.join(' AND ') : ''} ${qos} ${ttlCond}
       ORDER BY ${order} ${q.dir === 'asc' ? 'ASC' : 'DESC'}, t.tt1 DESC
-      LIMIT ${N(Math.max(1, Math.trunc(q.limit)))} OFFSET ${N(Math.max(0, Math.trunc(q.offset ?? 0)))}`;
-    const rows = await this.c.rows<Record<string, any>>(sql);
-    const total = rows.length ? Number(rows[0].total) : 0;
+      LIMIT ${N(Math.max(1, Math.trunc(q.limit)) + (exactTotal ? 0 : 1))} OFFSET ${N(Math.max(0, Math.trunc(q.offset ?? 0)))}`;
+    const all = await this.c.rows<Record<string, any>>(sql, lim).catch(e => { throw limitError(e); });
+    const extra = !exactTotal && all.length > Math.trunc(q.limit);
+    const rows = extra ? all.slice(0, Math.trunc(q.limit)) : all;
+    const total = exactTotal ? (rows.length ? Number(rows[0].total) : 0) : (q.offset ?? 0) + rows.length + (extra ? 1 : 0);
     const out: StreamRow[] = rows.map(r => {
       const qchg = Number(r.qchg) === 1;
       const dIn = Number(r.d_in);
@@ -337,7 +359,7 @@ class ClickHouseStore implements TsStore {
         dscpOut: qchg ? (Number(r.rm) === 1 ? Number(r.d_post) : (Number(r.d_max) !== dIn ? Number(r.d_max) : Number(r.d_min))) : null
       };
     });
-    return { rows: out, total, truncated: total > (q.offset ?? 0) + out.length, tier: 'raw', partial };
+    return { rows: out, total, truncated: total > (q.offset ?? 0) + out.length, tier: 'raw', partial, capped, totalExact: exactTotal };
   }
 
   async streamRecords(skey: string, range: TimeRange): Promise<(FlowRecord & { primary: boolean })[]> {
@@ -401,7 +423,7 @@ class ClickHouseStore implements TsStore {
             FROM ${source} WHERE ${where.join(' AND ')} ${grp.length ? 'GROUP BY ' + grp.join(', ') : ''})
       ORDER BY ${orderCol} DESC
       LIMIT ${N(Math.max(0, Math.trunc(spec.topN)))}`;
-    const rows = await this.c.rows<Record<string, any>>(sql);
+    const rows = await this.c.rows<Record<string, any>>(sql, queryLimits()).catch(e => { throw limitError(e); });
     if (!rows.length) {
       // top-N of zero, or nothing matched: still report totals
       const tot = (await this.c.rows<Record<string, any>>(`SELECT sum(${cm.bytes}) AS b, sum(${cm.pkts}) AS p, sum(${cm.flows}) AS f, 0 AS n FROM ${source} WHERE ${where.join(' AND ')}`))[0];
