@@ -8,17 +8,18 @@
  * authorizationSuccess, 7 authorizationFailed), 6 cafSessionDomain (1 other, 2 data, 3 voice), 7 cafSessionAuthHostMode (3 multiAuth), 10
  * cafSessionAuthUserName (the RADIUS user name, e.g. IT-Camera), 14 cafSessionAuthVlan (the VLAN the server assigned, 0 when none), 22
  * cafSessionVlanGroupName (the VLAN name or group the server sent, e.g. DEVICE_CAMERA; it is NOT the security group tag). The tag is a separate RADIUS
- * attribute and is not in this table: it comes from the IP-to-tag bindings (sgt.ts). A session that is not authorizationSuccess has domain other,
- * which is how "authenticated" is told here.
+ * attribute and is not in this table: it comes from the IP-to-tag bindings (sgt.ts). A session is authenticated when its status is authorizationSuccess.
  */
 import { toNum, type SnmpClient, type SnmpValue } from './client.js';
 import { ipOf } from './multicast.js';
 
 export type AuthDomain = 'data' | 'voice' | 'unknown';
-export interface AuthSession { ifIndex: number; mac: string; ip: string; vlan: number; domain: AuthDomain; user: string; vlanGroup: string }
+export type AuthStatus = 'authorized' | 'failed' | 'idle' | 'other';
+export interface AuthSession { ifIndex: number; mac: string; ip: string; vlan: number; status: AuthStatus; domain: AuthDomain; user: string; vlanGroup: string }
 
 const T = '1.3.6.1.4.1.9.9.656.1.4.1.1';
 const DOMAIN: Record<number, AuthDomain> = { 1: 'unknown', 2: 'data', 3: 'voice' };
+const STATUS: Record<number, AuthStatus> = { 1: 'idle', 6: 'authorized', 7: 'failed' };
 const EMPTY = new Map<string, SnmpValue>();
 const col = (c: SnmpClient, n: number) => c.column(`${T}.${n}`, 50).catch(() => EMPTY);
 const text = (v: SnmpValue | undefined): string => (v === undefined || v === null ? '' : Buffer.isBuffer(v) ? v.toString('utf8').replace(/[^\x20-\x7e]/g, '') : String(v)).trim();
@@ -28,13 +29,13 @@ export function macOf(v: SnmpValue | undefined): string | null {
 }
 
 export async function readAuthSessions(c: SnmpClient): Promise<AuthSession[]> {
-  const [mac, ip, domain, vlan, user, vlanGroup] = await Promise.all([2, 4, 6, 14, 10, 22].map(n => col(c, n)));
+  const [mac, ip, status, domain, vlan, user, vlanGroup] = await Promise.all([2, 4, 5, 6, 14, 10, 22].map(n => col(c, n)));
   const out: AuthSession[] = [];
   for (const [idx, v] of mac) {
     const m = macOf(v); if (!m) continue;
     const ifIndex = Number(idx.split('.')[0]); if (!Number.isInteger(ifIndex) || ifIndex <= 0) continue;
     const vl = toNum(vlan.get(idx) ?? null) ?? 0;
-    out.push({ ifIndex, mac: m, ip: ipOf(ip.get(idx)) ?? '', vlan: vl >= 1 && vl <= 4094 ? vl : 0, domain: DOMAIN[toNum(domain.get(idx) ?? null) ?? 1] ?? 'unknown', user: text(user.get(idx)), vlanGroup: text(vlanGroup.get(idx)) });
+    out.push({ ifIndex, mac: m, ip: ipOf(ip.get(idx)) ?? '', vlan: vl >= 1 && vl <= 4094 ? vl : 0, status: STATUS[toNum(status.get(idx) ?? null) ?? 0] ?? 'other', domain: DOMAIN[toNum(domain.get(idx) ?? null) ?? 1] ?? 'unknown', user: text(user.get(idx)), vlanGroup: text(vlanGroup.get(idx)) });
   }
   return out;
 }

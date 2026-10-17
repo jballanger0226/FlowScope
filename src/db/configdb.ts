@@ -287,7 +287,9 @@ const MIGRATIONS: string[] = [
   // security group tags (TrustSec) per host address and their names, replaced as a whole at each read of a device
   `CREATE TABLE ip_sgt (dev_id INTEGER NOT NULL, vrf TEXT NOT NULL, ip TEXT NOT NULL, sgt INTEGER NOT NULL, source TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, vrf, ip));
    CREATE INDEX ip_sgt_ip ON ip_sgt(ip);
-   CREATE TABLE sgt_names (dev_id INTEGER NOT NULL, sgt INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (dev_id, sgt));`
+   CREATE TABLE sgt_names (dev_id INTEGER NOT NULL, sgt INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (dev_id, sgt));`,
+  // whether the session authenticated: cafSessionStatus as authorized, failed, idle or other
+  `ALTER TABLE auth_sessions ADD COLUMN status TEXT NOT NULL DEFAULT '';`
 ];
 
 export class ConfigDb {

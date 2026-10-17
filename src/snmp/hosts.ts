@@ -126,15 +126,15 @@ export class HostTracker {
       for (const [k, n] of sgt.names) sn.run(d.id, k, n);
       this.db.prepare('DELETE FROM auth_sessions WHERE dev_id = ?').run(d.id);
       const byVlanVrf = this.devs.vrfMaps(d.id).byVlan;
-      const us = this.db.prepare('INSERT OR REPLACE INTO auth_sessions(dev_id, mac, if_index, vlan, ip, policy, profile, domain, last_seen) VALUES (?,?,?,?,?,?,?,?,?)');
+      const us = this.db.prepare('INSERT OR REPLACE INTO auth_sessions(dev_id, mac, if_index, vlan, ip, policy, profile, domain, status, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?)');
       for (const a of auth) {
-        us.run(d.id, a.mac, a.ifIndex, a.vlan, a.ip, a.user, a.vlanGroup, a.domain, now);
+        us.run(d.id, a.mac, a.ifIndex, a.vlan, a.ip, a.user, a.vlanGroup, a.domain, a.status, now);
         if (a.ip) { const vl = a.vlan || ports.get(a.ifIndex)?.vlan || 0; ua.run(d.id, a.ip, a.mac, a.ifIndex, now, vl ? byVlanVrf.get(vl) ?? '' : ''); }
       }
       this.db.prepare('DELETE FROM neighbors WHERE dev_id = ?').run(d.id);
       const un = this.db.prepare('INSERT OR REPLACE INTO neighbors(dev_id, if_index, proto, rem_key, rem_name, rem_port, rem_ip, kind, caps, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
       for (const n of nbs) un.run(d.id, n.ifIndex, n.proto, n.key, n.name, n.port, n.ip, n.kind, n.caps.join(','), now);
-      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries${vrfArp ? ` (${vrfArp} in VRFs)` : ''}`, ...(binds.length ? [`${binds.length} DHCP snooping bindings`] : []), ...(sgt.bindings.some(b => b.source !== 'internal') ? [`${sgt.bindings.filter(b => b.source !== 'internal').length} security group tag bindings`] : []), ...(auth.length ? [`${auth.length} authentication sessions (${auth.filter(a => a.domain !== 'unknown').length} authenticated, ${auth.filter(a => a.vlan).length} with a VLAN from the server)`] : []), `${nbs.length} neighbours`, ...(wlan ? [`${wlan.clients.length} wireless clients`] : []), ...notes];
+      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries${vrfArp ? ` (${vrfArp} in VRFs)` : ''}`, ...(binds.length ? [`${binds.length} DHCP snooping bindings`] : []), ...(sgt.bindings.some(b => b.source !== 'internal') ? [`${sgt.bindings.filter(b => b.source !== 'internal').length} security group tag bindings`] : []), ...(auth.length ? [`${auth.length} authentication sessions (${auth.filter(a => a.status === 'authorized').length} authenticated, ${auth.filter(a => a.vlan).length} with a VLAN from the server)`] : []), `${nbs.length} neighbours`, ...(wlan ? [`${wlan.clients.length} wireless clients`] : []), ...notes];
       this.db.prepare('UPDATE devices SET hosts_at = ?, hosts_note = ? WHERE id = ?').run(now, parts.join('; '), d.id);
     });
     return { macs: fdb.entries.length, arp: arpRows, neighbors: nbs.length, wifiClients: wlan?.clients.length ?? 0, note: notes.join('; ') };
@@ -235,7 +235,7 @@ export class HostTracker {
     const arp = this.db.prepare('SELECT ip FROM arp WHERE mac = ? ORDER BY last_seen DESC LIMIT 4');
     const wip = this.db.prepare('SELECT ip FROM wlan_client WHERE mac = ? AND ip != \'\' ORDER BY last_seen DESC LIMIT 1');
     const tg = this.db.prepare('SELECT g.sgt AS value, COALESCE(n.name, \'\') AS name FROM ip_sgt g LEFT JOIN sgt_names n ON n.dev_id = g.dev_id AND n.sgt = g.sgt WHERE g.dev_id = ? AND g.ip = ? AND g.source != \'internal\' ORDER BY g.last_seen DESC LIMIT 1');
-    const au = this.db.prepare("SELECT policy AS user, vlan, domain NOT IN ('unknown', '') AS authenticated FROM auth_sessions WHERE dev_id = ? AND mac = ? AND if_index = ?");
+    const au = this.db.prepare("SELECT policy AS user, vlan, status = 'authorized' AS authenticated FROM auth_sessions WHERE dev_id = ? AND mac = ? AND if_index = ?");
     return rows.map(r => {
       const ips = [...new Set((arp.all(r.mac) as unknown as { ip: string }[]).map(x => x.ip))];
       // an access point knows its clients' addresses even when no polled router has them in its ARP table
