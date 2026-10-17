@@ -102,3 +102,15 @@ Checked against a full walk of a Catalyst 9300 SD-Access edge (`test/cisco_auth_
 - The EID index is an LCAF instance-ID address: `[L, 64, 3, len, 2, iid×3, afi×2, address]`, a RLOC after it is `8.8.0.1.4.a.b.c.d.32`. That layout was derived from the walk and checked on all 266 + 232 rows; IPv6 EIDs are not read (the walk has none).
 - The cache entry expiry time is not shown: the walk's values do not settle its unit.
 - The registration check compares registered IPv4 /32 addresses with the ARP entries of hosts whose MAC is on a port (FDB). A registration is only called stale after 15 minutes, and the node's own interface addresses (anycast gateways) are left out. An ARP entry that aged out of a quiet host can look like a stale registration: it is a hint, not a fault.
+
+## PoE budget, reserved and drawn (Cisco Catalyst 9300 walk)
+
+`pethMainPsePower` (budget) and `pethMainPseConsumptionPower` (drawn) are standard; the power the switch has set aside for powered devices is the Cisco `cpeExtMainPseUsedPower` (mW, `.9.9.402.1.3.1.4`, with the remainder in `.5`). The reserved figure is what decides whether the next device is refused, so it is shown beside the drawn one. Walk: switch 1 budget 2063 W, drawn 474 W, reserved 1956.8 W (94.9%); switch 2 budget 1287 W, drawn 231 W, reserved 683.1 W (53.1%). Per port, `cpeExtPsePortPwrAllocated` (.7) and `cpeExtPsePortPwrConsumption` (.9) in mW, turned into an ifIndex through `cpeExtPsePortEntPhyIndex` (.11) and ENTITY-MIB `entAliasMappingIdentifier`. All 96 ports map; per-port sums (707.9 W drawn, 2639.6 W reserved) match the two main supplies (705 W, 2639.9 W). The format of the alias value (an OID ending in the ifIndex) is assumed from the walk text.
+
+## SNMP contexts for the walk form (Cisco Catalyst 9300 walk)
+
+CISCO-CONTEXT-MAPPING-MIB `cContextMappingVrfName` (.1.3.6.1.4.1.9.9.468.1.1.1.2) is indexed by the context name spelled as length plus character codes. The walk gives vrf-BRANCH, vrf-DEVICE, vrf-GUEST, vrf-MEDIA, vrf-PCI and vrf-USER. The standard vacmContextName fallback is not in that walk and is untested on a device.
+
+## PoE power denied, per port
+
+`pethPsePortPowerDeniedCounter` (.1.3.6.1.2.1.105.1.1.1.12, index group.port as in the Cisco PoE table) is read with the per-port PoE columns. A port whose counter went up since the previous read, within the last day, gets a "PoE denied" tag beside its name in the interface table and a red note in its PoE box. The counter is 0 on all 96 ports of the walk, so this has not been checked against a port that was really refused.

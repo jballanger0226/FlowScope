@@ -85,7 +85,7 @@ function demoHealth(d: Dev, now: number): Health {
     S('optic', `${i[0]} Module Temperature`, 34 + Math.round(wave(1500) * 50) / 10, '°C', 'ok', 'ok', { optic: 'temp' });
   }
   if (d.name === 'dist-sw-01') {
-    h.poe = [{ group: 1, budgetW: 740, usedW: 205 + Math.round(wave(600) * 40), usedPct: 0, status: 'on', portsDelivering: 3, portsFault: 0, portsTotal: 24 }];
+    h.poe = [{ group: 1, budgetW: 740, usedW: 205 + Math.round(wave(600) * 40), usedPct: 0, allocW: 676.5, remainingW: 63.5, allocPct: 91.4, status: 'on', portsDelivering: 3, portsFault: 0, portsTotal: 24 }];
     h.poe[0].usedPct = Math.round((h.poe[0].usedW! / 740) * 1000) / 10;
     h.stp = { rootId: '32768/00:1c:73:00:00:11', isRoot: false, rootPort: 3, rootCost: 4, topChanges: 17, sinceChangeSec: 3 * 86400 + 7200, blockingPorts: 1, ports: 12 };
   } else if (d.name === 'dc-spine-01') h.stp = { rootId: '4096/' + d.mac, isRoot: true, rootPort: 0, rootCost: 0, topChanges: 4, sinceChangeSec: 9 * 86400, blockingPorts: 0, ports: 8 };
@@ -590,6 +590,7 @@ function seedFabric(app: App, id: number, net: Net, now: number): void {
   app.devices.saveData(id, 'config', { readAt: now, changedAt: now - 4_600, savedAt: now - 23_700, unsaved: true, unsavedSec: 4.6, events: [{ at: now - 86_400_000, what: 'saved', user: 'netops', via: 'remote session' }] }, now);
   const ports = ['Gi1/0/12', 'Gi1/0/14', 'Gi1/0/15', 'Gi1/0/16', 'Gi1/0/20', 'Gi1/0/24'].map(n => net.ifIdx.get('dist-sw-01|' + n)).filter((x): x is number => !!x);
   app.devices.saveData(id, 'authsetup', ports.map(ifIndex => ({ ifIndex, dot1x: true, mab: true, mode: 'multi-auth', control: 'auto', open: ifIndex !== ports[5], reauth: false })), now);
+  app.devices.saveData(id, 'poeports', ports.map((ifIndex, n) => ({ ifIndex, allocW: n % 2 ? 15.4 : 30, drawnW: n % 2 ? 4.1 : 6.3 + n, maxW: 90, detected: true, denied: n === 2 ? 4 : 0, deniedAt: n === 2 ? now - 300_000 : null })), now);
   // LISP: endpoints the node resolved, what it registered, and a day of cache movement
   const rl = ['10.255.1.7', '10.255.1.11', '10.255.0.1'];
   const hostsIn = ['10.9.0.5', '10.9.0.12', '10.9.0.30', '10.9.2.30'];

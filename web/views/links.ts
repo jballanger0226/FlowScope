@@ -6,7 +6,7 @@ import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, deb
 import { post } from '../api.js';
 import { correlate, verdict } from './correlate.js';
 import { attentionPanel, cards, cardsRow, issues, type Target } from './links_overview.js';
-import { hardwarePanel, hasHardware, hasOptics, linkQuality, nbarPanel, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
+import { hardwarePanel, hasHardware, hasOptics, linkQuality, nbarPanel, opticCell, opticMap, poePortBox, protocolsPanel, type HealthRes } from './links_health.js';
 import { lispPanel, type LispView } from './lisp.js';
 import { publicAddresses } from './ip_scope.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
@@ -17,7 +17,7 @@ interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: nu
 interface Iface {
   mac: string; addresses: string[];
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
-  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[]; authSetup?: { methods: string; mode: string; open: boolean; control: string };
+  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[]; authSetup?: { methods: string; mode: string; open: boolean; control: string }; poe?: { allocW: number; drawnW: number; maxW: number | null; detected: boolean; denied: number | null; deniedAt: number | null };
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
@@ -417,13 +417,13 @@ function ifTable(dev: Dev): VNode {
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:${light ? 1545 : 1430}px` },
       h('div', { class: 'tr head' }, ...['Interface', 'Description', 'IP address', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', ...(light ? [h('span', { title: 'Optic light levels in dBm: receive / transmit' }, 'Light Rx / Tx')] : []), 'In', 'Out', 'Discards', 'Service policy', 'Flows'].map(t => (typeof t === 'string' ? h('span', null, t) : t))),
       h('div', { class: 'scroll' }, rows.map(i => h('div', { key: i.ifIndex, class: 'tr pick', 'aria-current': i.ifIndex === ifIndex ? 'true' : undefined, onclick: () => select_(dev.id, i.ifIndex, 'interfaces') },
-        h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex, 'interfaces'); } }, i.name), i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
+        h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex, 'interfaces'); } }, i.name), poeDenied(i) ? h('span', { class: 'tag bad', style: 'margin-left:6px;white-space:nowrap;font-size:11px', title: poeDenied(i)! }, 'PoE denied') : null, i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
         h('span', { class: 'muted' }, i.alias || '—'),
         ipCell(i),
         nbCell(nbOf(i.ifIndex)),
         vlanCell(i),
         h('span', { class: 'mono', style: 'font-size:12px' }, i.speedMbps ? (i.speedMbps >= 1000 ? i.speedMbps / 1000 + ' G' : i.speedMbps + ' M') : '—'),
-        h('span', null, i.oper === 'up' ? statusEl('ok', 'up') : statusEl(i.oper === 'down' ? 'bad' : 'off', i.oper)),
+        h('span', { class: 'col', style: 'gap:2px;align-items:flex-start' }, i.oper === 'up' ? statusEl('ok', 'up') : statusEl(i.oper === 'down' ? 'bad' : 'off', i.oper), null),
         light ? opticCell(optics.get(i.ifIndex)) : null,
         utilCell(i.utilIn, i.inBps), utilCell(i.utilOut, i.outBps),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(i.disc + i.err)),
@@ -431,6 +431,11 @@ function ifTable(dev: Dev): VNode {
         h('span', null, btn('Flows', { small: true, kind: 'ghost', title: `Flows by port: the busiest flows entering or leaving ${i.name}`, aria: `Flows through ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); go('ports', { dev: dev.id, if: i.ifIndex }); } })))),
         !dev.interfaces.length ? empty('This device has not reported any interfaces yet.') : !rows.length ? empty('No interface matches that search.') : null))));
 }
+/** Words for a port the switch refused power in the last day, or null. */
+const poeDenied = (i: Iface): string | null => {
+  const x = i.poe; if (!x?.deniedAt || Date.now() - x.deniedAt > 86_400_000) return null;
+  return `The switch refused this port power (${x.denied} time${x.denied === 1 ? '' : 's'} since it started counting), most recently ${ago(x.deniedAt)}. The device asked for more than the switch had left to give, or the PoE budget was full.`;
+};
 const shortName = (n: Neighbor): string => (n.name ? n.name.split('.')[0] || n.name : n.ip) || 'unnamed';
 
 /** Who is cabled to a port. A neighbour that is a polled device is a link to that device and port, as in the Flow explorer. */
@@ -903,7 +908,7 @@ function streamsPanel(dev: Dev, itf: Iface): VNode {
 /** The sections of the selected interface. Link quality is listed once something is known about it. */
 function ifTabList(dev: Dev, itf: Iface): { id: IfTab; label: string }[] {
   const t: { id: IfTab; label: string }[] = [{ id: 'traffic', label: 'Traffic and queues' }];
-  if (healthRes?.ifExtra.some(x => x.ifIndex === itf.ifIndex) || opticMap(healthRes?.health?.sensors ?? []).has(itf.ifIndex)) t.push({ id: 'quality', label: 'Link quality' });
+  if (healthRes?.ifExtra.some(x => x.ifIndex === itf.ifIndex) || itf.poe?.detected || poeDenied(itf) || opticMap(healthRes?.health?.sensors ?? []).has(itf.ifIndex)) t.push({ id: 'quality', label: 'Link quality' });
   if (!itf.isVlanIf) t.push({ id: 'hosts', label: 'Hosts and neighbours' });
   void dev;
   return t;
@@ -916,6 +921,7 @@ function ifTabs(dev: Dev, itf: Iface): VNode {
 function ifBody(dev: Dev, itf: Iface): VNode {
   const tab = ifTabNow(dev, itf);
   const body = tab === 'quality' ? [
+      itf.poe && (itf.poe.detected || poeDenied(itf)) ? poePortBox(itf.poe, poeDenied(itf)) : null,
       linkQuality(healthRes?.ifExtra.find(x => x.ifIndex === itf.ifIndex), (healthRes?.health?.sensors ?? []).filter(x => x.kind === 'optic' && x.ifIndex === itf.ifIndex), itf.speedMbps),
       qualityGraphs(itf)]
     : tab === 'hosts' ? [hostsPanel(dev, itf)]

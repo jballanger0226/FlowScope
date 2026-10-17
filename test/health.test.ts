@@ -95,7 +95,14 @@ test('PoE budget, spanning tree, OSPF and BGP', async () => {
     '1.3.6.1.2.1.105.1.3.1.1.2.1': 740, '1.3.6.1.2.1.105.1.3.1.1.3.1': 1, '1.3.6.1.2.1.105.1.3.1.1.4.1': 185,
     '1.3.6.1.2.1.105.1.1.1.6.1.1': 3, '1.3.6.1.2.1.105.1.1.1.6.1.2': 3, '1.3.6.1.2.1.105.1.1.1.6.1.3': 2, '1.3.6.1.2.1.105.1.1.1.6.1.4': 4
   }));
-  assert.deepEqual(poe, [{ group: 1, budgetW: 740, usedW: 185, usedPct: 25, status: 'on', portsDelivering: 2, portsFault: 1, portsTotal: 4 }]);
+  assert.deepEqual(poe, [{ group: 1, budgetW: 740, usedW: 185, usedPct: 25, allocW: null, remainingW: null, allocPct: null, status: 'on', portsDelivering: 2, portsFault: 1, portsTotal: 4 }]);
+
+  // a Catalyst stack member (values from a 9300 walk): 474 W drawn, 1,956,760 mW reserved, 106,240 mW left of a 2063 W budget
+  const cat = await readPoe(agent({
+    '1.3.6.1.2.1.105.1.3.1.1.2.1': 2063, '1.3.6.1.2.1.105.1.3.1.1.3.1': 1, '1.3.6.1.2.1.105.1.3.1.1.4.1': 474,
+    '1.3.6.1.4.1.9.9.402.1.3.1.4.1': 1956760, '1.3.6.1.4.1.9.9.402.1.3.1.5.1': 106240
+  }));
+  assert.deepEqual([cat[0]!.usedW, cat[0]!.usedPct, cat[0]!.allocW, cat[0]!.remainingW, cat[0]!.allocPct], [474, 23, 1956.8, 106.2, 94.9]);
 
   const stp = await readStp(agent({
     '1.3.6.1.2.1.17.1.1.0': Buffer.from([0, 0x1c, 0x73, 0, 0, 2]), '1.3.6.1.2.1.17.2.5.0': Buffer.from([0x80, 0x01, 0, 0x1c, 0x73, 0, 0, 1]),

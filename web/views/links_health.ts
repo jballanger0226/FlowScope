@@ -5,7 +5,7 @@ import { bps, dayClock, dur, num } from '../util.js';
 
 export type Level = 'ok' | 'warn' | 'bad' | 'off';
 export interface Sensor { id: string; kind: string; name: string; value: number | null; unit: string; state: Level; stateText: string; optic?: 'tx' | 'rx' | 'temp' | 'other'; ifIndex?: number }
-export interface Poe { group: number; budgetW: number | null; usedW: number | null; usedPct: number | null; status: string; portsDelivering: number; portsFault: number; portsTotal: number }
+export interface Poe { group: number; budgetW: number | null; usedW: number | null; usedPct: number | null; allocW?: number | null; remainingW?: number | null; allocPct?: number | null; status: string; portsDelivering: number; portsFault: number; portsTotal: number }
 export interface Stp { rootId: string; isRoot: boolean; rootPort: number; rootCost: number; topChanges: number | null; sinceChangeSec: number | null; blockingPorts: number; ports: number }
 export interface OspfNeighbor { id: string; address: string; state: string; level: Level }
 export interface BgpPeer { address: string; as: number | null; state: string; level: Level; admin: string; upSec: number | null; updatesIn: number | null; updatesOut: number | null }
@@ -78,7 +78,7 @@ export function attention(hl: Health | null): { level: Level; text: string }[] {
   const opt = hl.sensors.filter(s => s.kind === 'optic' && (s.state === 'bad' || s.state === 'warn'));
   if (opt.length) out.push({ level: opt.some(s => s.state === 'bad') ? 'bad' : 'warn', text: `${opt.length} optic reading${opt.length === 1 ? '' : 's'} outside limits` });
   for (const p of hl.poe) if (p.status === 'faulty' || p.portsFault) out.push({ level: 'bad', text: `PoE: ${p.status === 'faulty' ? 'power source faulty' : p.portsFault + ' port' + (p.portsFault === 1 ? '' : 's') + ' in fault'}` });
-  for (const p of hl.poe) if (p.usedPct !== null && p.usedPct >= 90) out.push({ level: 'warn', text: `PoE budget ${p.usedPct}% used` });
+  for (const p of hl.poe) { const l = poeLevel(p); if (l !== 'ok' && l !== 'off' && p.status !== 'faulty') out.push({ level: l, text: p.allocPct != null && p.allocPct >= 90 ? `PoE ${p.allocPct}% reserved` : `PoE budget ${p.usedPct}% used` }); }
   const nb = hl.ospf.filter(n => n.level !== 'ok'); if (nb.length) out.push({ level: nb.some(n => n.level === 'bad') ? 'bad' : 'warn', text: `${nb.length} OSPF neighbour${nb.length === 1 ? '' : 's'} not full` });
   const bp = hl.bgp.filter(p => p.level === 'bad' || p.level === 'warn'); if (bp.length) out.push({ level: bp.some(p => p.level === 'bad') ? 'bad' : 'warn', text: `${bp.length} BGP peer${bp.length === 1 ? '' : 's'} not established` });
   const ep = (hl.eigrp ?? []).filter(p => p.level !== 'ok'); if (ep.length) out.push({ level: 'warn', text: `${ep.length} EIGRP neighbour${ep.length === 1 ? '' : 's'} retransmitting` });
@@ -137,15 +137,47 @@ export function hardwarePanel(o: { data: HealthRes | null }): VNode | null {
       h('div', { style: 'display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px' }, list.map(sensorTile))));
   }
   if (hl.poe.length) sections.push(h('div', { key: 'poe', class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Power over Ethernet'),
-    h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' }, hl.poe.map(p => stat(hl.poe.length > 1 ? `PoE source ${p.group}` : 'PoE power',
-      h('span', { style: colour(p.status === 'faulty' ? 'bad' : p.usedPct !== null && p.usedPct >= 90 ? 'warn' : 'ok') }, p.usedW !== null && p.budgetW ? `${num(p.usedW)} of ${num(p.budgetW)} W` : p.status),
-      [p.usedPct !== null ? `${p.usedPct}% of the budget` : null, p.portsTotal ? `${p.portsDelivering} of ${p.portsTotal} ports delivering${p.portsFault ? `, ${p.portsFault} in fault` : ''}` : null].filter(Boolean).join(' · ') || undefined)))));
+    h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' }, hl.poe.map(p => poeTile(p, hl.poe.length > 1))),
+    hl.poe.some(p => p.allocW != null) ? h('span', { class: 'dim', style: 'font-size:12px' }, 'Drawn is what the devices use now. Reserved is the power the switch has set aside for them (their class or negotiated maximum): a new device is refused when the reserved power reaches the budget, even if little is being drawn.') : null));
   const ex = o.data?.extras;
   if (ex?.stack) sections.push(stackSection(ex.stack));
   if (ex?.aaa?.servers.length) sections.push(aaaSection(ex.aaa));
   if (ex?.config) sections.push(configSection(ex.config));
   if (ex?.procs) sections.push(processSection(ex.procs));
   return h('div', { class: 'col', style: 'gap:12px' }, sections);
+}
+
+/** PoE of one power source: what is drawn now, what is reserved, and the budget, in one tile with a two-layer bar. */
+export const poeLevel = (p: Poe): Level => (p.status === 'faulty' ? 'bad' : (p.allocPct ?? p.usedPct ?? 0) >= 100 ? 'bad' : (p.allocPct ?? 0) >= 90 || (p.usedPct ?? 0) >= 90 ? 'warn' : 'ok');
+function poeTile(p: Poe, many: boolean): VNode {
+  const b = p.budgetW ?? 0, pc = (w: number | null | undefined) => (b > 0 && w != null ? Math.min(100, (w / b) * 100) : 0);
+  const lvl = poeLevel(p), hasAlloc = p.allocW != null;
+  const ports = p.portsTotal ? `${p.portsDelivering} of ${p.portsTotal} ports delivering${p.portsFault ? `, ${p.portsFault} in fault` : ''}` : '';
+  return h('div', { key: p.group, class: 'stat', style: 'min-width:240px' },
+    h('div', { class: 'slabel' }, many ? `PoE source ${p.group}` : 'PoE power'),
+    h('div', { class: 'svalue' }, h('span', { style: p.status === 'faulty' ? colour('bad') : undefined }, p.usedW !== null ? `${num(p.usedW)} W` : p.status), p.usedW !== null ? h('span', { class: 'dim', style: 'font-size:12px;font-weight:400' }, ' drawn') : null),
+    b > 0 ? h('div', { style: 'position:relative;height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:6px 0 4px', role: 'img', 'aria-label': `${num(p.usedW ?? 0)} W drawn${hasAlloc ? `, ${num(p.allocW!)} W reserved` : ''} of ${num(b)} W` },
+      hasAlloc ? h('span', { style: `position:absolute;inset:0 auto 0 0;width:${pc(p.allocW)}%;background:var(--warn);opacity:.45` }) : null,
+      h('span', { style: `position:absolute;inset:0 auto 0 0;width:${pc(p.usedW)}%;background:var(--${lvl === 'ok' || hasAlloc ? 'accent' : lvl})` })) : null,
+    h('div', { class: 'ssub' }, hasAlloc && b > 0 ? h('span', { style: colour(lvl) }, `${num(p.allocW!)} W reserved of ${num(b)} W (${p.allocPct}%)`) : b > 0 ? `${p.usedPct}% of the ${num(b)} W budget` : '', ports ? h('div', null, ports) : null));
+}
+
+const w1 = (n: number): string => String(Math.round(n * 10) / 10);
+/** One port's PoE as a box, like the whole-switch one: what the device draws, against what the switch has reserved for it. */
+export function poePortBox(x: { allocW: number; drawnW: number; maxW: number | null; detected: boolean }, denied: string | null = null): VNode {
+  // both layers are drawn against the port limit, as the whole-switch tile draws them against the budget: reserved behind, drawn in front
+  const scale = x.maxW && x.maxW > 0 ? x.maxW : Math.max(x.allocW, x.drawnW, 1);
+  const pc = (w: number) => Math.min(100, (w / scale) * 100);
+  const bar = x.allocW > 0 || x.drawnW > 0;
+  return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Power over Ethernet'), h('span', { class: 'dim', style: 'font-size:11.5px' }, 'Drawn is what the device uses now; reserved is what the switch has set aside for it')),
+    denied ? note(denied, 'bad') : null,
+    h('div', { class: 'stat', style: 'min-width:240px;align-self:flex-start' },
+      h('div', { class: 'slabel' }, 'PoE power'),
+      h('div', { class: 'svalue' }, `${w1(x.drawnW)} W`, h('span', { class: 'dim', style: 'font-size:12px;font-weight:400' }, ' drawn')),
+      bar ? h('div', { style: 'position:relative;height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:6px 0 4px', role: 'img', 'aria-label': `${w1(x.drawnW)} W drawn, ${w1(x.allocW)} W reserved${x.maxW ? ` of a ${w1(x.maxW)} W port limit` : ''}` },
+        h('span', { style: `position:absolute;inset:0 auto 0 0;width:${pc(x.allocW)}%;background:var(--warn);opacity:.45` }),
+        h('span', { style: `position:absolute;inset:0 auto 0 0;width:${pc(x.drawnW)}%;background:var(--accent)` })) : null,
+      h('div', { class: 'ssub' }, `${w1(x.allocW)} W reserved${x.maxW ? ` of ${w1(x.maxW)} W` : ''}`)));
 }
 
 const sub = (t: string, hint?: string) => h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, t), hint ? h('span', { class: 'dim', style: 'font-size:11.5px' }, hint) : null);

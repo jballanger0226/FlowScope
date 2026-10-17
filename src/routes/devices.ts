@@ -4,6 +4,7 @@ import { DeviceError } from '../snmp/devices.js';
 import { CredError, type CredInput } from '../snmp/creds.js';
 import { TargetPolicy } from '../snmp/allowed.js';
 import { attachment, int, str, stamp } from './util.js';
+import { readContexts } from '../snmp/contexts.js';
 import { runChecks, cleanOid, vendorOf } from '../snmp/diagnose.js';
 import { WalkJobs, WalkBusy, jobView, filterRows, exportRows, EXPORT_FORMATS, type ExportFormat } from '../snmp/walkjobs.js';
 
@@ -142,6 +143,17 @@ export function registerDevices(app: App): void {
     if (!j || j.devId !== id) throw new HttpError(404, 'That walk has expired. Start it again.');
     return j;
   };
+
+  // The SNMP contexts the device has configured, to fill the context list of the walk form. The field stays free text: a context not listed can still be typed.
+  w.get('/api/devices/:id/contexts', 'snmp', async c => {
+    const id = int(c.params.id, 0, 0, 1e9), d = app.devices.row(id);
+    if (!d) throw new HttpError(404, 'No such device');
+    checkTarget(c, d.ip);
+    let live: Awaited<ReturnType<typeof readContexts>> = [], note = '';
+    const cl = app.devices.open(d);
+    try { live = await readContexts(cl); } catch (e) { note = (e as Error).message; } finally { cl.close(); }
+    c.json({ contexts: live, note });
+  });
 
   w.post('/api/devices/:id/walks', 'snmp', async c => {
     const b = await c.body<{ oid?: string; context?: string }>(1000);
