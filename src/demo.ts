@@ -619,6 +619,21 @@ export async function startDemo(app: App): Promise<void> {
   app.log.info('demo', 'Demo mode: traffic and SNMP counters are simulated. Nothing here comes from your network.');
   let tick = 0;
   const every = (ms: number, fn: () => Promise<void>) => { const t = setInterval(() => { void fn().catch(e => app.log.error('demo', String(e))); }, ms); t.unref(); };
+  // IGMP version 2 membership reports as the spine exports them: three hosts per group also found over SNMP, one that only NetFlow sees, and version 3 reports
+  const igmpFlows = async (): Promise<void> => {
+    const spine = DEVS.find(d => d.name === 'dc-spine-01'), e9 = net.idx('dc-spine-01', 'Eth1/9'); if (!spine || !e9) return;
+    const t = Date.now(), recs: FlowRecord[] = [];
+    const rec = (src: string, dst: string, ago: number): FlowRecord => ({ ts0: t - ago, ts1: t - ago, exporter: spine.ip, inIf: e9, outIf: 0, srcIp: src, dstIp: dst, proto: 2, sport: 0, dport: 0, flags: 0, tos: 0xc0, postTos: null, ttlMin: 1, ttlMax: 1, bytes: 32, pkts: 1, srcMac: hostMac(src), dstMac: null, vlan: 140, natSrcIp: null, natDstIp: null, natSport: null, natDport: null, nextHop: null, sampling: 1 });
+    for (let gi = 0; gi < 26; gi += 2) {
+      const group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`, last = Number(group.split('.')[3]);
+      for (let k = 0; k < 3; k++) recs.push(rec(`10.1.4.${20 + ((last + k * 7) % 40)}`, group, 20_000 + k * 9_000));
+      recs.push(rec('10.1.4.99', group, 40_000));
+    }
+    for (let i = 150; i < 156; i++) recs.push(rec(`10.1.4.${i}`, '224.0.0.22', 30_000));
+    await app.store.insertFlows(recs);
+  };
+  await igmpFlows();
+  every(60_000, igmpFlows);
   // new sessions every few seconds while flow collection is on
   every(5000, async () => {
     if (!app.collect().flow) return;

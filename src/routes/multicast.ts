@@ -6,6 +6,7 @@ import type { FlowRecord } from '../collector/types.js';
 import { int } from './util.js';
 import { modelText, type Entity } from '../snmp/entity.js';
 import { igmpHint, vendorOf } from '../snmp/diagnose.js';
+import { igmpFromFlows } from '../snmp/igmp_flows.js';
 import { buildPlan, type Plan } from '../snmp/multicast_plan.js';
 
 /** A multicast state older than this is shown as out of date */
@@ -60,7 +61,7 @@ export function registerMulticast(app: App): void {
   });
 
   // One device's multicast routes with interface names, the hosts that joined each group, and PIM.
-  w.get('/api/multicast/device', 'ro', c => {
+  w.get('/api/multicast/device', 'ro', async c => {
     const id = int(c.query.get('id'), 0, 0, 1e9);
     const d = id ? app.devices.row(id) : null;
     if (!d) throw new HttpError(404, 'No such device');
@@ -98,8 +99,22 @@ export function registerMulticast(app: App): void {
     const ips = new Set<string>();
     for (const r of m.routes) if (r.source !== '0.0.0.0') ips.add(r.source);
     for (const r of m.receivers) if (r.lastReporter && !r.self) ips.add(r.lastReporter);
-    const members = new Map<string, { ip: string; lastSeen: number; firstSeen: number }[]>();
-    for (const x of app.devices.mcastMembers(id)) { ips.add(x.ip); const k = x.group + '|' + x.ifIndex; const a = members.get(k) ?? []; a.push({ ip: x.ip, lastSeen: x.lastSeen, firstSeen: x.firstSeen }); members.set(k, a); }
+    type Mem = { ip: string; lastSeen: number | null; firstSeen: number | null; via: 'snmp' | 'netflow' | 'both'; recent?: boolean };
+    const members = new Map<string, Mem[]>();
+    for (const x of app.devices.mcastMembers(id)) { ips.add(x.ip); const k = x.group + '|' + x.ifIndex; const a = members.get(k) ?? []; a.push({ ip: x.ip, lastSeen: x.lastSeen, firstSeen: x.firstSeen, via: 'snmp' }); members.set(k, a); }
+    // the same hosts as NetFlow saw them: version 1 and 2 reports name the group; a host in both is confirmed
+    const nf = await igmpFromFlows(app, app.devices.exporterIpsForDevice(id), now);
+    let unmatched = 0;
+    if (nf) {
+      const outIfs = new Set(m.routes.flatMap(r => r.oifs.map(o => o.ifIndex)));
+      for (const [k, hostMap] of nf.members) {
+        const [group, ifs] = [k.slice(0, k.indexOf('|')), Number(k.slice(k.indexOf('|') + 1))];
+        const routed = m.routes.some(r => r.group === group), onOif = outIfs.has(ifs);
+        if (!routed || !onOif) { unmatched += hostMap.size; continue; }
+        const a = members.get(k) ?? []; members.set(k, a);
+        for (const [host, info] of hostMap) { ips.add(host); const e = a.find(x => x.ip === host); if (e) { e.via = 'both'; e.recent = info.recent; } else a.push({ ip: host, lastSeen: null, firstSeen: null, via: 'netflow', recent: info.recent }); }
+      }
+    }
     const hosts: Record<string, { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null } | null> = {};
     for (const ip of [...ips].slice(0, 2500)) {
       const a = app.hosts.locate(ip).attach;
@@ -123,11 +138,12 @@ export function registerMulticast(app: App): void {
         group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', rpf: r.inIfIndex || r.upstream || r.rpf ? { ...rpfPeer(r), inIf: r.inIfIndex ? name(r.inIfIndex) : null, inIfIndex: r.inIfIndex, neighbor: r.upstream, who: who(r.upstream), route: r.rpf ? `${r.rpf.prefix}/${maskLen(r.rpf.mask)}` : null, proto: r.rpf?.proto ? RT_PROTO[r.rpf.proto] ?? null : null, failures: r.rpfFail ?? null } : null, mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
           ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null, pimMode: pimMode.get(o.ifIndex) ?? null,
-          members: (members.get(r.group + '|' + o.ifIndex) ?? []).map(x => ({ ip: x.ip, ageSec: Math.max(0, Math.round((now - x.lastSeen) / 1000)), sinceSec: Math.round((now - x.firstSeen) / 1000) })),
+          members: (members.get(r.group + '|' + o.ifIndex) ?? []).map(x => ({ ip: x.ip, via: x.via, ageSec: x.lastSeen !== null ? Math.max(0, Math.round((now - x.lastSeen) / 1000)) : x.recent ? 300 : 1800, sinceSec: x.firstSeen !== null ? Math.round((now - x.firstSeen) / 1000) : null, approx: x.lastSeen === null })),
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))
       })),
       routeSource: m.routeSource ?? 'ipmroute',
+      netflowIgmp: nf ? { reports: nf.reports, hosts: nf.hosts, v3Hosts: nf.v3Hosts, windowMin: nf.windowMin, unmatched } : null,
       igmp, rps,
       hosts, igmpHint: igmpHint(vendorOf(d.sys_object_id ?? '', d.sys_descr ?? '', (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.')), d.sys_descr ?? ''),
       load: (m.interfaces ?? []).filter(i => (i.inOctets ?? 0) > 0 || (i.outOctets ?? 0) > 0).map(i => ({ name: name(i.ifIndex), inBps: i.inBps, outBps: i.outBps, inOctets: i.inOctets, outOctets: i.outOctets, ttl: i.ttl, rateLimit: i.rateLimit }))

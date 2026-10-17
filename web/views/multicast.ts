@@ -13,7 +13,10 @@ interface DevSummary { id: number; name: string; ip: string; role: string; readA
 interface HostAt { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null }
 interface Join { reporter: string | null; expirySec: number | null; self: boolean }
 interface IgmpHint { vendor: string; platform: string; command: string | null }
-interface Member { ip: string; ageSec: number; sinceSec: number }
+interface Member { ip: string; ageSec: number; sinceSec: number | null; via?: 'snmp' | 'netflow' | 'both'; approx?: boolean }
+const VIA_TEXT = { snmp: 'SNMP', netflow: 'NetFlow', both: 'SNMP and NetFlow' } as const;
+const VIA_WHY = { snmp: "From the router's IGMP cache over SNMP: the last host to report the group on this interface, collected over time.", netflow: 'Seen in NetFlow as an IGMP version 1 or 2 membership report from this host to the group. Not in the IGMP cache.', both: 'In the IGMP cache over SNMP and also seen as an IGMP report in NetFlow: two independent sources agree.' } as const;
+const viaChip = (v: Member['via']): VNode => chip(VIA_TEXT[v ?? 'snmp'], v === 'both' ? 'ok' : 'default', VIA_WHY[v ?? 'snmp']);
 interface Out { ifIndex: number; name: string; pimMode?: string | null; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
 interface RpfPeer { id: number; name: string; ifIndex: number; ifName: string; forwarding: boolean | null }
 interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null }
@@ -27,6 +30,7 @@ interface Detail {
   igmpHint?: IgmpHint;
   device: { id: number; name: string; ip: string; role: string; model?: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
   routeSource?: 'ipmroute' | 'pim';
+  netflowIgmp?: { reports: number; hosts: number; v3Hosts: number; windowMin: number; unmatched: number } | null;
   igmp?: IgmpIf[];
   rps?: { inUse?: { rp: string; who: string | null; self: boolean; up: boolean; groups: string[]; sinceSec: number | null }[]; map: RpMap[]; candidate: { range: string; rp: string; self: boolean }[] };
   pimIssues?: { level: 'warn' | 'info'; kind: string; text: string }[];
@@ -119,13 +123,13 @@ function whereToLook(): string {
   const model = detail?.device.model ? ` (${detail.device.model})` : '';
   return `check the switch${model}: on ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run ${hint.command}`;
 }
-const incomplete = (): string => `Not a complete list. The router keeps only the last host to report each group, so FlowScope collects reporters as they answer queries and can miss hosts that have not been the last to report. For the full membership, ${whereToLook()}.`;
+const incomplete = (): string => `Not a complete list. The router keeps only the last host to report each group, so FlowScope collects reporters as they answer queries (and, where the flow export includes IGMP, from NetFlow) and can miss hosts that have not been the last to report. For the full membership, ${whereToLook()}.`;
 
 const ageText = (s: number): string => (s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129_600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`);
 
 /** One outgoing interface. The hosts that joined are every reporter seen over time, so a VLAN with many receivers is a collapsible list. */
 function oilRow(r: Route, o: Out): VNode {
-  const hk = `${keyOf(r)}|${o.ifIndex}`, members = o.members ?? [], many = members.length > 1, on = openHosts.has(hk);
+  const hk = `${keyOf(r)}|${o.ifIndex}`, members = o.members ?? [], many = members.length > 1 || members.some(m => m.via === 'netflow' || m.via === 'both'), on = openHosts.has(hk);
   const joined = (): VNode | string => {
     if (o.loopback && !o.joins.some(j => j.reporter)) return 'the router joined the group itself';
     if (many) return h('button', { type: 'button', class: 'rowbtn', 'aria-expanded': on, title: o.neighbor ? undefined : incomplete(), onclick: () => toggleSet(openHosts, hk) }, `${on ? '▾' : '▸'} ${num(members.length)} hosts`);
@@ -141,13 +145,14 @@ function oilRow(r: Route, o: Out): VNode {
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts))),
     many && on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
       o.neighbor ? null : note(incomplete(), 'warn'),
-      h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 120px 110px;--w:560px' },
-        h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Last reported', 'Known for'].map(t => h('span', null, t))),
+      h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 150px 120px 110px;--w:700px' },
+        h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Seen by', 'Last reported', 'Known for'].map(t => h('span', null, t))),
         members.map(m => h('div', { key: m.ip, class: 'tr' },
           h('span', { class: 'mono', style: 'font-size:12px' }, m.ip),
           h('span', { class: 'mono', style: 'font-size:12px' }, at(m.ip) || h('span', { class: 'dim' }, 'not located')),
-          h('span', { style: 'font-size:12px' }, m.ageSec < 150 ? chip('now', 'ok', 'Reported in the last two minutes') : h('span', { class: 'dim' }, ageText(m.ageSec))),
-          h('span', { class: 'dim', style: 'font-size:12px' }, ageText(m.sinceSec).replace(' ago', ''))))))) : null);
+          h('span', null, viaChip(m.via)),
+          h('span', { style: 'font-size:12px' }, m.approx ? h('span', { class: 'dim', title: 'NetFlow gives a window, not a time' }, m.ageSec <= 300 ? 'within 5 min' : 'within 30 min') : m.ageSec < 150 ? chip('now', 'ok', 'Reported in the last two minutes') : h('span', { class: 'dim' }, ageText(m.ageSec))),
+          h('span', { class: 'dim', style: 'font-size:12px' }, m.sinceSec === null ? '—' : ageText(m.sinceSec).replace(' ago', ''))))))) : null);
 }
 
 function expanded(r: Route): VNode {
@@ -296,6 +301,7 @@ export function render(): VNode {
       cur ? summary(cur) : null,
       detail ? pimSummary(detail) : null,
       ...(detail?.pimIssues ?? []).map(i => note(i.text, i.level === 'warn' ? 'warn' : 'info')),
+      detail?.netflowIgmp !== undefined ? netflowNote(detail.netflowIgmp) : null,
       cur ? h('div', { class: 'dim', style: 'font-size:12.5px' }, `Hosts that joined come from the router's IGMP cache over SNMP and are not a complete list. For the full membership, ${whereToLook()}.`) : null,
       detail?.routeSource === 'pim' ? note('This device does not publish the standard multicast routing table (IPMROUTE-STD-MIB), as NX-OS does not. The groups and sources below come from PIM, so they have no incoming or outgoing interfaces, rates or RPF information. Use the device\'s CLI (show ip mroute) for those.', 'info') : null,
       cur?.truncated ? note('This device holds more routes than FlowScope keeps. The list is cut off.', 'warn') : null,
@@ -310,6 +316,15 @@ export function render(): VNode {
       detail?.igmp?.length ? igmpTable(detail.igmp) : null,
       detail?.rps && (detail.rps.map.length || detail.rps.candidate.length || detail.rps.inUse?.length) ? rpTable(detail.rps) : null,
       detail && detail.pim.neighbors.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'PIM neighbours: ', detail.pim.neighbors.map(n => `${n.address} on ${n.ifName}`).join(', ')) : null) : null);
+}
+
+/** What NetFlow contributed to the host lists, so an empty result can be told from a feed that does not carry IGMP. */
+function netflowNote(n: NonNullable<Detail['netflowIgmp']> | null): VNode {
+  if (!n) return h('div', { class: 'dim', style: 'font-size:12.5px' }, 'NetFlow: no flow exporter is matched to this device, so hosts come from SNMP only.');
+  if (!n.reports && !n.v3Hosts) return h('div', { class: 'dim', style: 'font-size:12.5px' }, `NetFlow: no IGMP reports from this device in the last ${n.windowMin} minutes, so hosts come from SNMP only. Either no host is reporting through it, or its flow export does not include IGMP (many do not, and sampled exports drop most of it).`);
+  return h('div', { class: 'dim', style: 'font-size:12.5px' }, `NetFlow: ${num(n.reports)} IGMP report${n.reports === 1 ? '' : 's'} from ${num(n.hosts)} host${n.hosts === 1 ? '' : 's'} in the last ${n.windowMin} minutes name a group (IGMP version 1 or 2). `,
+    n.v3Hosts ? `${num(n.v3Hosts)} host${n.v3Hosts === 1 ? '' : 's'} also sent version 3 reports, which NetFlow cannot attribute to a group. ` : '',
+    n.unmatched ? `${num(n.unmatched)} report${n.unmatched === 1 ? ' was' : 's were'} for a group or interface this router does not forward to and is left out.` : '');
 }
 
 /** The IGMP querier on each interface: the router that sends the membership queries, which keeps memberships alive. */
