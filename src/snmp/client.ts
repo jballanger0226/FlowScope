@@ -77,15 +77,15 @@ function classify(e: Error): SnmpError {
 /**
  * One step of a long walk that survives a device that is slow to answer (a busy switch takes longer for big GETBULK replies): on a timeout the step is
  * repeated asking for fewer rows each time, after a short pause, and only a device that stays silent through every attempt fails the walk. After a
- * success the number of rows asked for creeps back up. Returns the rows and the number to ask for next.
+ * success the next step asks for the full amount again, so a walk that slowed for a moment is back at full speed at once. Returns the rows and the number to ask for next.
  */
 export async function bulkStep<T>(fetch: (rep: number) => Promise<T>, rep: number, maxRep: number, sleep: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)), attempts = 6): Promise<{ rows: T; rep: number }> {
   let r = rep;
   for (let n = 1; ; n++) {
-    try { return { rows: await fetch(r), rep: Math.min(maxRep, r * 4) }; }
+    try { return { rows: await fetch(r), rep: maxRep }; }
     catch (e) {
       if (!(e instanceof SnmpError) || e.kind !== 'timeout' || n >= attempts) throw e;
-      r = Math.max(1, Math.floor(r / 2)); await sleep(500 * n);
+      r = Math.max(1, Math.floor(r / 2)); await sleep(150 * n);
     }
   }
 }

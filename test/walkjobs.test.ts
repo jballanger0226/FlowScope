@@ -113,7 +113,7 @@ test('a walk step that times out is repeated asking for fewer rows, and only a d
   const slow = async (rep: number) => { asked.push(rep); if (rep > 5) throw new SnmpError('timeout', 'timeout'); return 'rows'; };
   const r = await bulkStep(slow, 20, 20, async () => {});
   assert.deepEqual(asked, [20, 10, 5]); assert.equal(r.rows, 'rows'); assert.equal(r.rep, 20, 'it is back at full size right after a success');
-  assert.equal((await bulkStep(async () => 'x', 1, 20, async () => {})).rep, 4); assert.equal((await bulkStep(async () => 'x', 4, 20, async () => {})).rep, 16);
+  assert.equal((await bulkStep(async () => 'x', 1, 20, async () => {})).rep, 20, 'one good reply is enough to go back to full size');
   await assert.rejects(bulkStep(async () => { throw new SnmpError('timeout', 'timeout'); }, 20, 20, async () => {}, 4), /timeout/);
   await assert.rejects(bulkStep(async () => { throw new SnmpError('no access', 'auth'); }, 20, 20, async () => {}), /no access/);
 });
