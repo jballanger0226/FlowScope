@@ -85,3 +85,11 @@ The page keeps the device picker, counts, PIM summary and warnings on top, and s
 
 ### Walking an SNMP context
 The walk box on the SNMP devices page has an optional SNMP context. SNMPv3 sends it as the context name; v1/v2c sends `community@name`. Use it to read one VRF of an IOS XE switch with the device's own credential (for example context `vrf-PCI` after `snmp context vrf-PCI` is set under the VRF's address family and the SNMP group allows it). Check: walk `1.3.6.1.2.1.83` with the context and compare the groups with `show ip mroute vrf <name>`.
+
+## Authentication servers, port authentication setup and configuration state (Cisco)
+
+Checked against a full walk of a Catalyst 9300 SD-Access edge (`test/cisco_auth_extra.test.ts` uses its values):
+
+- **RADIUS / TACACS+ health** (`src/snmp/aaa.ts`, CISCO-AAA-SERVER-MIB `.1.3.6.1.4.1.9.10.56`): two servers, TACACS+ on port 49 (unused) and RADIUS on 1812 with 24115 requests, 77 timeouts, a last answer of 925 ms and 2 dead periods. Whether a server is TACACS+ is told from port 49. The 750 ms "slow" limit and the 1% timeout limit are FlowScope's choices, not the device's.
+- **Port authentication setup** (`src/snmp/authsetup.ts`): 151 ports, 115 with 802.1X (authenticator bit of `cpaePortCapabilitiesEnabled`) and MAB (`cmabIfAuthEnabled`), 36 with neither; every port multi-auth, 113 in open mode. The BITS order (first bit = authenticator) follows CISCO-PAE-MIB; the walk printed the decoded name, so the raw byte is not confirmed on a device.
+- **Configuration state** (`src/snmp/confighist.ts`, CISCO-CONFIG-MAN-MIB `.1.3.6.1.4.1.9.9.43.1.1`): running config changed after it was last saved is "unsaved". The history on this switch held only reads of the running config (by DNA Center), so the "who changed it" list is checked only against the enum names, not against a real write event.

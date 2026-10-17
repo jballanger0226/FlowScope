@@ -16,7 +16,7 @@ interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: nu
 interface Iface {
   mac: string; addresses: string[];
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
-  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[];
+  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[]; authSetup?: { methods: string; mode: string; open: boolean; control: string };
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
@@ -343,8 +343,9 @@ const vlanLabel = (id: number | null, name: string) => (id ? (name ? `${id} ${na
 /** The VRF of an interface: its own for an SVI or a routed port, otherwise that of the SVI of the VLAN it is in. */
 const vrfNote = (i: Iface): VNode | null => (i.vrf ? h('span', { class: 'dim', style: 'font-size:11px', title: i.vrfVia === 'interface' ? 'This interface is in the VRF' : i.vrfVia === 'vlans' ? 'The VLANs this trunk carries have their SVI in these VRFs' : "A port has no VRF of its own: the VRF is that of the SVI of the VLAN it is in" }, `${i.vrfVia === 'vlans' ? 'carries VRF ' : 'VRF '}${i.vrf}${i.vrfVia === 'vlan' ? ' (by VLAN)' : ''}`) : null);
 function vlanCell(i: Iface): VNode {
-  const base = vlanCellBase(i), v = vrfNote(i);
-  return v ? h('span', { class: 'col', style: 'gap:1px' }, base, v) : base;
+  const base = vlanCellBase(i), v = vrfNote(i), a = i.authSetup;
+  const au = a ? h('span', { class: 'dim', style: 'font-size:11px', title: `This port authenticates its clients: ${a.methods}, host mode ${a.mode}, port control ${a.control}${a.open ? '. Open mode: clients get network access before they authenticate.' : ''}` }, `${a.methods} · ${a.mode}${a.open ? ' · open' : ''}`) : null;
+  return v || au ? h('span', { class: 'col', style: 'gap:1px' }, base, v, au) : base;
 }
 function vlanCellBase(i: Iface): VNode {
   if (i.isVlanIf || i.portMode === 'svi') return h('span', { class: 'muted' }, i.vlan ? `SVI for VLAN ${vlanLabel(i.vlan, i.vlanName)}` : 'SVI');

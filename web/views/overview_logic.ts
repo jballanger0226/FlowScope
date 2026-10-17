@@ -1,7 +1,7 @@
 type Level = 'ok' | 'warn' | 'bad' | 'off';
 /** The parts of the health read the Overview looks at, kept structural so this file has no dependency on the browser code. */
 interface OvHealth {
-  extras?: { stack: null | { problems: string[] }; dai: null | { vlans: { vlan: number; droppedNow: number | null; dhcpDenied: number; why: string }[] }; procs: null | { snmpOne: number | null } };
+  extras?: { stack: null | { problems: string[] }; dai: null | { vlans: { vlan: number; droppedNow: number | null; dhcpDenied: number; why: string }[] }; procs: null | { snmpOne: number | null }; aaa?: null | { servers: { address: string; kind: string; up: boolean; level: Level; problems: string[] }[] }; config?: null | { unsaved: boolean; changedAt: number | null } };
   ifExtra: { ifIndex: number; warnings: { level: Level; text: string }[] }[];
   health: null | {
     sensors: { kind: string; name: string; state: Level; stateText: string; ifIndex?: number }[];
@@ -62,6 +62,8 @@ export function issues(o: OvInput): Issue[] {
   for (const t of ex?.stack?.problems ?? []) out.push({ level: 'warn', title: 'Stack problem', detail: t, target: { tab: 'hardware' } });
   for (const v of ex?.dai?.vlans ?? []) if ((v.droppedNow ?? 0) > 0) out.push({ level: 'warn', title: `ARP packets dropped on VLAN ${v.vlan}`, detail: `${plural(v.droppedNow!, 'packet')} since the last read. ${v.why}.`, target: { tab: 'network' } });
   if ((ex?.procs?.snmpOne ?? 0) >= 10) out.push({ level: 'warn', title: 'SNMP engine is using the CPU', detail: `${ex!.procs!.snmpOne}% over the last minute. Polling is part of this device's load.`, target: { tab: 'hardware' } });
+  for (const sv of ex?.aaa?.servers ?? []) if (sv.level !== 'ok') out.push({ level: sv.level === 'bad' ? 'bad' : 'warn', title: `${sv.kind === 'tacacs' ? 'TACACS+' : 'RADIUS'} server ${sv.address} ${sv.up ? 'is struggling' : 'is dead'}`, detail: sv.problems.join(' '), target: { tab: 'hardware' } });
+  if (ex?.config?.unsaved && ex.config.changedAt && Date.now() - ex.config.changedAt >= 3600_000) out.push({ level: 'warn', title: 'Configuration not saved', detail: 'The running configuration differs from startup and has for over an hour. A reload would lose the change.', target: { tab: 'hardware' } });
   const hl = health?.health;
   if (hl) {
     for (const s of hl.sensors) {

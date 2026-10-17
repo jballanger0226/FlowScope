@@ -12,6 +12,9 @@ import { isVlanInterface } from '../snmp/ports.js';
 import { DEFAULTS } from '../settings.js';
 import { linkWarnings } from '../snmp/health.js';
 import { modelText, type Entity } from '../snmp/entity.js';
+import { authMethods, type AuthPort } from '../snmp/authsetup.js';
+import type { Aaa } from '../snmp/aaa.js';
+import type { ConfigState } from '../snmp/confighist.js';
 import { daiReason, type Dai, type Nbar, type Processes, type Stack } from '../snmp/cisco_extra.js';
 
 export const MIBS = [
@@ -61,6 +64,7 @@ export async function linkDevices(app: App, minutes: number) {
   const counts = app.hosts.portCounts();
   const opVl = new Map(app.devices.list().map(d => [d.id, app.hosts.operatingVlans(d.id)] as const));
   const vmaps = new Map(app.devices.list().map(d => [d.id, app.devices.vrfMaps(d.id)] as const));
+  const setups = new Map(app.devices.list().map(d => [d.id, new Map((app.devices.data<AuthPort[]>(d.id, 'authsetup') ?? []).map(p => [p.ifIndex, p]))] as const));
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
     rpfNow: (() => { const g = (app.devices.multicast(d.id)?.routes ?? []).filter(rpfSignificant); return g.length ? { routes: g.length, drops: g.reduce((a, r) => a + (r.rpfNew ?? 0), 0), top: g.sort((a, b) => (b.rpfNew ?? 0) - (a.rpfNew ?? 0))[0]!.group } : null; })(),
@@ -81,6 +85,7 @@ export async function linkDevices(app: App, minutes: number) {
       return {
         ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
         portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList, ...(dynamic.length ? { opVlans: dynamic.map(v => ({ vlan: v, name: app.vlanName(v), hosts: seen.find(x => x.vlan === v)?.hosts ?? 0 })) } : {}),
+        ...((): { authSetup: { methods: string; mode: string; open: boolean; control: string } } | Record<string, never> => { const a = setups.get(d.id)?.get(i.ifIndex); return a && (a.dot1x || a.mab) ? { authSetup: { methods: authMethods(a), mode: a.mode, open: a.open, control: a.control } } : {}; })(),
         isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0, ...((): { vrf: string; vrfVia: string } | Record<string, never> => { const vm = vmaps.get(d.id); const x = vm ? ifaceVrf(dynamic.length ? { ...i, vlan: dynamic[0]! } : i, vm.direct, vm.byVlan) : null; return x ? { vrf: x.vrf, vrfVia: x.via } : {}; })(),
         utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
         classes: i.classes.map(def => {
@@ -106,7 +111,7 @@ export function linkHealth(app: App, dev: number) {
   });
   const dai = app.devices.data<Dai>(dev, 'dai');
   const extras = {
-    procs: app.devices.data<Processes>(dev, 'procs'), stack: app.devices.data<Stack>(dev, 'stack'), nbar: app.devices.data<Nbar>(dev, 'nbar'),
+    procs: app.devices.data<Processes>(dev, 'procs'), stack: app.devices.data<Stack>(dev, 'stack'), nbar: app.devices.data<Nbar>(dev, 'nbar'), aaa: app.devices.data<Aaa>(dev, 'aaa'), config: app.devices.data<ConfigState>(dev, 'config'),
     dai: dai ? { ...dai, vlans: dai.vlans.map(v => ({ ...v, why: daiReason(v) })) } : null
   };
   return { health: app.devices.health(dev), ifExtra: extra, extras };

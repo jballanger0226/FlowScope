@@ -11,6 +11,9 @@ import { readMulticast, readIgmpReporters, withLoadRates } from './multicast.js'
 import { readFib } from './fib.js';
 import { readVrfs, contextOf } from './vrf.js';
 import { readEntity } from './entity.js';
+import { readAaa, type Aaa } from './aaa.js';
+import { readAuthSetup } from './authsetup.js';
+import { readConfigState } from './confighist.js';
 
 /** The slow optional readers. `run` returns whether the device had the table. */
 interface SlowReader { name: string; cisco: boolean; every: number; emptyEvery: number; errorEvery: number; run(c: SnmpClient, d: DeviceRow, devs: DeviceService, now: number, cisco: boolean): Promise<boolean> }
@@ -43,6 +46,10 @@ const SLOW: SlowReader[] = [
     }
     return any;
   } },
+  // Authentication servers (RADIUS / TACACS+) as the device sees them, the way each port is set up to authenticate, and whether the running configuration was saved
+  { name: 'aaa', cisco: true, every: 60_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readAaa(c, devs.data<Aaa>(d.id, 'aaa'), now); devs.saveData(d.id, 'aaa', x, now); return !!x?.servers.length; } },
+  { name: 'authsetup', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readAuthSetup(c); devs.saveData(d.id, 'authsetup', x.length ? x : null, now); return x.length > 0; } },
+  { name: 'config', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readConfigState(c, now); devs.saveData(d.id, 'config', x, now); return !!x; } },
   { name: 'fib', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs) => { const f = await readFib(c); devs.saveData(d.id, 'fib', f, f?.readAt); return !!f; } },
   // Cisco extras: the busiest processes, stack health, ARP inspection drops and the applications NBAR2 recognised
   { name: 'procs', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readProcesses(c, now); devs.saveData(d.id, 'procs', x, now); return !!x; } },

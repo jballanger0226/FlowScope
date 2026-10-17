@@ -1,7 +1,7 @@
 /** Hardware and protocol health on the Network health page: sensors and optics, PoE, spanning tree, OSPF and BGP, and the link quality of one interface. */
 import { h, type VNode } from '../vdom.js';
 import { btn, chip, note, stat, status as statusEl } from '../components.js';
-import { bps, dur, num } from '../util.js';
+import { bps, dayClock, dur, num } from '../util.js';
 
 export type Level = 'ok' | 'warn' | 'bad' | 'off';
 export interface Sensor { id: string; kind: string; name: string; value: number | null; unit: string; state: Level; stateText: string; optic?: 'tx' | 'rx' | 'temp' | 'other'; ifIndex?: number }
@@ -25,8 +25,15 @@ export interface DaiVlan { vlan: number; forwarded: number; dropped: number; dhc
 export interface Dai { readAt: number; vlans: DaiVlan[]; dtSec: number | null }
 export interface NbarProto { name: string; inBps: number | null; outBps: number | null; inBytes: number; outBytes: number }
 export interface Nbar { readAt: number; interfaces: Record<number, NbarProto[]> }
+export interface AaaServer { key: string; address: string; kind: 'radius' | 'tacacs'; port: number; priority: number; up: boolean; stateSec: number; deadCount: number; authReq: number; authTimeouts: number; authFail: number; authMs: number; acctReq: number; acctTimeouts: number; newReq: number | null; newTimeouts: number | null; newFail: number | null; newDead: number | null; level: 'ok' | 'warn' | 'bad'; problems: string[] }
+export interface Aaa { readAt: number; dtSec: number; servers: AaaServer[] }
+export interface ConfigEvent { at: number; what: string; user: string; via: string }
+export interface ConfigState { readAt: number; changedAt: number | null; savedAt: number | null; unsaved: boolean; unsavedSec: number; events: ConfigEvent[] }
 /** Cisco-only reads, each null when the device does not publish the table */
-export interface Extras { procs: Processes | null; stack: Stack | null; dai: Dai | null; nbar: Nbar | null }
+export interface Extras { procs: Processes | null; stack: Stack | null; dai: Dai | null; nbar: Nbar | null; aaa?: Aaa | null; config?: ConfigState | null }
+/** A configuration that has differed from the saved one for this long is worth a mention; a change a minute ago is just a change being made. */
+const UNSAVED_WARN_MS = 3600_000;
+export const unsavedFor = (c: ConfigState | null | undefined, now = Date.now()): number => (c?.unsaved && c.changedAt ? now - c.changedAt : 0);
 export interface HealthRes { health: Health | null; ifExtra: IfExtra[]; extras?: Extras }
 const NO_HEALTH: Health = { readAt: 0, sensors: [], poe: [], stp: null, ospf: [], bgp: [], bgpLocalAs: null };
 
@@ -87,13 +94,15 @@ export function extrasAttention(ex: Extras | undefined): { level: Level; text: s
   if (ex.stack?.problems.length) out.push({ level: 'warn', text: ex.stack.problems.length === 1 ? 'Stack problem' : `${ex.stack.problems.length} stack problems` });
   const dai = (ex.dai?.vlans ?? []).filter(v => (v.droppedNow ?? 0) > 0); if (dai.length) out.push({ level: 'warn', text: `ARP packets dropped on ${dai.length} VLAN${dai.length === 1 ? '' : 's'}` });
   if ((ex.procs?.snmpOne ?? 0) >= 10) out.push({ level: 'warn', text: `SNMP engine using ${ex.procs!.snmpOne}% of the CPU` });
+  for (const a of ex.aaa?.servers ?? []) if (a.level !== 'ok') out.push({ level: a.level, text: `${a.kind === 'tacacs' ? 'TACACS+' : 'RADIUS'} ${a.address}: ${a.up ? 'slow or dropping requests' : 'dead'}` });
+  if (unsavedFor(ex.config) >= UNSAVED_WARN_MS) out.push({ level: 'warn', text: 'Configuration not saved' });
   return out;
 }
 
 export function healthSummary(data: HealthRes | null): VNode | null {
   const hl0 = data?.health ?? null;
-  const hl = hl0 ?? (data?.extras && (data.extras.stack || data.extras.procs || data.extras.dai?.vlans.length) ? NO_HEALTH : null);
-  if (!hl || (!hl.sensors.length && !hl.poe.length && !hl.stp && !hl.ospf.length && !hl.bgp.length && !hl.eigrp?.length && !hl.bfd?.length && !data?.extras?.stack && !data?.extras?.procs)) return null;
+  const hl = hl0 ?? (data?.extras && (data.extras.stack || data.extras.procs || data.extras.dai?.vlans.length || data.extras.aaa?.servers.length || data.extras.config) ? NO_HEALTH : null);
+  if (!hl || (!hl.sensors.length && !hl.poe.length && !hl.stp && !hl.ospf.length && !hl.bgp.length && !hl.eigrp?.length && !hl.bfd?.length && !data?.extras?.stack && !data?.extras?.procs && !data?.extras?.aaa?.servers.length && !data?.extras?.config)) return null;
   const att = [...attention(hl), ...extrasAttention(data?.extras)];
   const parts: string[] = [];
   const others = hl.sensors.filter(s => s.kind !== 'optic'), optics = hl.sensors.filter(s => s.kind === 'optic');
@@ -110,7 +119,7 @@ export function healthSummary(data: HealthRes | null): VNode | null {
     att.length ? h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap' }, att.slice(0, 8).map(a => chip(a.text, a.level === 'bad' ? 'bad' : 'warn')), att.length > 8 ? chip(`+${att.length - 8} more`, 'default') : null)
       : h('div', { class: 'row', style: 'gap:6px' }, chip('Nothing outside its limits', 'ok')));
 }
-export const hasHardware = (data: HealthRes | null): boolean => (!!data?.health && (data.health.sensors.some(s => s.kind !== 'optic') || data.health.poe.length > 0)) || !!data?.extras?.procs || !!data?.extras?.stack;
+export const hasHardware = (data: HealthRes | null): boolean => (!!data?.health && (data.health.sensors.some(s => s.kind !== 'optic') || data.health.poe.length > 0)) || !!data?.extras?.procs || !!data?.extras?.stack || !!data?.extras?.aaa?.servers.length || !!data?.extras?.config;
 export const hasOptics = (data: HealthRes | null): boolean => !!data?.health && data.health.sensors.some(s => s.kind === 'optic' && s.ifIndex !== undefined);
 export const hasProtocols = (data: HealthRes | null): boolean => !!data?.extras?.dai?.vlans.length || !!data?.health && (!!data.health.stp || data.health.ospf.length > 0 || data.health.bgp.length > 0 || !!data.health.eigrp?.length || !!data.health.bfd?.length);
 
@@ -132,6 +141,8 @@ export function hardwarePanel(o: { data: HealthRes | null }): VNode | null {
       [p.usedPct !== null ? `${p.usedPct}% of the budget` : null, p.portsTotal ? `${p.portsDelivering} of ${p.portsTotal} ports delivering${p.portsFault ? `, ${p.portsFault} in fault` : ''}` : null].filter(Boolean).join(' · ') || undefined)))));
   const ex = o.data?.extras;
   if (ex?.stack) sections.push(stackSection(ex.stack));
+  if (ex?.aaa?.servers.length) sections.push(aaaSection(ex.aaa));
+  if (ex?.config) sections.push(configSection(ex.config));
   if (ex?.procs) sections.push(processSection(ex.procs));
   return h('div', { class: 'col', style: 'gap:12px' }, sections);
 }
@@ -145,6 +156,35 @@ function stackSection(st: Stack): VNode {
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:80px 110px minmax(140px,1fr) 150px;--w:520px' },
       h('div', { class: 'tr head' }, ...['Member', 'Role', 'State', 'MAC address'].map(t => h('span', null, t))),
       st.members.map(m => h('div', { key: m.index, class: 'tr' }, h('span', { class: 'mono' }, String(m.number ?? m.index)), h('span', null, m.role), statusEl(m.level, m.state), h('span', { class: 'mono', style: 'font-size:12px' }, m.mac || '—'))))));
+}
+
+/** RADIUS and TACACS+ servers: when one is slow or dead, 802.1X and MAB clients fail and it looks like a network fault. */
+function aaaSection(a: Aaa): VNode {
+  const since = a.dtSec ? (a.dtSec < 120 ? Math.round(a.dtSec) + ' s' : Math.round(a.dtSec / 60) + ' min') : '';
+  const pct = (x: number, of: number) => (of >= 20 ? ` (${((x / of) * 100).toFixed(1)}%)` : '');
+  return h('div', { key: 'aaa', class: 'col', style: 'gap:6px' }, sub('Authentication servers', 'RADIUS and TACACS+ as this device sees them; counts are since the device started, "+" is the change since the last read'),
+    ...a.servers.flatMap(sv => sv.problems.map(t => note(t, sv.level === 'bad' ? 'bad' : 'warn', true))),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1fr) 90px 110px 130px 130px 100px 110px;--w:820px' },
+      h('div', { class: 'tr head' }, ...['Server', 'Type', 'State', 'Requests', 'Timeouts', 'Failures', 'Last answer'].map(t => h('span', null, t))),
+      a.servers.map(sv => { const req = sv.authReq + sv.acctReq, tmo = sv.authTimeouts + sv.acctTimeouts; return h('div', { key: sv.key, class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, `${sv.address}:${sv.port}`), h('span', null, sv.kind === 'tacacs' ? 'TACACS+' : 'RADIUS'),
+        statusEl(sv.up ? (sv.level === 'ok' ? 'ok' : 'warn') : 'bad', sv.up ? `up ${sv.stateSec < 3600 ? Math.round(sv.stateSec / 60) + ' min' : dur(sv.stateSec * 1000)}` : 'dead'),
+        h('span', { class: 'mono', style: 'font-size:12px', title: since && sv.newReq !== null ? `${num(sv.newReq)} in the last ${since}` : undefined }, num(req), sv.newReq ? ` +${num(sv.newReq)}` : ''),
+        h('span', { class: 'mono', style: `font-size:12px;${(sv.newTimeouts ?? 0) > 0 ? 'color:var(--warn)' : ''}` }, num(tmo), pct(tmo, req), sv.newTimeouts ? ` +${num(sv.newTimeouts)}` : ''),
+        h('span', { class: 'mono', style: 'font-size:12px' }, num(sv.authFail)),
+        h('span', { class: 'mono', style: `font-size:12px;${sv.authMs >= 750 ? 'color:var(--warn)' : ''}` }, sv.authReq ? `${sv.authMs} ms` : '—')); }))),
+    a.servers.some(sv => sv.deadCount) ? h('span', { class: 'dim', style: 'font-size:12px' }, a.servers.filter(sv => sv.deadCount).map(sv => `${sv.address} was marked dead ${sv.deadCount} time${sv.deadCount === 1 ? '' : 's'}`).join(' · ') + ' since the device started.') : null);
+}
+
+/** Whether the running configuration is saved, and who changed it last. */
+function configSection(c: ConfigState): VNode {
+  const age = unsavedFor(c);
+  const when = (t: number | null) => (t ? dayClock(t) : 'not since it started');
+  return h('div', { key: 'config', class: 'col', style: 'gap:6px' }, sub('Configuration', 'running against startup, from the change history of the device'),
+    c.unsaved ? note(age >= UNSAVED_WARN_MS ? `The running configuration changed ${dur(age)} ago and has not been saved to startup. A reload now would lose the change.` : `The running configuration changed ${age < 90_000 ? 'moments' : dur(age)} ago and is not saved to startup yet. This is normal while a change is being made.`, age >= UNSAVED_WARN_MS ? 'warn' : 'info', true) : null,
+    h('div', { class: 'row', style: 'gap:10px;align-items:stretch;flex-wrap:wrap' },
+      stat('Last changed', when(c.changedAt)), stat('Last saved', when(c.savedAt)), stat('Saved', h('span', { style: colour(c.unsaved ? (age >= UNSAVED_WARN_MS ? 'warn' : 'ok') : 'ok') }, c.unsaved ? 'not yet' : 'yes'))),
+    c.events.length ? h('span', { class: 'dim', style: 'font-size:12px' }, 'Recent: ' + c.events.map(e => `${e.what} ${dayClock(e.at)}${e.user ? ' by ' + e.user : ''}${e.via ? ' (' + e.via + ')' : ''}`).join(' · ')) : null);
 }
 
 /** The busiest processes. The SNMP engine is called out because polling is part of what it measures. */

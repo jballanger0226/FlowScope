@@ -13,6 +13,9 @@ import { readDhcpBindings } from './dhcp_snooping.js';
 import { readAuthSessions } from './authsessions.js';
 import { readPae } from './dot1x.js';
 import { readSgt } from './sgt.js';
+import { readAaa } from './aaa.js';
+import { readAuthSetup } from './authsetup.js';
+import { readConfigState } from './confighist.js';
 import { readVrfs, contextOf } from './vrf.js';
 import { readDai, readNbar, readProcesses, readStack } from './cisco_extra.js';
 import { readWlanFor, wlanVendor } from './wlan_vendors.js';
@@ -126,7 +129,7 @@ const WIFI_HINT: Record<string, string> = {
   cisco: 'Cisco wireless controllers publish access points and clients in CISCO-LWAPP-AP-MIB (.1.3.6.1.4.1.9.9.513) and CISCO-LWAPP-DOT11-CLIENT-MIB (.1.3.6.1.4.1.9.9.599).'
 };
 const GROUP: Record<string, CheckGroup> = { interfaces: 'basics', counters: 'basics', resources: 'basics', lldp: 'neighbours', cdp: 'neighbours', mac: 'hosts', arp: 'hosts', vlans: 'hosts',
-  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', auth: 'hosts', sgt: 'hosts', dot1x: 'hosts', vrf: 'routing', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
+  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', auth: 'hosts', sgt: 'hosts', aaa: 'hosts', authsetup: 'hosts', config: 'hardware', dot1x: 'hosts', vrf: 'routing', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
 const GROUP_ORDER: CheckGroup[] = ['basics', 'neighbours', 'hosts', 'hardware', 'routing', 'quality', 'wifi'];
 
 async function attempt<T>(fn: () => Promise<T>, empty: T): Promise<{ v: T; error: string | null }> {
@@ -255,7 +258,7 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
 
   // Cisco-only tables, read with the readers the poller uses. Each is "not applicable" when empty: a table appears only when the feature is in use.
   if (ex.cAny) {
-    const [fib, eigrp, bfd, dhcp, auth, sgt, vrfs, stack, dai, procs, nbar] = await Promise.all([
+    const [fib, eigrp, bfd, dhcp, auth, sgt, vrfs, stack, dai, procs, nbar, aaa, setup, cfg] = await Promise.all([
       ex.cRouting ? attempt(() => readFib(cl), null) : none(null as Awaited<ReturnType<typeof readFib>>),
       ex.cRouting ? attempt(() => readEigrp(cl), []) : none([] as Awaited<ReturnType<typeof readEigrp>>),
       ex.cRouting ? attempt(() => readBfd(cl), []) : none([] as Awaited<ReturnType<typeof readBfd>>),
@@ -266,12 +269,16 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
       ex.cSwitch ? attempt(() => readStack(cl), null) : none(null as Awaited<ReturnType<typeof readStack>>),
       ex.cSwitch ? attempt(() => readDai(cl, null), null) : none(null as Awaited<ReturnType<typeof readDai>>),
       attempt(() => readProcesses(cl), null),
-      attempt(() => readNbar(cl), null)
+      attempt(() => readNbar(cl), null),
+      ex.cSwitch ? attempt(() => readAaa(cl, null), null) : none(null as Awaited<ReturnType<typeof readAaa>>),
+      ex.cSwitch ? attempt(() => readAuthSetup(cl), []) : none([] as Awaited<ReturnType<typeof readAuthSetup>>),
+      attempt(() => readConfigState(cl), null)
     ]);
     const view = 'Check the SNMP view of this credential includes it.';
     const row = (id: string, title: string, count: number, okText: string, naText: string, error: string | null, hint: string): void => {
       out.push(count ? { id, title, group: GROUP[id], state: 'ok', count, detail: okText } : { id, title, group: GROUP[id], state: 'na', count: 0, detail: error ?? naText, hint: error ? `${hint} ${view}` : undefined });
     };
+    row('config', 'Configuration changes', cfg.v ? 1 : 0, `The running configuration was last changed ${cfg.v?.changedAt ? new Date(cfg.v.changedAt).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : 'before the device started'} and is ${cfg.v?.unsaved ? 'not saved to startup' : 'saved'}.`, 'No configuration change history (CISCO-CONFIG-MAN-MIB).', cfg.error, 'CISCO-CONFIG-MAN-MIB is .1.3.6.1.4.1.9.9.43.');
     if (ex.cRouting) {
       row('fib', 'Forwarding table (CEF)', fib.v?.entries.length ?? 0, `${plural(fib.v?.entries.length ?? 0, 'prefix', 'prefixes')} with their outgoing interfaces${fib.v?.truncated ? ' (cut off at the most that FlowScope keeps)' : ''}. ${(() => { const n = fib.v?.entries.filter(e => e.paths.filter(p => p.kind !== 'receive').length > 1).length ?? 0; return n ? ` ${plural(n, 'prefix', 'prefixes')} have equal-cost paths, which the multicast page uses to read RPF drops.` : ''; })()} Used to check that a flow left the interface the routing table says it should.`,
         'No forwarding table (CISCO-CEF-MIB). It needs CEF, which is on by default on routers and Layer 3 switches.', fib.error, 'CISCO-CEF-MIB is .1.3.6.1.4.1.9.9.492.');
@@ -297,6 +304,8 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
       row('auth', 'Authentication sessions (802.1X / MAB)', auth.v.length, `${plural(auth.v.length, 'session')}: ${auth.v.filter(a => a.status === 'authorized').length} authenticated (${auth.v.filter(a => a.vlan).length} with a VLAN assigned by the authentication server) and ${auth.v.filter(a => a.status !== 'authorized').length} clients seen that did not authenticate; ${auth.v.filter(a => a.ip).length} have an IP address. Ports that authenticate their clients are shown in the VLAN the clients are really in.`, 'No authentication sessions (CISCO-AUTH-FRAMEWORK-MIB). Normal when no port uses 802.1X, MAB or web authentication.', auth.error, 'CISCO-AUTH-FRAMEWORK-MIB is .1.3.6.1.4.1.9.9.656.');
       const tagged = sgt.v.bindings.filter(b => b.source !== 'internal');
       row('sgt', 'Security group tags (TrustSec)', tagged.length, `${plural(tagged.length, 'host address', 'host addresses')} with a tag, from ${plural(new Set(tagged.map(b => b.sgt)).size, 'distinct tag')}; ${plural(sgt.v.names.size, 'tag name')} known. Shown next to each host on its port.`, 'No security group tags on host addresses (CISCO-TRUSTSEC-POLICY-MIB). Normal when TrustSec or SD-Access is not in use.', sgt.error, 'CISCO-TRUSTSEC-POLICY-MIB is .1.3.6.1.4.1.9.9.713 and CISCO-TRUSTSEC-MIB .1.3.6.1.4.1.9.9.730.');
+      row('authsetup', 'Port authentication setup', setup.v.length, `${plural(setup.v.length, 'port')} set up to authenticate (${plural(setup.v.filter(p => p.dot1x && p.mab).length, 'port')} with 802.1X and MAB, ${setup.v.filter(p => p.mab && !p.dot1x).length} MAB only, ${setup.v.filter(p => p.dot1x && !p.mab).length} 802.1X only); host mode ${[...new Set(setup.v.map(p => p.mode))].join(', ')}${setup.v.some(p => p.open) ? `; ${plural(setup.v.filter(p => p.open).length, 'port')} in open mode` : ''}. Shown next to the VLAN of each port.`, 'No port authentication settings (CISCO-AUTH-FRAMEWORK-MIB, CISCO-PAE-MIB, CISCO-MAC-AUTH-BYPASS-MIB). Normal when no port uses 802.1X or MAB.', setup.error, 'CISCO-PAE-MIB is .1.3.6.1.4.1.9.9.220, CISCO-MAC-AUTH-BYPASS-MIB .1.3.6.1.4.1.9.9.654 and the port table of CISCO-AUTH-FRAMEWORK-MIB .1.3.6.1.4.1.9.9.656.1.2.');
+      row('aaa', 'RADIUS and TACACS+ servers', aaa.v?.servers.length ?? 0, `${plural(aaa.v?.servers.length ?? 0, 'server')}: ${(aaa.v?.servers ?? []).map(sv => `${sv.address} (${sv.kind === 'tacacs' ? 'TACACS+' : 'RADIUS'}, ${sv.up ? 'up' : 'dead'}, ${sv.authReq + sv.acctReq} requests, ${sv.authTimeouts + sv.acctTimeouts} timeouts)`).join('; ')}. Their health is shown on the hardware tab and in the attention list.`, 'No authentication servers (CISCO-AAA-SERVER-MIB). Normal when the device does not use RADIUS or TACACS+.', aaa.error, 'CISCO-AAA-SERVER-MIB is .1.3.6.1.4.1.9.10.56.');
       row('stack', 'Stack members and ports', stack.v?.members.length ?? 0, `${plural(stack.v?.members.length ?? 0, 'member')}, ${stack.v?.ports.filter(p => p.level === 'ok').length ?? 0} of ${stack.v?.ports.length ?? 0} stack ports up${stack.v?.problems.length ? '. ' + stack.v.problems[0] : ''}.`, 'No stack information (CISCO-STACKWISE-MIB). Normal for a switch that is not stacked.', stack.error, 'CISCO-STACKWISE-MIB is .1.3.6.1.4.1.9.9.500.');
       row('dai', 'ARP inspection drops', dai.v ? 1 : 0, dai.v && dai.v.vlans.length ? `ARP packets were dropped on ${plural(dai.v.vlans.length, 'VLAN')}.` : 'The statistics are published and no VLAN has dropped an ARP packet.', 'No ARP inspection statistics (CISCO-DYNAMIC-ARP-INSPECTION-MIB). Normal when it is not configured.', dai.error, 'CISCO-DYNAMIC-ARP-INSPECTION-MIB is .1.3.6.1.4.1.9.9.374.');
     }
