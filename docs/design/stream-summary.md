@@ -37,11 +37,28 @@ Totals ("N streams") come from `uniqExact(skey)` over the summary table, which i
 3. The summary is a derived copy: it is dropped and rebuilt by retention the same way partitions of `flow_raw` are.
 4. SQLite has no equivalent and keeps the current path, with items 1 to 3 as its protection. SQLite is meant for small installs, so this is acceptable.
 
+## Decisions
+
+- **Streams that span midnight:** the summary is partitioned by day and a query reads the adjacent days and merges them. No monthly partition.
+- **Which streams stay in the recent-streams table:** all of them for a short time (12 to 24 hours), then only the significant ones, kept for the full retention: streams with a TTL-expired or QoS-changed flag, streams where hop analysis found loss or an error, streams above a size threshold, and streams still active. A "significant" flag is computed at insert and updated while the stream is still growing, and the prune waits long enough for a stream to become significant. Pruned streams stay in the summary table, so address search and reports still find them.
+- **Sizing:** plan for ten times today's ingest.
+
+## Measured on the production box (2026-10-17)
+
+- Ingest is about 650 rows/s (175,000 to 260,000 rows per 5 minutes) in about 1.6 inserts/s, 7 to 8 ms per insert (worst 16 to 32 ms) and 9 to 12 MiB peak memory.
+- The existing rollup view adds 5 ms per insert, writes about 590,000 rows an hour and peaks at 4 MiB. A summary view should cost about the same.
+- A heavy 7-day search raised insert time to 50 to 76 ms average and 1.6 s worst while it ran, so the read path must be bounded (done in the limits change).
+- About 55 million raw records a day make about 2.7 million streams, which is about 20 records per stream, so the summary should hold about a tenth of the rows.
+- Ten times today's rate is about 6,500 rows/s. `tools/proto/stream_summary.sh load` replays the last hour at the application's block size, with and without the view, to find the ceiling.
+
+## Prototype
+
+`tools/proto/stream_summary.sh` creates `proto_` tables only. `setup` builds `proto_stream_dir` (an `AggregatingMergeTree` keyed by stream, sender and port, partitioned by day) and the live view; `bench` times the current query shape against the summary for 1 hour, 24 hours and all data; `load` measures the insert ceiling; `cleanup` removes everything. The prototype omits the TTL-expired flags that depend on the router address list, which will be computed at read time from stored ICMP and TTL columns.
+
 ## Open questions
 
-- A stream that spans midnight lands in two day partitions: should the merge read adjacent days, or should the summary partition by month?
-- How much more insert load does the materialised view add at the highest rate we plan to ingest? Needs a measurement on the production box.
-- Should the recent-streams table keep every stream, or only those above a size or with a TTL or QoS flag, for a much smaller table?
+- What is the extra storage per day, and does the summary compress as well as the raw table? Answered by `setup`.
+- Can the "significant" flag be computed in the view, or does it need a periodic job? Depends on how soon hop-analysis findings (loss, latency) are available; those come from several exporters' records, so a job is likely.
 
 ## Rough sequence
 
