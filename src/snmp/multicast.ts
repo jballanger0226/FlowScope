@@ -24,6 +24,8 @@ export interface McOif {
   underlay?: string;
 }
 export interface McRoute {
+  /** The VRF the route was read in; absent or '' for the default VRF. Set when a device's VRFs are shown together. */
+  vrf?: string;
   group: string;
   /** The source address; 0.0.0.0 is a (*,G) route that is not tied to one sender. */
   source: string;

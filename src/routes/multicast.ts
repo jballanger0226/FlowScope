@@ -11,6 +11,7 @@ import { igmpHint, vendorOf } from '../snmp/diagnose.js';
 import { igmpFromFlows } from '../snmp/igmp_flows.js';
 import { buildPlan, type Plan } from '../snmp/multicast_plan.js';
 import { underlayMap } from '../snmp/underlay.js';
+import { ifaceVrf } from '../snmp/vrfmap.js';
 
 /** A multicast state older than this is shown as out of date */
 const STALE_MS = 10 * 60_000;
@@ -58,9 +59,11 @@ export function registerMulticast(app: App): void {
       const vrfs = app.devices.vrfs(d.id).map(v => ({ v, x: app.devices.vrfMulticast(d.id, v.name) })).filter((e): e is { v: typeof e.v; x: Multicast } => !!e.x)
         .map(({ v, x }) => ({ name: v.name, readAt: x.readAt, routes: x.routes.length, groups: new Set(x.routes.map(r => r.group)).size, forwarding: x.routes.filter(r => r.oifs.some(o => o.forwarding)).length }));
       if (!m && !vrfs.length) continue;
+      const all = [m, ...app.devices.vrfs(d.id).map(v => app.devices.vrfMulticast(d.id, v.name))].filter((x): x is Multicast => !!x);
+      const gset = new Set<string>(); for (const x of all) for (const r of x.routes) gset.add((x === m ? '' : String(all.indexOf(x))) + '|' + r.group);
       list.push({
         id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device', readAt: m?.readAt ?? vrfs[0]!.readAt, stale: now - (m?.readAt ?? vrfs[0]!.readAt) > STALE_MS, source: m?.source ?? 'cisco',
-        routes: m?.routes.length ?? 0, groups: m ? new Set(m.routes.map(r => r.group)).size : 0, receivers: m?.receivers.length ?? 0, forwarding: m ? m.routes.filter(r => r.oifs.some(o => o.forwarding)).length : 0, truncated: m?.truncated ?? false, vrfs
+        routes: all.reduce((n, x) => n + x.routes.length, 0), groups: gset.size, receivers: all.reduce((n, x) => n + x.receivers.length, 0), forwarding: all.reduce((n, x) => n + x.routes.filter(r => r.oifs.some(o => o.forwarding)).length, 0), truncated: m?.truncated ?? false, vrfs
       });
     }
     c.json({ devices: list });
@@ -71,16 +74,19 @@ export function registerMulticast(app: App): void {
     const id = int(c.query.get('id'), 0, 0, 1e9);
     const d = id ? app.devices.row(id) : null;
     if (!d) throw new HttpError(404, 'No such device');
-    const vrf = c.query.get('vrf') ?? '';
-    if (vrf && !app.devices.vrfs(id).some(v => v.name === vrf)) throw new HttpError(404, 'This device has no such VRF');
-    const m = vrf ? app.devices.vrfMulticast(id, vrf) : app.devices.multicast(id);
-    if (!m) throw new HttpError(404, vrf ? `No multicast state has been read in VRF ${vrf}. Its SNMP context (vrf-${vrf}) may not be set up, or SNMP has not read it yet.` : 'This device has not published multicast routing state. It may not route multicast, or SNMP has not read it yet.');
+    // The default VRF and every VRF read in its own SNMP context are shown together; each route carries the VRF it was read in.
+    const dm = app.devices.multicast(id);
+    const vrfData = app.devices.vrfs(id).map(v => ({ name: v.name, mc: app.devices.vrfMulticast(id, v.name), ifIndexes: v.ifIndexes })).filter((e): e is { name: string; mc: Multicast; ifIndexes: number[] } => !!e.mc);
+    if (!dm && !vrfData.length) throw new HttpError(404, 'This device has not published multicast routing state. It may not route multicast, or SNMP has not read it yet.');
+    const parts: { vrf: string; mc: Multicast }[] = [...(dm ? [{ vrf: '', mc: dm }] : []), ...vrfData.map(v => ({ vrf: v.name, mc: v.mc }))];
+    const m: Multicast = { ...parts[0]!.mc, readAt: Math.min(...parts.map(x => x.mc.readAt)), truncated: parts.some(x => x.mc.truncated),
+      routes: parts.flatMap(x => x.mc.routes.map(r => ({ ...r, vrf: x.vrf }))), receivers: parts.flatMap(x => x.mc.receivers), pimInterfaces: parts.flatMap(x => x.mc.pimInterfaces), neighbors: parts.flatMap(x => x.mc.neighbors),
+      igmpInterfaces: parts.flatMap(x => x.mc.igmpInterfaces ?? []), rpGroups: parts.flatMap(x => x.mc.rpGroups ?? []), rpSet: parts.flatMap(x => x.mc.rpSet ?? []), candidateRps: parts.flatMap(x => x.mc.candidateRps ?? []),
+      interfaces: parts.flatMap(x => x.mc.interfaces ?? []), names: Object.assign({}, ...parts.map(x => x.mc.names ?? {})), down: [...new Set(parts.flatMap(x => x.mc.down ?? []))] };
     const name = namer(app, id, m);
     // SD-Access: which underlay group carries each overlay group, from what the VRFs state, and the reverse
-    const vrfData = app.devices.vrfs(id).map(v => ({ name: v.name, mc: app.devices.vrfMulticast(id, v.name) })).filter((e): e is { name: string; mc: Multicast } => !!e.mc);
     const under = underlayMap(vrfData);
-    const dflt = vrf ? app.devices.multicast(id) : m;
-    const underInfo = (g: string): { group: string; sources: { source: string; pkts: number | null }[] } => ({ group: g, sources: (dflt?.routes ?? []).filter(x => x.group === g).map(x => ({ source: x.source, pkts: x.pkts })) });
+    const underInfo = (g: string): { group: string; sources: { source: string; pkts: number | null }[] } => ({ group: g, sources: (dm?.routes ?? []).filter(x => x.group === g).map(x => ({ source: x.source, pkts: x.pkts })) });
     const ifs = new Map(app.devices.interfaces(id).map(i => [i.ifIndex, i.oper] as const)), downSet = new Set(m.down ?? []);
     const isDown = (ix: number): boolean => ifs.has(ix) ? ifs.get(ix) !== 1 : downSet.has(ix);
     const pimMode = new Map(m.pimInterfaces.map(p => [p.ifIndex, p.mode] as const));
@@ -94,7 +100,7 @@ export function registerMulticast(app: App): void {
     const peerId = new Map<string, number>();
     for (const [devId, m2] of ipsOf) for (const ip of m2.keys()) peerId.set(ip, devId);
     const peers: PimPeer[] = [];
-    for (const o of app.devices.rows()) { if (o.id === id || vrf) continue; const om = app.devices.multicast(o.id); const ips = ipsOf.get(o.id); if (om && ips) peers.push({ name: o.name, mc: om, ips, ifName: namer(app, o.id, om) }); }
+    for (const o of app.devices.rows()) { if (o.id === id) continue; const om = app.devices.multicast(o.id); const ips = ipsOf.get(o.id); if (om && ips) peers.push({ name: o.name, mc: om, ips, ifName: namer(app, o.id, om) }); }
     const own = new Set([d.ip, ...(ipsOf.get(id)?.keys() ?? [])]);
     const devByIp = new Map<string, string>();
     for (const o of app.devices.rows()) devByIp.set(o.ip, o.name);
@@ -114,7 +120,7 @@ export function registerMulticast(app: App): void {
     for (const r of m.receivers) if (r.lastReporter && !r.self) ips.add(r.lastReporter);
     type Mem = { ip: string; lastSeen: number | null; firstSeen: number | null; via: 'snmp' | 'netflow' | 'both'; recent?: boolean };
     const members = new Map<string, Mem[]>();
-    for (const x of app.devices.mcastMembers(id, vrf)) { ips.add(x.ip); const k = x.group + '|' + x.ifIndex; const a = members.get(k) ?? []; a.push({ ip: x.ip, lastSeen: x.lastSeen, firstSeen: x.firstSeen, via: 'snmp' }); members.set(k, a); }
+    for (const x of app.devices.mcastMembers(id, null)) { ips.add(x.ip); const k = x.group + '|' + x.ifIndex; const a = members.get(k) ?? []; a.push({ ip: x.ip, lastSeen: x.lastSeen, firstSeen: x.firstSeen, via: 'snmp' }); members.set(k, a); }
     // the same hosts as NetFlow saw them: version 1 and 2 reports name the group; a host in both is confirmed
     const nf = await igmpFromFlows(app, app.devices.exporterIpsForDevice(id), now);
     let unmatched = 0;
@@ -128,32 +134,40 @@ export function registerMulticast(app: App): void {
         for (const [host, info] of hostMap) { ips.add(host); const e = a.find(x => x.ip === host); if (e) { e.via = 'both'; e.recent = info.recent; } else a.push({ ip: host, lastSeen: null, firstSeen: null, via: 'netflow', recent: info.recent }); }
       }
     }
-    const hosts: Record<string, { dev: string; devId: number; ifIndex: number; port: string; vlan: number; confidence: string; neighbor: string | null } | null> = {};
+    const hosts: Record<string, { dev: string; devId: number; ifIndex: number; port: string; vlan: number; vrf: string; confidence: string; neighbor: string | null } | null> = {};
+    const vmCache = new Map<number, Map<number, string>>();
+    const vrfOfVlan = (devId: number, vlan: number): string => { let x = vmCache.get(devId); if (!x) { x = app.devices.vrfMaps(devId).byVlan; vmCache.set(devId, x); } return x.get(vlan) ?? ''; };
     for (const ip of [...ips].slice(0, 2500)) {
       const a = app.hosts.locate(ip).attach;
-      hosts[ip] = a && a.edge ? { dev: a.dev, devId: a.devId, ifIndex: a.ifIndex, port: a.ifName, vlan: a.vlan, confidence: a.confidence, neighbor: a.neighbor } : null;
+      hosts[ip] = a && a.edge ? { dev: a.dev, devId: a.devId, ifIndex: a.ifIndex, port: a.ifName, vlan: a.vlan, vrf: vrfOfVlan(a.devId, a.vlan), confidence: a.confidence, neighbor: a.neighbor } : null;
     }
     // the router on the other end of each route's RPF link, when it is polled too: its name and interface, and whether it forwards the group towards this router
     const lossIf = new Set(multicastLoss(m, peers).map(l => l.ifIndex));
     const peerRoutes = new Map<number, Map<string, Multicast['routes'][number]>>();
     const routesOf = (pid: number, pm: Multicast): Map<string, Multicast['routes'][number]> => { let x = peerRoutes.get(pid); if (!x) { x = new Map(pm.routes.map(r => [r.group + '|' + r.source, r] as const)); peerRoutes.set(pid, x); } return x; };
-    const fib = app.devices.data<Fib>(id, vrf ? 'fib:' + vrf : 'fib');
+    // the forwarding table read over SNMP is not reliably scoped to a VRF's context, so equal-cost path counts are given for default-VRF routes only
+    const fibs = new Map<string, Fib | null>([['', app.devices.data<Fib>(id, 'fib')]]);
     const ecmpPaths = (f: Fib | null, ip: string | null): number | null => { if (!f || !ip) return null; const e = lookupFib(f, ip); return e ? e.paths.filter(p => p.kind !== 'receive').length : null; };
     const rpfPeer = (r: Multicast['routes'][number]): { peer: { id: number; name: string; ifIndex: number; ifName: string; forwarding: boolean | null } | null; loss: boolean } => {
       const loss = r.inIfIndex !== null && lossIf.has(r.inIfIndex);
-      const pid = r.upstream && !vrf ? peerId.get(r.upstream) : undefined, pm = pid ? app.devices.multicast(pid) : null, pif = pid && r.upstream ? ipsOf.get(pid)?.get(r.upstream) : undefined;
+      const pid = r.upstream && !r.vrf ? peerId.get(r.upstream) : undefined, pm = pid ? app.devices.multicast(pid) : null, pif = pid && r.upstream ? ipsOf.get(pid)?.get(r.upstream) : undefined;
       if (!pid || !pm || pif === undefined) return { peer: null, loss };
       const pr = routesOf(pid, pm).get(r.group + '|' + r.source) ?? routesOf(pid, pm).get(r.group + '|0.0.0.0');
       const oif = pr?.oifs.find(o => o.ifIndex === pif);
       return { peer: { id: pid, name: app.devices.row(pid)?.name ?? '', ifIndex: pif, ifName: namer(app, pid, pm)(pif), forwarding: now - pm.readAt > STALE_MS ? null : oif ? oif.forwarding : false }, loss };
     };
     c.json({
-      device: { id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device', model: modelText(app.devices.data<Entity>(id, 'entity')) }, vrf, vrfs: app.devices.vrfs(id).map(v => ({ name: v.name, routes: vrfData.find(x => x.name === v.name)?.mc.routes.length ?? null })), readAt: m.readAt, stale: now - m.readAt > STALE_MS, source: m.source, truncated: m.truncated,
+      device: { id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device', model: modelText(app.devices.data<Entity>(id, 'entity')) }, vrfs: app.devices.vrfs(id).map(v => { const x = vrfData.find(y => y.name === v.name)?.mc; return { name: v.name, routes: x?.routes.length ?? null, groups: x ? new Set(x.routes.map(r => r.group)).size : null }; }),
+      // the VRF each interface is in, so an interface can be labelled
+      ifVrf: ((vm) => Object.fromEntries([...vrfData.flatMap(v => v.ifIndexes.map(ix => [name(ix), v.name] as const)), ...app.devices.interfaces(id).flatMap(i => { const x = ifaceVrf(i, vm.direct, vm.byVlan); return x ? [[name(i.ifIndex), x.vrf] as const] : []; })]))(app.devices.vrfMaps(id)), readAt: m.readAt, stale: now - m.readAt > STALE_MS, source: m.source, truncated: m.truncated,
       routes: m.routes.map(r => ({
         group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0',
         // SD-Access: the underlay group an overlay group is carried in (read in a VRF), or the overlay groups an underlay group carries (read in the default VRF)
-        underlay: vrf ? ((): ReturnType<typeof underInfo> & { exact: boolean } | null => { const own = r.oifs.find(o => o.underlay)?.underlay, g = own ?? under.forward.get(vrf + '|' + r.group); return g ? { ...underInfo(g), exact: !!own } : null; })() : null,
-        overlay: !vrf && r.group.startsWith('232.') ? (under.reverse.get(r.group) ?? null) : null, rpf: r.inIfIndex || r.upstream || r.rpf ? { ...rpfPeer(r), inIf: r.inIfIndex ? name(r.inIfIndex) : null, inIfIndex: r.inIfIndex, neighbor: r.upstream, who: who(r.upstream), route: r.rpf ? `${r.rpf.prefix}/${maskLen(r.rpf.mask)}` : null, proto: r.rpf?.proto ? RT_PROTO[r.rpf.proto] ?? null : null, failures: r.rpfFail ?? null, failuresNew: r.rpfNew ?? null, failuresShare: r.rpfNew && r.pktsNew != null ? Math.round((r.rpfNew / (r.rpfNew + Math.max(0, r.pktsNew))) * 1000) / 10 : null, failuresMajor: rpfSignificant(r), paths: ecmpPaths(fib, r.source !== '0.0.0.0' ? r.source : r.rp) } : null, mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
+        vrf: r.vrf ?? '',
+        // a default-VRF group that only carries VRF groups between the switches: its real traffic is the inner group
+        carrier: !r.vrf && under.reverse.has(r.group),
+        underlay: r.vrf ? ((): ReturnType<typeof underInfo> & { exact: boolean } | null => { const own = r.oifs.find(o => o.underlay)?.underlay, g = own ?? under.forward.get(r.vrf + '|' + r.group); return g ? { ...underInfo(g), exact: !!own } : null; })() : null,
+        overlay: !r.vrf && r.group.startsWith('232.') ? (under.reverse.get(r.group) ?? null) : null, rpf: r.inIfIndex || r.upstream || r.rpf ? { ...rpfPeer(r), inIf: r.inIfIndex ? name(r.inIfIndex) : null, inIfIndex: r.inIfIndex, neighbor: r.upstream, who: who(r.upstream), route: r.rpf ? `${r.rpf.prefix}/${maskLen(r.rpf.mask)}` : null, proto: r.rpf?.proto ? RT_PROTO[r.rpf.proto] ?? null : null, failures: r.rpfFail ?? null, failuresNew: r.rpfNew ?? null, failuresShare: r.rpfNew && r.pktsNew != null ? Math.round((r.rpfNew / (r.rpfNew + Math.max(0, r.pktsNew))) * 1000) / 10 : null, failuresMajor: rpfSignificant(r), paths: ecmpPaths(fibs.get(r.vrf ?? '') ?? null, r.source !== '0.0.0.0' ? r.source : r.rp) } : null, mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
           ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null, pimMode: pimMode.get(o.ifIndex) ?? null,
           members: (members.get(r.group + '|' + o.ifIndex) ?? []).map(x => ({ ip: x.ip, via: x.via, ageSec: x.lastSeen !== null ? Math.max(0, Math.round((now - x.lastSeen) / 1000)) : x.recent ? 300 : 1800, sinceSec: x.firstSeen !== null ? Math.round((now - x.firstSeen) / 1000) : null, approx: x.lastSeen === null })),
@@ -161,14 +175,14 @@ export function registerMulticast(app: App): void {
         }))
       })),
       // wrong-interface drops per minute over the last day, one point per read
-      rpfHistory: (vrf ? [] : app.devices.rpfHistory(id, now - 86_400_000)).map(p => ({ ts: p.ts, perMin: p.dt > 0 ? Math.round((p.drops * 60 / p.dt) * 10) / 10 : 0, routes: p.routes })),
+      rpfHistory: app.devices.rpfHistory(id, now - 86_400_000).map(p => ({ ts: p.ts, perMin: p.dt > 0 ? Math.round((p.drops * 60 / p.dt) * 10) / 10 : 0, routes: p.routes })),
       routeSource: m.routeSource ?? 'ipmroute',
       netflowIgmp: nf ? { reports: nf.reports, hosts: nf.hosts, v3Hosts: nf.v3Hosts, windowMin: nf.windowMin, unmatched } : null,
       igmp, rps,
       hosts, igmpHint: igmpHint(vendorOf(d.sys_object_id ?? '', d.sys_descr ?? '', (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.')), d.sys_descr ?? ''),
       load: (m.interfaces ?? []).filter(i => (i.inOctets ?? 0) > 0 || (i.outOctets ?? 0) > 0).map(i => ({ name: name(i.ifIndex), inBps: i.inBps, outBps: i.outBps, inOctets: i.inOctets, outOctets: i.outOctets, ttl: i.ttl, rateLimit: i.rateLimit }))
         .sort((a, b) => (b.inBps ?? 0) + (b.outBps ?? 0) - (a.inBps ?? 0) - (a.outBps ?? 0) || (b.inOctets ?? 0) + (b.outOctets ?? 0) - (a.inOctets ?? 0) - (a.outOctets ?? 0)),
-      pimIssues: pimIssues(m, name, peers),
+      pimIssues: parts.flatMap(x => pimIssues(x.mc, name, x.vrf ? [] : peers).map(i => (x.vrf ? { ...i, text: `VRF ${x.vrf}: ${i.text}` } : i))),
       pim: { interfaces: m.pimInterfaces.map(p => ({ name: name(p.ifIndex), mode: p.mode, dr: p.dr })), neighbors: m.neighbors.map(n => ({ address: n.address, ifName: name(n.ifIndex) })) }
     });
   });

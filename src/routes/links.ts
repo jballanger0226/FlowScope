@@ -1,5 +1,6 @@
 import { rpfSignificant } from '../snmp/multicast.js';
 import { contextOf } from '../snmp/vrf.js';
+import { ifaceVrf } from '../snmp/vrfmap.js';
 import { neighborViews } from '../analysis/path.js';
 import { pathEnv } from './pathenv.js';
 import type { App } from '../app.js';
@@ -58,6 +59,7 @@ export async function linkDevices(app: App, minutes: number) {
   const mcastLoad = new Map<number, Map<number, { inBps: number | null; outBps: number | null }>>();
   for (const dv of app.devices.list()) { const m = app.devices.multicast(dv.id); if (m?.interfaces?.length) mcastLoad.set(dv.id, new Map(m.interfaces.map(x => [x.ifIndex, x]))); }
   const counts = app.hosts.portCounts();
+  const vmaps = new Map(app.devices.list().map(d => [d.id, app.devices.vrfMaps(d.id)] as const));
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
     rpfNow: (() => { const g = (app.devices.multicast(d.id)?.routes ?? []).filter(rpfSignificant); return g.length ? { routes: g.length, drops: g.reduce((a, r) => a + (r.rpfNew ?? 0), 0), top: g.sort((a, b) => (b.rpfNew ?? 0) - (a.rpfNew ?? 0))[0]!.group } : null; })(),
@@ -75,7 +77,7 @@ export async function linkDevices(app: App, minutes: number) {
       return {
         ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
         portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList,
-        isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0,
+        isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0, ...((): { vrf: string; vrfVia: string } | Record<string, never> => { const vm = vmaps.get(d.id); const x = vm ? ifaceVrf(i, vm.direct, vm.byVlan) : null; return x ? { vrf: x.vrf, vrfVia: x.via } : {}; })(),
         utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
         classes: i.classes.map(def => {
           const k = cls.find(x => x.cls === def.cls);
@@ -131,7 +133,7 @@ export function registerLinks(app: App): void {
     if (!d) throw new HttpError(404, 'No such device');
     const env = pathEnv(app);
     c.json({
-      hosts: app.hosts.portHosts(dev, ifx, 300).map(h => ({ ...h, vlanName: h.vlan ? app.vlanName(h.vlan) : '' })), neighbors: neighborViews(app.hosts.neighborsOf(dev, ifx).map(n => ({ ...n, ifIndex: ifx })), env, env.devices()),
+      hosts: app.hosts.portHosts(dev, ifx, 300).map(h => ({ ...h, vlanName: h.vlan ? app.vlanName(h.vlan) : '', vrf: app.devices.vrfMaps(dev).byVlan.get(h.vlan) ?? '' })), neighbors: neighborViews(app.hosts.neighborsOf(dev, ifx).map(n => ({ ...n, ifIndex: ifx })), env, env.devices()),
       readAt: d.hosts_at, note: d.hosts_note ?? '', tracking: app.settings.get('hosts').enabled
     });
   });
@@ -142,7 +144,8 @@ export function registerLinks(app: App): void {
     const d = app.devices.row(dev);
     if (!d) throw new HttpError(404, 'No such device');
     const names = new Map(app.devices.interfaces(dev).map(i => [i.ifIndex, i.name]));
-    c.json({ rows: app.hosts.arpOf(dev).map(r => ({ ...r, ifName: names.get(r.ifIndex) || app.devices.ifNameById(dev, r.ifIndex) || '' })), readAt: d.hosts_at });
+    const direct = app.devices.vrfMaps(dev).direct;
+    c.json({ rows: app.hosts.arpOf(dev).map(r => ({ ...r, vrf: direct.get(r.ifIndex) ?? '', ifName: names.get(r.ifIndex) || app.devices.ifNameById(dev, r.ifIndex) || '' })), readAt: d.hosts_at });
   });
 
   // The VRFs of a device: their interfaces, the hosts in their ARP tables and their multicast state, each read in the VRF's own SNMP context
@@ -153,13 +156,17 @@ export function registerLinks(app: App): void {
     const mcNames = app.devices.multicast(dev)?.names ?? {};
     const nameOf = (ix: number): string => app.devices.interfaces(dev).find(i => i.ifIndex === ix)?.name || app.devices.ifNameById(dev, ix) || mcNames[ix] || `if${ix}`;
     const arp = app.hosts.arpOf(dev, 20_000), now = Date.now();
+    const vm = app.devices.vrfMaps(dev);
+    const ports = app.devices.interfaces(dev).flatMap(i => { const x = ifaceVrf(i, vm.direct, vm.byVlan); return x ? [{ ifIndex: i.ifIndex, name: i.name, vlan: i.vlan, vrf: x.vrf, via: x.via }] : []; });
     c.json({
       vrfs: app.devices.vrfs(dev).map(v => {
         const mc = app.devices.vrfMulticast(dev, v.name);
-        const hosts = arp.filter(a => a.vrf === v.name);
+        const hosts = arp.filter(a => vm.direct.get(a.ifIndex) === v.name);
         return {
           name: v.name, context: contextOf(v.name),
           interfaces: v.ifIndexes.map(ix => ({ ifIndex: ix, name: mc?.names?.[ix] ?? nameOf(ix) })),
+          // the access ports whose VLAN has its SVI in this VRF: the ports themselves have no VRF
+          ports: ports.filter(p => p.vrf.split(', ').includes(v.name) && p.via === 'vlan').map(p => ({ ifIndex: p.ifIndex, name: p.name, vlan: p.vlan })),
           hosts: hosts.length, hostsReadAt: hosts.length ? Math.max(...hosts.map(h => h.lastSeen)) : null,
           multicast: mc ? { routes: mc.routes.length, groups: new Set(mc.routes.map(r => r.group)).size, forwarding: mc.routes.filter(r => r.oifs.some(o => o.forwarding)).length, readAt: mc.readAt, stale: now - mc.readAt > 10 * 60_000 } : null
         };

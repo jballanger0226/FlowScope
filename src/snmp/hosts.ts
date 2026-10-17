@@ -1,5 +1,4 @@
 import type { ConfigDb } from '../db/configdb.js';
-import { contextOf } from './vrf.js';
 import type { AppLog } from '../logger.js';
 import type { DeviceRow, DeviceService } from './devices.js';
 import type { SnmpClient } from './client.js';
@@ -71,12 +70,10 @@ export class HostTracker {
 
     let arpRows = 0;
     const arp: (Awaited<ReturnType<typeof readArp>>[number] & { vrf: string })[] = (await readArp(c).catch(e => { notes.push(`ARP not read: ${(e as Error).message}`); return []; })).map(a => ({ ...a, vrf: '' }));
-    // The hosts of a VRF (every end host on an SD-Access edge) are in that VRF's ARP table, which only its SNMP context shows
-    let vrfArp = 0;
-    for (const v of this.devs.vrfs(d.id)) {
-      const cc = c.forContext(contextOf(v.name));
-      try { const rows = await readArp(cc); arp.push(...rows.map(a => ({ ...a, vrf: v.name }))); vrfArp += rows.length; } catch { /* the context is not set up for this credential */ } finally { cc.close(); }
-    }
+    // The ARP table is not scoped by SNMP context (a read in a VRF's context returns every VRF's entries), so an entry's VRF is that of the interface it was learned on (an SVI in a VRF)
+    const vrfOfIf = this.devs.vrfMaps(d.id).direct;
+    for (const a of arp) a.vrf = vrfOfIf.get(a.ifIndex) ?? '';
+    const vrfArp = arp.filter(a => a.vrf).length;
 
     const cisco = (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.');
     let binds: DhcpBinding[] = [];

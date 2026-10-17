@@ -531,6 +531,8 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
       const gi = Math.floor(g / 5), group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`;
       leafRoutes.push({ group, source: `10.9.0.${30 + (g % 9)}`, inIfIndex: ifIdx('Eth1/12') ?? 0, upstream: null, protocol: 9, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: [], rp: null, oifs: [{ ifIndex: up, forwarding: g % 13 !== 0, pkts: 80_000 * (g + 1) }] });
     }
+    // VLAN 310 has its SVI in a VRF, so the access ports in it (Eth1/10-12) and the hosts on them are in that VRF although the ports themselves have no VRF
+    app.devices.saveData(id, 'vrfs', [{ name: 'APPS', ifIndexes: [ifIdx('Vl310') ?? 0] }], now);
     app.cdb.db.prepare('UPDATE device_ips SET if_index = ? WHERE dev_id = ? AND ip = ?').run(up, id, d.ip);
     app.devices.saveMulticast(id, { readAt: now, source: 'standard', routes: leafRoutes, receivers: [], pimInterfaces: [{ ifIndex: up, mode: 'dense', dr: '10.255.1.7' }], neighbors: [{ address: '10.255.1.1', ifIndex: up }], interfaces: [{ ifIndex: up, inOctets: null, outOctets: null, inBps: 800_000_000, outBps: 30_000_000_000, ttl: null, rateLimit: null }], truncated: false });
   }

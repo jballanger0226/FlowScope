@@ -23,7 +23,7 @@ const SLOW: SlowReader[] = [
   // The VRFs a device has (MPLS-L3VPN-STD-MIB). Each is read for multicast in its own SNMP context, below.
   { name: 'vrfs', cisco: true, every: 3600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => {
     const v = await readVrfs(c);
-    for (const old of devs.vrfs(d.id)) if (!v?.some(x => x.name === old.name)) { devs.saveVrfMulticast(d.id, old.name, null); devs.saveData(d.id, 'fib:' + old.name, null); }
+    for (const old of devs.vrfs(d.id)) if (!v?.some(x => x.name === old.name)) devs.saveVrfMulticast(d.id, old.name, null);
     devs.saveData(d.id, 'vrfs', v, now); return !!v;
   } },
   // Multicast routing inside each VRF. Needs `snmp-server context vrf-<NAME>` and `snmp context vrf-<NAME>` under the VRF's address family, and a v3 group that may read the context.
@@ -40,15 +40,6 @@ const SLOW: SlowReader[] = [
         devs.saveVrfMulticast(d.id, v.name, m); any = true;
         devs.noteIgmp(d.id, m.receivers.filter(r => r.lastReporter && !r.self).map(r => ({ group: r.group, ifIndex: r.ifIndex, reporter: r.lastReporter as string })), now, !m.truncated, v.name);
       } catch { /* a VRF whose context is not set up is skipped */ } finally { cc.close(); }
-    }
-    return any;
-  } },
-  // The forwarding table of each VRF, for the equal-cost path counts on its multicast routes
-  { name: 'vrffib', cisco: true, every: 600_000, emptyEvery: 3600_000, errorEvery: 3600_000, run: async (c, d, devs) => {
-    let any = false;
-    for (const v of devs.vrfs(d.id)) {
-      const cc = c.forContext(contextOf(v.name));
-      try { const f = await readFib(cc); devs.saveData(d.id, 'fib:' + v.name, f, f?.readAt); if (f) any = true; } catch { /* context not set up */ } finally { cc.close(); }
     }
     return any;
   } },

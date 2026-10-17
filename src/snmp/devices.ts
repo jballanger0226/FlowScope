@@ -2,6 +2,7 @@ import net from 'node:net';
 import type { Multicast } from './multicast.js';
 import type { Vrf } from './vrf.js';
 import { VRF_MC } from './vrf.js';
+import { vlanVrfMap } from './vrfmap.js';
 import { diffExtra, linkOptics, type Health, type IfExtra } from './health.js';
 import { forgetIfExtra, ifExtraSeries, pruneIfExtra, recordIfExtra, type IfExtraSeries } from './iface_history.js';
 import { forgetResources, pruneResources, recordResources, resourceSeries, type ResSeries } from './resource_history.js';
@@ -230,8 +231,9 @@ export class DeviceService {
       db.prepare('DELETE FROM mcast_members WHERE dev_id = ? AND (last_seen < ? OR (last_seen < ? AND ip NOT IN (SELECT ip FROM arp WHERE last_seen >= ?)))').run(devId, now - 12 * 3600_000, now - 30 * 60_000, now - 30 * 60_000);
     });
   }
-  mcastMembers(devId: number, vrf = ''): { group: string; ifIndex: number; ip: string; firstSeen: number; lastSeen: number }[] {
-    return (this.cdb.db.prepare('SELECT grp, if_index, ip, first_seen, last_seen FROM mcast_members WHERE dev_id = ? AND vrf = ? ORDER BY last_seen DESC').all(devId, vrf) as unknown as { grp: string; if_index: number; ip: string; first_seen: number; last_seen: number }[])
+  /** Hosts that joined groups of one VRF ('' is the default VRF), or of all of them when `vrf` is null. */
+  mcastMembers(devId: number, vrf: string | null = ''): { group: string; ifIndex: number; ip: string; firstSeen: number; lastSeen: number }[] {
+    return (this.cdb.db.prepare('SELECT grp, if_index, ip, first_seen, last_seen FROM mcast_members WHERE dev_id = ? AND (? IS NULL OR vrf = ?) ORDER BY last_seen DESC').all(devId, vrf, vrf) as unknown as { grp: string; if_index: number; ip: string; first_seen: number; last_seen: number }[])
       .map(r => ({ group: r.grp, ifIndex: r.if_index, ip: r.ip, firstSeen: r.first_seen, lastSeen: r.last_seen }));
   }
 
@@ -251,6 +253,15 @@ export class DeviceService {
 
   /** The VRFs a device has, as last read, and the multicast state of one of them (read in its own SNMP context). */
   vrfs(id: number): Vrf[] { return this.data<Vrf[]>(id, 'vrfs') ?? []; }
+  /** Which interfaces are in a VRF themselves (SVIs, routed ports) and which VLANs are (the VRF of the VLAN's SVI), for working out the VRF of a port or a host. */
+  vrfMaps(id: number): { direct: Map<number, string>; byVlan: Map<number, string> } {
+    const vrfs = this.vrfs(id), direct = new Map<number, string>();
+    if (!vrfs.length) return { direct, byVlan: new Map() };
+    const names = new Map(this.interfaces(id).map(i => [i.ifIndex, i.name] as const)), mcn = this.multicast(id)?.names ?? {};
+    const nameOf = (ix: number): string => names.get(ix) || this.ifNameById(id, ix) || mcn[ix] || '';
+    for (const v of vrfs) for (const ix of v.ifIndexes) direct.set(ix, v.name);
+    return { direct, byVlan: vlanVrfMap(vrfs, nameOf) };
+  }
   vrfMulticast(id: number, vrf: string): Multicast | null { return this.data<Multicast>(id, VRF_MC + vrf); }
   saveVrfMulticast(id: number, vrf: string, m: Multicast | null): void { this.saveData(id, VRF_MC + vrf, m, m?.readAt); }
 

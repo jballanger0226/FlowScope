@@ -71,3 +71,18 @@ test('hosts that joined are kept per VRF, and a read of one VRF does not drop th
   assert.equal(devs.mcastMembers(1, 'MEDIA').length, 0, 'a complete read of the VRF with the group gone removes it');
   assert.equal(devs.mcastMembers(1).length, 1);
 });
+
+import { vlanVrfMap, ifaceVrf } from '../src/snmp/vrfmap.js';
+test('a port and its hosts are in the VRF of the SVI of their VLAN; a trunk is in the VRFs of the VLANs it carries', () => {
+  const names: Record<number, string> = { 312: 'Vl3035', 313: 'Vlan3036', 400: 'Gi1/0/1', 500: 'Vl1' };
+  const by = vlanVrfMap([{ name: 'MEDIA', ifIndexes: [312, 400] }, { name: 'PCI', ifIndexes: [313] }], ix => names[ix] ?? '');
+  assert.deepEqual([...by], [[3035, 'MEDIA'], [3036, 'PCI']], 'a routed port in a VRF is not a VLAN interface');
+  const direct = new Map([[312, 'MEDIA'], [400, 'MEDIA'], [313, 'PCI']]);
+  const P = (o: Partial<{ ifIndex: number; portMode: string; vlan: number; voiceVlan: number; vlanList: string }>) => ({ ifIndex: 9, portMode: 'access', vlan: 0, voiceVlan: 0, vlanList: '', ...o });
+  assert.deepEqual(ifaceVrf(P({ vlan: 3035 }), direct, by), { vrf: 'MEDIA', via: 'vlan' });
+  assert.deepEqual(ifaceVrf(P({ vlan: 3035, voiceVlan: 3036 }), direct, by), { vrf: 'MEDIA, PCI', via: 'vlan' });
+  assert.deepEqual(ifaceVrf(P({ ifIndex: 312, portMode: 'svi', vlan: 3035 }), direct, by), { vrf: 'MEDIA', via: 'interface' });
+  assert.deepEqual(ifaceVrf(P({ ifIndex: 400, portMode: 'routed' }), direct, by), { vrf: 'MEDIA', via: 'interface' }, 'a routed port can be in a VRF itself');
+  assert.deepEqual(ifaceVrf(P({ portMode: 'trunk', vlan: 1, vlanList: '3030-3040,3100' }), direct, by), { vrf: 'MEDIA, PCI', via: 'vlans' });
+  assert.equal(ifaceVrf(P({ vlan: 77 }), direct, by), null, 'a VLAN with no SVI in a VRF is the default VRF');
+});

@@ -16,7 +16,7 @@ interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: nu
 interface Iface {
   mac: string; addresses: string[];
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
-  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number;
+  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans';
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
@@ -28,7 +28,7 @@ interface SeriesRes {
   step: number; tier: string;
 }
 interface Wifi { name: string; os: string; ssid: string; ap: string; radio: number | null; band: string; channel: string; snr: number; txRate: number; rxRate: number; txBytes: number; rxBytes: number; uptimeSec: number; readAt: number }
-interface PortHost { mac: string; vlan: number; vlanName: string; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean; wifi: Wifi | null }
+interface PortHost { vrf?: string; mac: string; vlan: number; vlanName: string; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean; wifi: Wifi | null }
 interface WlanAp { mac: string; name: string; ip: string; serial: string; model: string; cpuPct: number; memFree: number; memTotal: number; uptimeSec: number; role: string }
 interface WlanRadio { apMac: string; idx: number; mac: string; channel: string; band: string; txPower: number; noiseFloor: number; util4: number; util64: number; clients: number; mode: string; up: boolean }
 interface WlanSsid { apMac: string; bssid: string; name: string; radio: number | null; ssidId: number | null; clients: number; ifName: string | null }
@@ -49,7 +49,7 @@ let hostsRes: HostsRes | null = null; let hostsLoading = false; let hostsError =
 let findQ = ''; let found: Located | null = null; let findError = ''; let finding = false;
 let readingHosts = false; let readMsg = '';
 interface ArpRow { ip: string; mac: string; ifIndex: number; ifName: string; lastSeen: number; vrf?: string }
-interface VrfView { name: string; context: string; interfaces: { ifIndex: number; name: string }[]; hosts: number; hostsReadAt: number | null; multicast: { routes: number; groups: number; forwarding: number; readAt: number; stale: boolean } | null }
+interface VrfView { name: string; context: string; interfaces: { ifIndex: number; name: string }[]; ports?: { ifIndex: number; name: string; vlan: number }[]; hosts: number; hostsReadAt: number | null; multicast: { routes: number; groups: number; forwarding: number; readAt: number; stale: boolean } | null }
 let vrfRes: VrfView[] | null = null;
 let arpRes: { rows: ArpRow[]; readAt: number | null } | null = null; let arpQ = '';
 let nbRes: NbRes | null = null; let nbError = ''; let nbLoading = false;
@@ -340,7 +340,13 @@ const vlanIn = (list: string, v: number) => !!list && (list === 'all' || list.sp
 const vlanLabel = (id: number | null, name: string) => (id ? (name ? `${id} ${name}` : String(id)) : '');
 
 /** Words describing the VLAN(s) of a port, shown in the table and searched by the box above it. */
+/** The VRF of an interface: its own for an SVI or a routed port, otherwise that of the SVI of the VLAN it is in. */
+const vrfNote = (i: Iface): VNode | null => (i.vrf ? h('span', { class: 'dim', style: 'font-size:11px', title: i.vrfVia === 'interface' ? 'This interface is in the VRF' : i.vrfVia === 'vlans' ? 'The VLANs this trunk carries have their SVI in these VRFs' : "A port has no VRF of its own: the VRF is that of the SVI of the VLAN it is in" }, `${i.vrfVia === 'vlans' ? 'carries VRF ' : 'VRF '}${i.vrf}${i.vrfVia === 'vlan' ? ' (by VLAN)' : ''}`) : null);
 function vlanCell(i: Iface): VNode {
+  const base = vlanCellBase(i), v = vrfNote(i);
+  return v ? h('span', { class: 'col', style: 'gap:1px' }, base, v) : base;
+}
+function vlanCellBase(i: Iface): VNode {
   if (i.isVlanIf || i.portMode === 'svi') return h('span', { class: 'muted' }, i.vlan ? `SVI for VLAN ${vlanLabel(i.vlan, i.vlanName)}` : 'SVI');
   if (i.portMode === 'trunk') return h('span', { class: 'col', style: 'gap:1px' }, h('span', null, h('span', { class: 'tag' }, 'trunk'), i.vlan ? ` native ${vlanLabel(i.vlan, i.vlanName)}` : ''), i.vlanList ? h('span', { class: 'dim mono', style: 'font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: `Allowed VLANs: ${i.vlanList}` }, `allowed ${i.vlanList}`) : null);
   if (i.portMode === 'routed') return h('span', { class: 'muted' }, 'routed port');
@@ -465,8 +471,10 @@ function vrfPanel(dev: Dev): VNode | null {
       h('div', { class: 'tr head' }, ...['VRF', 'Interfaces', 'Hosts (ARP)', 'Multicast'].map(t => h('span', null, t))),
       v.map(x => h('div', { key: x.name, class: 'tr' },
         h('span', { class: 'mono', style: 'font-size:12.5px', title: `SNMP context ${x.context}` }, x.name),
-        h('span', { class: 'row', style: 'gap:4px 8px;flex-wrap:wrap' }, x.interfaces.slice(0, 8).map(i => h('button', { type: 'button', class: 'lnk mono', style: 'font-size:12px', title: `Open ${i.name}`, onclick: () => select_(dev.id, i.ifIndex, 'interfaces') }, i.name)),
-          x.interfaces.length > 8 ? h('span', { class: 'dim', style: 'font-size:12px' }, `+${num(x.interfaces.length - 8)} more`) : null),
+        h('span', { class: 'col', style: 'gap:4px' },
+          h('span', { class: 'row', style: 'gap:4px 8px;flex-wrap:wrap' }, x.interfaces.slice(0, 8).map(i => h('button', { type: 'button', class: 'lnk mono', style: 'font-size:12px', title: `Open ${i.name}`, onclick: () => select_(dev.id, i.ifIndex, 'interfaces') }, i.name)),
+            x.interfaces.length > 8 ? h('span', { class: 'dim', style: 'font-size:12px' }, `+${num(x.interfaces.length - 8)} more`) : null),
+          x.ports?.length ? h('span', { class: 'dim', style: 'font-size:12px', title: x.ports.map(p => `${p.name} (VLAN ${p.vlan})`).join(', ') }, `${num(x.ports.length)} access port${x.ports.length === 1 ? '' : 's'} in its VLANs: ${x.ports.slice(0, 4).map(p => p.name).join(', ')}${x.ports.length > 4 ? '…' : ''}`) : null),
         h('span', { class: x.hosts ? 'mono' : 'dim' }, x.hosts ? num(x.hosts) : 'none read'),
         x.multicast ? h('button', { type: 'button', class: 'lnk', style: 'text-align:left', title: `Open the multicast table of VRF ${x.name}`, onclick: () => go('multicast', { dev: dev.id, vrf: x.name }) }, `${num(x.multicast.groups)} ${x.multicast.groups === 1 ? 'group' : 'groups'}, ${num(x.multicast.forwarding)} forwarding`)
           : h('span', { class: 'dim' }, 'not read'))))));
@@ -536,7 +544,7 @@ function hostsPanel(dev: Dev, itf: Iface): VNode {
         wifiCols ? h('span', null, x.wifi ? [x.wifi.name || '—', x.wifi.os ? h('span', { class: 'dim', style: 'font-size:12px' }, ' · ' + x.wifi.os) : null] : h('span', { class: 'dim' }, '—')) : null,
         h('span', { class: 'mono', style: 'font-size:12px' }, x.mac), h('span', { class: 'mono', style: 'font-size:12px' }, x.ips.join(', ') || '—'),
         wifiCols ? (x.wifi ? h('span', { style: 'font-size:12px' }, `${x.wifi.ssid || 'Wi-Fi'} · ${bandText(x.wifi.band, x.wifi.channel)} · `, snrTag(x.wifi.snr)) : h('span', { class: 'dim' }, '—')) : null,
-        h('span', null, vlanLabel(x.vlan, x.vlanName) || '—'), h('span', { class: 'muted', style: 'font-size:12px' }, dayClock(x.firstSeen)),
+        h('span', { class: 'col', style: 'gap:1px' }, h('span', null, vlanLabel(x.vlan, x.vlanName) || '—'), x.vrf ? h('span', { class: 'dim', style: 'font-size:11px', title: "The VRF of the SVI of this VLAN" }, `VRF ${x.vrf}`) : null), h('span', { class: 'muted', style: 'font-size:12px' }, dayClock(x.firstSeen)),
         h('span', { class: x.active ? 'muted' : 'dim', style: 'font-size:12px' }, x.active ? ago(x.lastSeen) : 'gone ' + ago(x.lastSeen)),
         h('span', { class: 'row', style: 'gap:4px;flex-wrap:nowrap' },
           btn('Explorer', { small: true, kind: 'ghost', title: `Flows with ${x.ips[0] || x.mac} in Flow explorer`, aria: `Flow explorer for ${x.ips[0] || x.mac}`, onclick: () => go('explorer', { q: x.ips[0] ? 'ip:' + x.ips[0] : 'mac:' + x.mac, range: '1h' }) }),
