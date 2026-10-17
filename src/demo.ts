@@ -571,6 +571,7 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
     const m = (n: number, role: string) => ({ index: n * 1000, number: n, role, state: 'ready', level: 'ok', mac: `00:1c:73:01:0${n}:00` });
     app.devices.saveData(id, 'stack', { readAt: now, members: [m(1, 'master'), m(2, 'standby'), m(3, 'member')], ports: [88, 89, 191, 192, 272, 273].map((ifIndex, i) => ({ ifIndex, status: 'up', level: 'ok', neighbor: ((i + 1) % 3 + 1) * 1000 })), problems: [] }, now);
   }
+  if (d.name === 'dist-sw-01') seedFabric(app, id, net, now);
   if (d.name === 'dist-sw-01') {
     app.devices.saveData(id, 'dai', { readAt: now, dtSec: 300, vlans: [{ vlan: 140, forwarded: 290_344, dropped: 555_705, dhcpDenied: 555_705, aclDenied: 0, srcMac: 0, dstMac: 0, ip: 0, invalid: 0, droppedNow: 41 }] }, now);
     const gi = ifIdx('Gi1/0/12');
@@ -578,6 +579,28 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
       { name: 'ms-office-365', inBps: 2_400_000, outBps: 640_000, inBytes: 9_100_000_000, outBytes: 2_300_000_000 }, { name: 'ssl', inBps: 1_100_000, outBps: 300_000, inBytes: 4_800_000_000, outBytes: 1_200_000_000 },
       { name: 'dns', inBps: 12_000, outBps: 9_000, inBytes: 180_000_000, outBytes: 90_000_000 }, { name: 'ntp', inBps: 120, outBps: 120, inBytes: 4_000_000, outBytes: 4_000_000 }] } }, now);
   }
+}
+
+/** What an SD-Access edge node adds: RADIUS servers, per-port authentication setup, configuration state and the LISP map cache. */
+function seedFabric(app: App, id: number, net: Net, now: number): void {
+  const srv = (key: string, address: string, kind: 'radius' | 'tacacs', port: number, priority: number, o: Record<string, unknown>) => ({ key, address, kind, port, priority, up: true, stateSec: 956450, deadCount: 0, authReq: 0, authTimeouts: 0, authFail: 0, authMs: 0, acctReq: 0, acctTimeouts: 0, newReq: null, newTimeouts: null, newFail: null, newDead: null, level: 'ok', problems: [] as string[], ...o });
+  app.devices.saveData(id, 'aaa', { readAt: now, dtSec: 60, servers: [
+    srv('1.0', '10.254.185.15', 'tacacs', 49, 0, {}),
+    srv('2.1', '10.254.185.251', 'radius', 1812, 1, { authReq: 24115, authTimeouts: 77, authFail: 12, authMs: 925, acctReq: 3507, acctTimeouts: 67, deadCount: 2, newReq: 38, newTimeouts: 1, level: 'warn', problems: ['RADIUS server 10.254.185.251 did not answer 1 request since the last read.'] })] }, now);
+  app.devices.saveData(id, 'config', { readAt: now, changedAt: now - 4_600, savedAt: now - 23_700, unsaved: true, unsavedSec: 4.6, events: [{ at: now - 86_400_000, what: 'saved', user: 'netops', via: 'remote session' }] }, now);
+  const ports = ['Gi1/0/12', 'Gi1/0/14', 'Gi1/0/15', 'Gi1/0/16', 'Gi1/0/20', 'Gi1/0/24'].map(n => net.ifIdx.get('dist-sw-01|' + n)).filter((x): x is number => !!x);
+  app.devices.saveData(id, 'authsetup', ports.map(ifIndex => ({ ifIndex, dot1x: true, mab: true, mode: 'multi-auth', control: 'auto', open: ifIndex !== ports[5], reauth: false })), now);
+  // LISP: endpoints the node resolved, what it registered, and a day of cache movement
+  const rl = ['10.255.1.7', '10.255.1.11', '10.255.0.1'];
+  const hostsIn = ['10.9.0.5', '10.9.0.12', '10.9.0.30', '10.9.2.30'];
+  const entries = [...hostsIn.map((ip, i) => ({ iid: 4097, kind: 'ip', eid: ip, prefix: 32, active: true, authoritative: true, ageSec: 240 + i * 610, rlocs: [{ rloc: rl[i < 3 ? 0 : 1]!, priority: 10, weight: 10, up: true }], bytes: 0, pkts: 0 })),
+    ...Array.from({ length: 12 }, (_, i) => ({ iid: 4097, kind: 'ip', eid: `10.1.${20 + i}.${40 + i * 3}`, prefix: 32, active: i < 5, authoritative: true, ageSec: 900 + i * 700, rlocs: [{ rloc: rl[i % 2]!, priority: 10, weight: 10, up: true }], bytes: 0, pkts: 0 })),
+    { iid: 4097, kind: 'ip', eid: '10.133.0.0', prefix: 16, active: true, authoritative: true, ageSec: 5000, rlocs: [], bytes: 0, pkts: 0 }];
+  const regs = [...['10.1.4.21', '10.1.8.21', '10.1.4.33', '10.1.4.60', '10.1.7.88', '10.1.7.19'].map(eid => ({ iid: 4097, kind: 'ip', eid, prefix: 32, ageSec: 52_000 })), { iid: 4097, kind: 'ip', eid: '10.1.4.99', prefix: 32, ageSec: 7_300 }];
+  const history = Array.from({ length: 288 }, (_, i) => { const t = now - (287 - i) * 300_000; const cache = 150 + Math.round(18 * Math.sin(i / 20) + (i > 200 && i < 206 ? -60 + (i - 200) * 10 : 0)); return { t, cache, added: i % 7 === 0 ? 6 : 1, removed: i === 201 ? 58 : i % 9 === 0 ? 4 : 0 }; });
+  history[history.length - 1] = { t: now, cache: entries.length, added: 3, removed: 1 };
+  app.devices.saveData(id, 'lisp', { readAt: now, instances: [{ iid: 4097, vrf: '', cacheSize: entries.length, cacheLimit: 40448, etr: true, itr: false, pitr: true, petr: false, mapServer: false, mapResolver: false, requestsOut: 5424, repliesIn: 4081, registersOut: 282, newRequests: 12, newReplies: 12 }],
+    cache: entries, registered: regs, cacheTotal: entries.length, truncated: false, mapServers: { total: 2, down: [] }, mapResolvers: { total: 2, down: [] }, history, problems: [], level: 'ok' }, now);
 }
 
 function seedHosts(app: App, net: Net): void {
@@ -594,6 +617,22 @@ function seedHosts(app: App, net: Net): void {
       const mac = hostMac(x.ip);
       fdb.run(net.ids.get(x.dev)!, mac, x.vlan, ix(x.dev, x.port), first, now, first);
       arp.run(net.ids.get(x.l3)!, x.ip, mac, ix(x.l3, 'Vl' + x.vlan), now);
+    }
+    // 802.1X / MAB sessions and security group tags on the edge switch: one host in a VLAN the server assigned, one that did not authenticate
+    { const sw = net.ids.get('dist-sw-01')!;
+      const sess = db.prepare('INSERT OR REPLACE INTO auth_sessions(dev_id, mac, if_index, vlan, ip, policy, profile, last_seen, domain, status) VALUES (?,?,?,?,?,?,?,?,?,?)');
+      const sgt = db.prepare('INSERT OR REPLACE INTO ip_sgt(dev_id, vrf, ip, sgt, source, last_seen) VALUES (?,?,?,?,?,?)');
+      db.prepare('INSERT OR REPLACE INTO sgt_names(dev_id, sgt, name) VALUES (?,?,?)').run(sw, 10, 'EMPLOYEES'); db.prepare('INSERT OR REPLACE INTO sgt_names(dev_id, sgt, name) VALUES (?,?,?)').run(sw, 74, 'DEVICE_CAMERA'); db.prepare('INSERT OR REPLACE INTO sgt_names(dev_id, sgt, name) VALUES (?,?,?)').run(sw, 30, 'DC_SERVERS');
+      const g12 = ix('dist-sw-01', 'Gi1/0/12'), g14 = ix('dist-sw-01', 'Gi1/0/14'), g15 = ix('dist-sw-01', 'Gi1/0/15'), g16 = ix('dist-sw-01', 'Gi1/0/16');
+      const m = hostMac;
+      sess.run(sw, m('10.1.4.21'), g12, 140, '10.1.4.21', 'jdoe', 'CAMPUS-USERS', now, 'data', 'authorized'); sgt.run(sw, '', '10.1.4.21', 10, 'authenticated', now);
+      sess.run(sw, m('10.1.8.21'), g12, 160, '10.1.8.21', 'SEP00505601080015', 'CAMPUS-VOICE', now, 'voice', 'authorized');
+      sess.run(sw, m('10.1.4.33'), g14, 140, '10.1.4.33', 'asmith', 'CAMPUS-USERS', now, 'data', 'authorized'); sgt.run(sw, '', '10.1.4.33', 10, 'authenticated', now);
+      sess.run(sw, m('10.1.4.60'), g15, 0, '10.1.4.60', '', '', now, 'unknown', 'idle');
+      // a camera whose port is configured for VLAN 140 but whose authentication assigned VLAN 150
+      fdb.run(sw, m('10.1.7.140'), 150, g16, first, now, first); arp.run(sw, '10.1.7.140', m('10.1.7.140'), ix('dist-sw-01', 'Vl150'), now);
+      sess.run(sw, m('10.1.7.140'), g16, 150, '10.1.7.140', 'cam-lobby-2', 'CAMPUS-WIFI', now, 'data', 'authorized'); sgt.run(sw, '', '10.1.7.140', 74, 'authenticated', now);
+      for (const ip of ['10.9.0.5', '10.9.0.12', '10.9.0.30', '10.9.2.30']) sgt.run(sw, '', ip, 30, 'authenticated', now);
     }
     for (const [sw, port, ip] of LEARNED_VIA) fdb.run(net.ids.get(sw)!, hostMac(ip), HOSTS.find(h => h.ip === ip)!.vlan, ix(sw, port), first, now, first);
     for (const [key, [proto, name, port, kind, caps]] of Object.entries(NEIGHBORS)) {
