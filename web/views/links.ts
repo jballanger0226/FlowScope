@@ -6,7 +6,7 @@ import { ago, bps, bpsAxis, bytes, clock, dayClock, dur, niceCeil, num, pct, deb
 import { post } from '../api.js';
 import { correlate, verdict } from './correlate.js';
 import { attentionPanel, cards, cardsRow, issues, type Target } from './links_overview.js';
-import { hardwarePanel, hasHardware, hasOptics, linkQuality, nbarPanel, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
+import { hardwarePanel, hasHardware, hasOptics, linkQuality, nbarPanel, opticCell, opticMap, poePortBox, protocolsPanel, type HealthRes } from './links_health.js';
 import { lispPanel, type LispView } from './lisp.js';
 import { publicAddresses } from './ip_scope.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
@@ -913,18 +913,10 @@ function ifTabs(dev: Dev, itf: Iface): VNode {
   const now = ifTabNow(dev, itf);
   return tabs('Interface sections', ifTabList(dev, itf).map(t => ({ id: t.id, label: t.label, on: t.id === now })), id => { ifTab = id as IfTab; redraw(); });
 }
-/** Power over Ethernet on the selected port: what the device draws now and what the switch has reserved for it. */
-function poeLine(itf: Iface): VNode | null {
-  const x = itf.poe; if (!x || !x.detected) return null;
-  const idle = x.allocW > 0 && x.drawnW < x.allocW * 0.25;
-  return h('div', { class: 'row', style: 'gap:12px;flex-wrap:wrap', role: 'status' }, h('b', null, 'Power over Ethernet'),
-    h('span', null, `${x.drawnW} W drawn`), h('span', null, `${x.allocW} W reserved`), x.maxW ? h('span', { class: 'dim' }, `port limit ${x.maxW} W`) : null,
-    idle ? h('span', { class: 'dim', style: 'font-size:12px' }, 'The device draws far less than the switch reserved for it. Reserved power is what counts against the budget.') : null);
-}
 function ifBody(dev: Dev, itf: Iface): VNode {
   const tab = ifTabNow(dev, itf);
   const body = tab === 'quality' ? [
-      poeLine(itf),
+      itf.poe?.detected ? poePortBox(itf.poe) : null,
       linkQuality(healthRes?.ifExtra.find(x => x.ifIndex === itf.ifIndex), (healthRes?.health?.sensors ?? []).filter(x => x.kind === 'optic' && x.ifIndex === itf.ifIndex), itf.speedMbps),
       qualityGraphs(itf)]
     : tab === 'hosts' ? [hostsPanel(dev, itf)]

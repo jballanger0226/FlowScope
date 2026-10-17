@@ -162,6 +162,19 @@ function poeTile(p: Poe, many: boolean): VNode {
     h('div', { class: 'ssub' }, hasAlloc && b > 0 ? h('span', { style: colour(lvl) }, `${num(p.allocW!)} W reserved of ${num(b)} W (${p.allocPct}%)`) : b > 0 ? `${p.usedPct}% of the ${num(b)} W budget` : '', ports ? h('div', null, ports) : null));
 }
 
+const w1 = (n: number): string => String(Math.round(n * 10) / 10);
+/** One port's PoE as a box, like the whole-switch one: what the device draws, against what the switch has reserved for it. */
+export function poePortBox(x: { allocW: number; drawnW: number; maxW: number | null; detected: boolean }): VNode {
+  const pct = x.allocW > 0 ? Math.min(100, (x.drawnW / x.allocW) * 100) : 0;
+  return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Power over Ethernet'), h('span', { class: 'dim', style: 'font-size:11.5px' }, 'Drawn is what the device uses now; reserved is what the switch has set aside for it')),
+    h('div', { class: 'stat', style: 'min-width:240px;align-self:flex-start' },
+      h('div', { class: 'slabel' }, 'PoE power'),
+      h('div', { class: 'svalue' }, `${w1(x.drawnW)} W`, h('span', { class: 'dim', style: 'font-size:12px;font-weight:400' }, ' drawn')),
+      x.allocW > 0 ? h('div', { style: 'position:relative;height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:6px 0 4px', role: 'img', 'aria-label': `${w1(x.drawnW)} W drawn of ${w1(x.allocW)} W reserved` },
+        h('span', { style: `position:absolute;inset:0 auto 0 0;width:${pct}%;background:var(--accent)` })) : null,
+      h('div', { class: 'ssub' }, `${w1(x.allocW)} W reserved`, x.maxW ? h('div', null, `port limit ${w1(x.maxW)} W`) : null)));
+}
+
 const sub = (t: string, hint?: string) => h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, t), hint ? h('span', { class: 'dim', style: 'font-size:11.5px' }, hint) : null);
 
 /** Stack members and stack ports (Catalyst StackWise): a broken ring link is the thing to see. */
