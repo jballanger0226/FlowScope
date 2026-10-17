@@ -280,8 +280,10 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE mcast_members ADD COLUMN vrf TEXT NOT NULL DEFAULT '';
    ALTER TABLE arp ADD COLUMN vrf TEXT NOT NULL DEFAULT '';`,
   // authentication sessions (802.1X, MAB): the VLAN the authentication server put each client in, and its address; replaced as a whole at each read of a device
-  `CREATE TABLE auth_sessions (dev_id INTEGER NOT NULL, mac TEXT NOT NULL, if_index INTEGER NOT NULL, vlan INTEGER NOT NULL, ip TEXT NOT NULL, policy TEXT NOT NULL, profile TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, mac, if_index));
-   CREATE INDEX auth_mac ON auth_sessions(mac);`
+  `CREATE TABLE auth_sessions (dev_id INTEGER NOT NULL, mac TEXT NOT NULL, if_index INTEGER NOT NULL, vlan INTEGER NOT NULL, ip TEXT NOT NULL, policy TEXT NOT NULL /* the user name */, profile TEXT NOT NULL /* the SGT name */, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, mac, if_index));
+   CREATE INDEX auth_mac ON auth_sessions(mac);`,
+  // whether the session authenticated: its domain (data, voice) or 'unknown' for a client seen that did not
+  `ALTER TABLE auth_sessions ADD COLUMN domain TEXT NOT NULL DEFAULT '';`
 ];
 
 export class ConfigDb {
