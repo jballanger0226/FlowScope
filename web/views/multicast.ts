@@ -243,7 +243,7 @@ function groupRows(g: Grp): VNode {
   const total = list.some(r => r.bps !== null) ? list.reduce((a, r) => a + (r.bps ?? 0), 0) : null;
   const rps = [...new Set(list.map(r => r.rp).filter((x): x is string => !!x))];
   const sub = 'minmax(150px,1.2fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
-  const sorted = [...list].sort((a, b) => (b.bps ?? -1) - (a.bps ?? -1) || a.source.localeCompare(b.source, undefined, { numeric: true }));
+  const sorted = [...list].sort((a, b) => Number(b.sharedTree) - Number(a.sharedTree) || (b.bps ?? -1) - (a.bps ?? -1) || a.source.localeCompare(b.source, undefined, { numeric: true }));
   return h('div', { key: 'g|' + g.group },
     h('div', { class: 'tr', role: 'button', tabindex: 0, 'aria-expanded': on, style: 'cursor:pointer', onclick: () => toggleGroup(g.group), onkeydown: keyDown(() => toggleGroup(g.group)) },
       h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾' : '▸'),
