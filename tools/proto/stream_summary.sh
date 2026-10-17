@@ -5,6 +5,8 @@
 #   tools/proto/stream_summary.sh setup      create proto_stream_dir and backfill it from flow_raw (a day at a time), then attach the live view
 #   tools/proto/stream_summary.sh bench      time the current search shape against the summary for 1 hour, 24 hours and everything, with row counts and memory
 #   tools/proto/stream_summary.sh load       replay the last hour of flow_raw into scratch tables with and without the view, at small insert blocks, to find the insert ceiling
+#   tools/proto/stream_summary.sh setup2     add proto_stream_recent (newest entry per stream per minute, sorted by time) for the "newest streams first" list, and backfill it
+#   tools/proto/stream_summary.sh bench2     time "newest 200 streams" with that table plus a lookup in proto_stream_dir, for 1 hour, 24 hours and everything
 #   tools/proto/stream_summary.sh cleanup    drop every proto_ table and view
 #
 # Environment: DB (default flowscope), CH_ARGS (extra clickhouse-client arguments, e.g. "--user x --password y").
@@ -101,8 +103,36 @@ load)
   echo "Today's rate is about 650 rows/s; ten times that is 6,500 rows/s."
   q "DROP TABLE proto_load_mv; DROP TABLE proto_load_dir; DROP TABLE proto_load_plain; DROP TABLE proto_load_withview"
   ;;
+setup2)
+  q "CREATE TABLE IF NOT EXISTS proto_stream_recent (skey String, t1 Int64) ENGINE = MergeTree PARTITION BY toUInt32(toYYYYMMDD(toDateTime(intDiv(t1, 1000), 'UTC'))) ORDER BY (t1, skey)"
+  t=$(date +%s)
+  q "INSERT INTO proto_stream_recent SELECT skey, max(ts1) FROM flow_raw GROUP BY skey, intDiv(ts1, 60000) SETTINGS max_memory_usage = 6000000000, max_bytes_before_external_group_by = 2000000000"
+  echo "  backfill: $(( $(date +%s) - t )) s"
+  q "CREATE MATERIALIZED VIEW IF NOT EXISTS proto_stream_recent_mv TO proto_stream_recent AS SELECT skey, max(ts1) AS t1 FROM flow_raw GROUP BY skey"
+  q "SELECT 'recent rows' AS what, count() AS n FROM proto_stream_recent"
+  ;;
+bench2)
+  now_ms=$(( $(date +%s) * 1000 ))
+  newest_sql() {  # $1 from  $2 to: the 200 newest streams in the range, with totals from the summary by key lookup
+    echo "WITH keys AS (SELECT skey FROM (SELECT skey, max(t1) AS tl FROM (SELECT skey, t1 FROM proto_stream_recent WHERE t1 BETWEEN $1 AND $2 ORDER BY t1 DESC LIMIT 20000) GROUP BY skey ORDER BY tl DESC LIMIT 200)),
+      d AS (SELECT skey AS k, src_ip AS s_ip, sport AS s_port, any(dst_ip) AS d_ip, any(dport) AS d_port, any(proto) AS pr, min(t0) AS t0, max(t1) AS t1,
+              sum(b) AS b, sum(p) AS p, if(min(d_min) != max(d_max), 2, 1) AS nd, max(rm) AS rm
+            FROM proto_stream_dir WHERE skey IN (SELECT skey FROM keys) GROUP BY skey, src_ip, sport),
+      i AS (SELECT k, argMin(s_ip, t0) AS i_ip, argMin(s_port, t0) AS i_sp FROM d GROUP BY k),
+      t AS (SELECT d.k AS k, min(d.t0) AS tt0, max(d.t1) AS tt1, sum(d.b) AS tb, sum(d.p) AS tp, max(d.nd) AS tnd, max(d.rm) AS trm FROM d INNER JOIN i ON i.k = d.k GROUP BY d.k)
+      SELECT i.k, i.i_ip, i.i_sp, t.tt0, t.tt1, t.tb, t.tp, if(t.tnd > 1 OR t.trm = 1, 1, 0) AS qchg
+      FROM i INNER JOIN t ON t.k = i.k ORDER BY t.tt1 DESC LIMIT 200"
+  }
+  for pair in "1h:3600000" "24h:86400000" "all:$now_ms"; do
+    ch --query "$(newest_sql $(( now_ms - ${pair#*:} )) $now_ms)" --format Null --log_comment "proto_new2_${pair%%:*}" --max_memory_usage 12000000000 --max_execution_time 300 2>&1 | head -3 || true
+  done
+  ch --query "SYSTEM FLUSH LOGS"
+  ch --query "SELECT replaceOne(log_comment, 'proto_', '') AS run, round(query_duration_ms / 1000, 3) AS seconds, formatReadableQuantity(read_rows) AS rows_read,
+      formatReadableSize(memory_usage) AS peak_memory FROM system.query_log WHERE type = 'QueryFinish' AND log_comment LIKE 'proto_new2_%' AND event_time > now() - INTERVAL 30 MINUTE
+      ORDER BY log_comment" --format PrettyCompactMonoBlock
+  ;;
 cleanup)
-  q "DROP TABLE IF EXISTS proto_stream_dir_mv; DROP TABLE IF EXISTS proto_stream_dir; DROP TABLE IF EXISTS proto_load_mv; DROP TABLE IF EXISTS proto_load_dir; DROP TABLE IF EXISTS proto_load_plain; DROP TABLE IF EXISTS proto_load_withview"
+  q "DROP TABLE IF EXISTS proto_stream_recent_mv; DROP TABLE IF EXISTS proto_stream_recent; DROP TABLE IF EXISTS proto_stream_dir_mv; DROP TABLE IF EXISTS proto_stream_dir; DROP TABLE IF EXISTS proto_load_mv; DROP TABLE IF EXISTS proto_load_dir; DROP TABLE IF EXISTS proto_load_plain; DROP TABLE IF EXISTS proto_load_withview"
   echo "Removed."
   ;;
 *) sed -n 2,13p "$0"; exit 1 ;;
