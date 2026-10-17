@@ -19,7 +19,7 @@ const VIA_WHY = { snmp: "From the router's IGMP cache over SNMP: the last host t
 const viaChip = (v: Member['via']): VNode => chip(VIA_TEXT[v ?? 'snmp'], v === 'both' ? 'ok' : 'default', VIA_WHY[v ?? 'snmp']);
 interface Out { ifIndex: number; name: string; pimMode?: string | null; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
 interface RpfPeer { id: number; name: string; ifIndex: number; ifName: string; forwarding: boolean | null }
-interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null }
+interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null; failuresNew?: number | null }
 interface IgmpIf { name: string; querier: string | null; who: string | null; self: boolean; version: number | null; intervalSec: number | null; upSec: number | null; expirySec: number | null; hosts: number }
 interface RpMap { range: string; rp: string; who: string | null; self: boolean; holdSec: number | null; expirySec: number | null }
 interface Route {
@@ -221,7 +221,7 @@ const sourceCell = (r: Route): VNode => h('span', { class: 'mono', style: 'font-
 function rpfProblems(x: Rpf | null | undefined): { key: string; text: string; title: string }[] {
   if (!x) return [];
   const out: { key: string; text: string; title: string }[] = [];
-  if (x.failures) out.push({ key: 'drops', text: `${num(x.failures)} RPF drops`, title: 'Packets for this route that arrived on an interface other than the RPF interface and were dropped. A counter since the route was created, so it shows that it happened, not that it is happening now.' });
+  if (x.failuresNew) out.push({ key: 'drops', text: `${num(x.failuresNew)} RPF drops now`, title: 'Packets for this route arrived on an interface other than the one it accepts the group on, and were dropped, since the previous read. This happens when two equal-cost paths both deliver the group, or when the unicast route to the source changed.' });
   if (x.peer && x.peer.forwarding === false) out.push({ key: 'nofwd', text: 'neighbour not forwarding', title: `${x.peer.name} does not list ${x.peer.ifName} as an outgoing interface for this group that is forwarding, so nothing is sent to this router` });
   if (x.loss) out.push({ key: 'loss', text: 'multicast lost on link', title: 'The neighbour sends more multicast out of its end of this link than this router receives' });
   return out;
@@ -240,6 +240,7 @@ function rpfLine(x: Rpf, group: string): VNode | null {
       linkBtn(`${x.peer.ifName} on ${x.peer.name}`, `Open ${x.peer.ifName} on ${x.peer.name} in Interfaces`, () => go('links', { dev: x.peer!.id, if: x.peer!.ifName }))
     ] : null,
     x.route ? h('span', { title: 'Reverse path forwarding: the unicast route back to the source (or to the rendezvous point for a shared tree) decides which interface the router accepts this group on. Traffic on any other interface is dropped.' }, 'via route ', h('b', { class: 'mono' }, x.route), x.proto ? ` (${x.proto})` : '') : null,
+    x.failures && !x.failuresNew ? h('span', { class: 'dim', title: 'A counter kept by the router since this route was created. It is not growing, so it is history.' }, `${num(x.failures)} packets dropped on the wrong interface since the route was created`) : null,
     ...rpfFlags(x));
 }
 /** One line per distinct RPF interface and neighbour in a group. */

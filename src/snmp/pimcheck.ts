@@ -73,12 +73,14 @@ export function pimIssues(mc: Multicast, ifName: (ix: number) => string, peers: 
   const noQuerier = (mc.igmpInterfaces ?? []).filter(i => !i.querier && mc.receivers.some(r => r.ifIndex === i.ifIndex)).map(i => ifName(i.ifIndex));
   if (noQuerier.length) out.push({ level: 'warn', kind: 'no-querier', text: `No IGMP querier is reported on ${noQuerier.slice(0, 4).join(', ')}${noQuerier.length > 4 ? ` and ${noQuerier.length - 4} more` : ''}, which has hosts that joined. Without a querier, memberships are not refreshed and groups stop after the timeout.` });
 
-  // packets dropped because they arrived on a different interface than the one the unicast route to the source points to
-  const failing = mc.routes.filter(r => (r.rpfFail ?? 0) > 0).sort((a, b) => (b.rpfFail ?? 0) - (a.rpfFail ?? 0));
-  if (failing.length) out.push({ level: 'warn', kind: 'rpf', text: `${failing.length} route${failing.length === 1 ? '' : 's'} dropped packets that arrived on the wrong interface (RPF check failed), most on ${failing[0]!.source === '0.0.0.0' ? failing[0]!.group : failing[0]!.source + ', ' + failing[0]!.group} (${failing[0]!.rpfFail!.toLocaleString('en-US')}). The unicast route back to the source points out a different interface than the one the traffic uses.` });
-
-  const rpDown = [...new Set((mc.rpGroups ?? []).filter(g => !g.up).map(g => g.rp))];
-  if (rpDown.length) out.push({ level: 'warn', kind: 'rp-down', text: `The router marks ${rpDown.length === 1 ? 'rendezvous point ' + rpDown[0] : rpDown.length + ' rendezvous points (' + rpDown.slice(0, 3).join(', ') + ')'} as down. Sparse-mode groups that use ${rpDown.length === 1 ? 'it' : 'them'} cannot build their shared tree.` });
+  // packets that arrived on a different interface than the one the route accepts the group on (ipMRouteDifferentInIfPackets). The counter runs since the
+  // route was created, so only growth between two reads means it is happening now; a small total on an old route is usually a path change or an equal-cost path.
+  const growing = mc.routes.filter(r => (r.rpfNew ?? 0) > 0).sort((a, b) => (b.rpfNew ?? 0) - (a.rpfNew ?? 0));
+  const before = mc.routes.filter(r => (r.rpfFail ?? 0) > 0 && !(r.rpfNew ?? 0)).sort((a, b) => (b.rpfFail ?? 0) - (a.rpfFail ?? 0));
+  const nm = (r: Multicast['routes'][number]): string => (r.source === '0.0.0.0' ? r.group : r.source + ', ' + r.group);
+  const n = (v: number): string => v.toLocaleString('en-US');
+  if (growing.length) out.push({ level: 'warn', kind: 'rpf', text: `${growing.length} route${growing.length === 1 ? ' is' : 's are'} dropping packets that arrive on the wrong interface right now (RPF check), most on ${nm(growing[0]!)} (${n(growing[0]!.rpfNew!)} since the last read). Traffic is coming in on an interface other than the one the route accepts it on. This happens when two equal-cost paths both deliver the group, or when the unicast route to the source has changed.` });
+  else if (before.length) out.push({ level: 'info', kind: 'rpf', text: `${before.length} route${before.length === 1 ? ' has' : 's have'} dropped some packets that arrived on the wrong interface since ${before.length === 1 ? 'it was' : 'they were'} created, most on ${nm(before[0]!)} (${n(before[0]!.rpfFail!)}). None is growing between reads, so this is history, not a current problem.` });
 
   // sparse mode with no rendezvous point mapped at all
   if (mc.rpSet && !mc.rpSet.length && !(mc.rpGroups ?? []).length && !(mc.candidateRps ?? []).length && mc.pimInterfaces.some(p => p.mode === 'sparse') && !mc.routes.some(r => r.rp)) out.push({ level: 'info', kind: 'rp-unknown', text: 'PIM sparse mode is on, but this router lists no rendezvous point. That is normal when only source-specific multicast is used. Otherwise check the RP configuration.' });

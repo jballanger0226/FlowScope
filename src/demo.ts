@@ -540,7 +540,7 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
     const routes = [] as any[]; const receivers = [] as any[];
     for (let g = 0; g < 130; g++) {
       const gi = Math.floor(g / 5), group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`; const src = `10.9.0.${30 + (g % 9)}`;
-      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: g % 11 === 0 ? 9 : 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: g % 11 === 0 ? null : '10.255.0.1', rpf: { prefix: src.replace(/\.\d+$/, '.0'), mask: '255.255.255.0', proto: 13 }, rpfFail: g % 17 === 0 ? 120 * (g + 1) : 0,
+      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: g % 11 === 0 ? 9 : 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: g % 11 === 0 ? null : '10.255.0.1', rpf: { prefix: src.replace(/\.\d+$/, '.0'), mask: '255.255.255.0', proto: 13 }, rpfFail: g % 17 === 0 ? 120 * (g + 1) : 0, rpfNew: g % 34 === 0 ? 40 : 0,
         oifs: [{ ifIndex: e9, forwarding: g % 5 !== 0, pkts: 80_000 * (g + 1) }] });
       if (g % 3 === 0) receivers.push({ group, ifIndex: e9, lastReporter: `10.1.4.${20 + (g % 40)}`, expirySec: 200, self: false });
     }

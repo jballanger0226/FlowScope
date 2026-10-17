@@ -40,6 +40,8 @@ export interface McRoute {
   rpf?: { prefix: string; mask: string; proto: number | null } | null;
   /** Packets that arrived on an interface other than the RPF interface and were dropped (ipMRouteDifferentInIfPackets). A counter since the route was created. */
   rpfFail?: number | null;
+  /** How much that counter grew since the previous read: drops happening now, as opposed to ones since the route was created. Null on the first read or when the counter restarted. */
+  rpfNew?: number | null;
 }
 /** IGMP on one interface (IGMP-STD-MIB igmpInterfaceTable). The querier is the router that sends the membership queries on that segment. */
 export interface McIgmpIf { ifIndex: number; querier: string | null; version: number | null; queryIntervalSec: number | null; querierUpSec: number | null; querierExpirySec: number | null }
@@ -349,9 +351,13 @@ export function compareOut(e: GroupExpectation, flowIn: number | null, flowOut: 
 
 /** Fills in the bits per second of each interface from the previous read. A counter that went backwards, or an interval that is too long to mean anything, gives no figure. */
 export function withLoadRates(m: Multicast, prev: Multicast | null): Multicast {
-  if (!m.interfaces || !prev?.interfaces) return m;
+  if (!prev) return m;
   const dt = (m.readAt - prev.readAt) / 1000;
   if (dt <= 0 || dt > 3600) return m;
+  // growth of each route's wrong-interface counter since the previous read
+  const was = new Map(prev.routes.map(r => [r.group + '|' + r.source, r.rpfFail] as const));
+  for (const r of m.routes) { const b = was.get(r.group + '|' + r.source); r.rpfNew = r.rpfFail == null || b == null || r.rpfFail < b ? null : r.rpfFail - b; }
+  if (!m.interfaces || !prev.interfaces) return m;
   const old = new Map(prev.interfaces.map(i => [i.ifIndex, i]));
   const rate = (a: number | null, b: number | null | undefined) => (a === null || b === null || b === undefined || a < b ? null : Math.round(((a - b) * 8) / dt));
   for (const i of m.interfaces) { const o = old.get(i.ifIndex); if (o) { i.inBps = rate(i.inOctets, o.inOctets); i.outBps = rate(i.outOctets, o.outOctets); } }

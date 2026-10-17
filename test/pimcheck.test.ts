@@ -52,3 +52,19 @@ test('multicast lost on a link: the neighbour sends clearly more than this route
   assert.deepEqual(multicastLoss(me(0), [peerSending(100_000)]), [], 'a trickle is ignored');
   assert.deepEqual(multicastLoss(me(0), []), [], 'an unpolled neighbour is not guessed at');
 });
+
+test('wrong-interface drops are a warning only while the counter grows, history otherwise', async () => {
+  const { withLoadRates } = await import('../src/snmp/multicast.js');
+  const route = (fail: number) => ({ group: '239.1.1.1', source: '10.1.1.1', inIfIndex: 1, upstream: null, protocol: 8, pkts: null, bps: null, expirySec: null, flags: [], rp: null, oifs: [], rpfFail: fail });
+  const at = (t: number, fail: number) => ({ ...mc([{ ifIndex: 1, mode: 'sparse', dr: null }]), readAt: t, routes: [route(fail)] as never });
+  const same = withLoadRates(at(120_000, 4), at(0, 4));
+  assert.equal(same.routes[0]!.rpfNew, 0);
+  let x = pimIssues(same, nm, []).find(i => i.kind === 'rpf')!;
+  assert.equal(x.level, 'info'); assert.match(x.text, /history/);
+  const grew = withLoadRates(at(240_000, 9), at(120_000, 4));
+  assert.equal(grew.routes[0]!.rpfNew, 5);
+  x = pimIssues(grew, nm, []).find(i => i.kind === 'rpf')!;
+  assert.equal(x.level, 'warn'); assert.match(x.text, /right now/); assert.match(x.text, /5 since the last read/);
+  assert.equal(withLoadRates(at(240_000, 2), at(120_000, 4)).routes[0]!.rpfNew, null, 'a counter that went backwards was reset');
+  assert.equal(withLoadRates(at(120_000, 4), null).routes[0]!.rpfNew, undefined);
+});
