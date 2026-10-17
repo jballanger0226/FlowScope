@@ -14,6 +14,7 @@ import { readAuthSessions } from './authsessions.js';
 import { readPae } from './dot1x.js';
 import { readSgt } from './sgt.js';
 import { readAaa } from './aaa.js';
+import { readLisp } from './lisp.js';
 import { readAuthSetup } from './authsetup.js';
 import { readConfigState } from './confighist.js';
 import { readVrfs, contextOf } from './vrf.js';
@@ -129,7 +130,7 @@ const WIFI_HINT: Record<string, string> = {
   cisco: 'Cisco wireless controllers publish access points and clients in CISCO-LWAPP-AP-MIB (.1.3.6.1.4.1.9.9.513) and CISCO-LWAPP-DOT11-CLIENT-MIB (.1.3.6.1.4.1.9.9.599).'
 };
 const GROUP: Record<string, CheckGroup> = { interfaces: 'basics', counters: 'basics', resources: 'basics', lldp: 'neighbours', cdp: 'neighbours', mac: 'hosts', arp: 'hosts', vlans: 'hosts',
-  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', auth: 'hosts', sgt: 'hosts', aaa: 'hosts', authsetup: 'hosts', config: 'hardware', dot1x: 'hosts', vrf: 'routing', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
+  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', auth: 'hosts', sgt: 'hosts', aaa: 'hosts', lisp: 'routing', authsetup: 'hosts', config: 'hardware', dot1x: 'hosts', vrf: 'routing', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
 const GROUP_ORDER: CheckGroup[] = ['basics', 'neighbours', 'hosts', 'hardware', 'routing', 'quality', 'wifi'];
 
 async function attempt<T>(fn: () => Promise<T>, empty: T): Promise<{ v: T; error: string | null }> {
@@ -258,7 +259,7 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
 
   // Cisco-only tables, read with the readers the poller uses. Each is "not applicable" when empty: a table appears only when the feature is in use.
   if (ex.cAny) {
-    const [fib, eigrp, bfd, dhcp, auth, sgt, vrfs, stack, dai, procs, nbar, aaa, setup, cfg] = await Promise.all([
+    const [fib, eigrp, bfd, dhcp, auth, sgt, vrfs, stack, dai, procs, nbar, aaa, setup, cfg, lisp] = await Promise.all([
       ex.cRouting ? attempt(() => readFib(cl), null) : none(null as Awaited<ReturnType<typeof readFib>>),
       ex.cRouting ? attempt(() => readEigrp(cl), []) : none([] as Awaited<ReturnType<typeof readEigrp>>),
       ex.cRouting ? attempt(() => readBfd(cl), []) : none([] as Awaited<ReturnType<typeof readBfd>>),
@@ -272,13 +273,19 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
       attempt(() => readNbar(cl), null),
       ex.cSwitch ? attempt(() => readAaa(cl, null), null) : none(null as Awaited<ReturnType<typeof readAaa>>),
       ex.cSwitch ? attempt(() => readAuthSetup(cl), []) : none([] as Awaited<ReturnType<typeof readAuthSetup>>),
-      attempt(() => readConfigState(cl), null)
+      attempt(() => readConfigState(cl), null),
+      ex.cRouting || ex.cSwitch ? attempt(() => readLisp(cl, null), null) : none(null as Awaited<ReturnType<typeof readLisp>>)
     ]);
     const view = 'Check the SNMP view of this credential includes it.';
     const row = (id: string, title: string, count: number, okText: string, naText: string, error: string | null, hint: string): void => {
       out.push(count ? { id, title, group: GROUP[id], state: 'ok', count, detail: okText } : { id, title, group: GROUP[id], state: 'na', count: 0, detail: error ?? naText, hint: error ? `${hint} ${view}` : undefined });
     };
     row('config', 'Configuration changes', cfg.v ? 1 : 0, `The running configuration was last changed ${cfg.v?.changedAt ? new Date(cfg.v.changedAt).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : 'before the device started'} and is ${cfg.v?.unsaved ? 'not saved to startup' : 'saved'}.`, 'No configuration change history (CISCO-CONFIG-MAN-MIB).', cfg.error, 'CISCO-CONFIG-MAN-MIB is .1.3.6.1.4.1.9.9.43.');
+    if (ex.cRouting || ex.cSwitch) {
+      const lv = lisp.v;
+      row('lisp', 'LISP fabric (SD-Access)', lv?.cacheTotal ?? 0, `${plural(lv?.instances.filter(i => i.cacheSize > 0 || lv.registered.some(r => r.iid === i.iid)).length ?? 0, 'instance')} in use: ${plural(lv?.cacheTotal ?? 0, 'map cache entry', 'map cache entries')} (${lv?.cache.filter(e => e.active).length ?? 0} in use), ${plural(lv?.registered.length ?? 0, 'registered address', 'registered addresses')}, ${lv?.mapServers.total ?? 0} map servers and ${lv?.mapResolvers.total ?? 0} map resolvers${lv?.problems.length ? '. ' + lv.problems[0] : ''}. Shown on the Network tab: endpoints in use, the registration check and cache churn. The cache's own traffic counters are not used (a Catalyst forwards in hardware and leaves them at zero).`,
+        'No LISP data (LISP-MIB). Normal when the device is not part of an SD-Access fabric.', lisp.error, 'LISP-MIB is .1.3.6.1.2.1.220.');
+    }
     if (ex.cRouting) {
       row('fib', 'Forwarding table (CEF)', fib.v?.entries.length ?? 0, `${plural(fib.v?.entries.length ?? 0, 'prefix', 'prefixes')} with their outgoing interfaces${fib.v?.truncated ? ' (cut off at the most that FlowScope keeps)' : ''}. ${(() => { const n = fib.v?.entries.filter(e => e.paths.filter(p => p.kind !== 'receive').length > 1).length ?? 0; return n ? ` ${plural(n, 'prefix', 'prefixes')} have equal-cost paths, which the multicast page uses to read RPF drops.` : ''; })()} Used to check that a flow left the interface the routing table says it should.`,
         'No forwarding table (CISCO-CEF-MIB). It needs CEF, which is on by default on routers and Layer 3 switches.', fib.error, 'CISCO-CEF-MIB is .1.3.6.1.4.1.9.9.492.');

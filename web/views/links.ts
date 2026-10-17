@@ -7,6 +7,7 @@ import { post } from '../api.js';
 import { correlate, verdict } from './correlate.js';
 import { attentionPanel, cards, cardsRow, issues, type Target } from './links_overview.js';
 import { hardwarePanel, hasHardware, hasOptics, linkQuality, nbarPanel, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
+import { lispPanel, type LispView } from './lisp.js';
 import { publicAddresses } from './ip_scope.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
@@ -123,12 +124,19 @@ function select_(d: number, i: number, tab?: DevTab): void {
   if (d !== prevDev) { devTab = 'overview'; graphZoom = null; resZoom = null; quality = null; }
   if (tab) devTab = tab;
   devId = d; ifIndex = i; series = null; quality = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
-  if (d !== prevDev) { arpRes = null; arpQ = ''; void loadArp(); vrfRes = null; void loadVrfs(); nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); ifCpu = null; void loadResHist(); healthRes = null; void loadHealth(); }
+  if (d !== prevDev) { arpRes = null; arpQ = ''; void loadArp(); vrfRes = null; void loadVrfs(); nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); ifCpu = null; void loadResHist(); healthRes = null; lispRes = null; void loadHealth(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
 }
 
+let lispRes: LispView | null = null; let lseq2 = 0;
+async function loadLisp(): Promise<void> {
+  if (!devId) return;
+  const my = ++lseq2, d = devId;
+  try { const r = await get<{ lisp: LispView | null }>('/api/links/lisp' + qs({ dev: d })); if (my === lseq2 && d === devId) lispRes = r.lisp; } catch { if (my === lseq2) lispRes = null; }
+  if (my === lseq2) redraw();
+}
 let healthRes: HealthRes | null = null; let healthLoading = false;
 let hlseq = 0;
 async function loadHealth(quiet = false): Promise<void> {
@@ -136,7 +144,7 @@ async function loadHealth(quiet = false): Promise<void> {
   const my = ++hlseq, d = devId; if (!quiet) healthLoading = true;
   try {
     const r = await get<HealthRes>('/api/links/health' + qs({ dev: d }));
-    if (my === hlseq && d === devId) healthRes = r;
+    if (my === hlseq && d === devId) { healthRes = r; if (r.extras?.lisp) void loadLisp(); else lispRes = null; }
   } catch { if (my === hlseq && !quiet) healthRes = null; }
   if (my === hlseq) { healthLoading = false; redraw(); }
 }
@@ -949,7 +957,7 @@ function tabBody(dev: Dev, tab: DevTab): VNode {
   const body = tab === 'overview' ? overviewPanel(dev)
     : tab === 'interfaces' ? ifTable(dev)
     : tab === 'hardware' ? hardwareTab(dev)
-    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes, ifName: i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? '' }), vrfPanel(dev), arpPanel(dev), neighborsPanel(dev))
+    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes, ifName: i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? '' }), lispPanel(lispRes, i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? ''), vrfPanel(dev), arpPanel(dev), neighborsPanel(dev))
     : wlanPanel(dev);
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:14px' }, body);
 }

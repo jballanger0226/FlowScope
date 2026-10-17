@@ -245,6 +245,24 @@ export class HostTracker {
     });
   }
 
+  /** Hosts on the ports of one device with an IPv4 address (from its ARP table and authentication sessions): what the LISP registration check compares the mapping database with. */
+  fabricHosts(devId: number): { ip: string; vrf: string; mac: string; ifIndex: number; lastSeen: number; auth: boolean; user: string }[] {
+    const since = this.activeSince();
+    return this.db.prepare(`SELECT a.ip AS ip, a.vrf AS vrf, a.mac AS mac, f.if_index AS ifIndex, MAX(f.last_seen) AS lastSeen,
+        COALESCE((SELECT 1 FROM auth_sessions s WHERE s.dev_id = a.dev_id AND s.mac = a.mac AND s.status = 'authorized' LIMIT 1), 0) AS auth,
+        COALESCE((SELECT s.policy FROM auth_sessions s WHERE s.dev_id = a.dev_id AND s.mac = a.mac AND s.status = 'authorized' ORDER BY s.last_seen DESC LIMIT 1), '') AS user
+      FROM arp a JOIN fdb f ON f.dev_id = a.dev_id AND f.mac = a.mac WHERE a.dev_id = ? AND f.last_seen >= ? AND a.ip LIKE '%.%' AND a.ip NOT LIKE '%:%'
+      GROUP BY a.ip, a.vrf, a.mac`).all(devId, since).map(r => { const x = r as unknown as { ip: string; vrf: string; mac: string; ifIndex: number; lastSeen: number; auth: number; user: string }; return { ...x, auth: !!x.auth }; });
+  }
+
+  /** What is known about the host behind an IP address anywhere: its MAC address, the user it authenticated as, and its security group tag. */
+  whoIs(ip: string): { mac: string; user: string; sgt: { value: number; name: string } | null } | null {
+    const mac = (this.db.prepare('SELECT mac FROM arp WHERE ip = ? ORDER BY last_seen DESC LIMIT 1').get(ip) as { mac: string } | undefined)?.mac ?? '';
+    const user = mac ? (this.db.prepare("SELECT policy AS u FROM auth_sessions WHERE mac = ? AND status = 'authorized' ORDER BY last_seen DESC LIMIT 1").get(mac) as { u: string } | undefined)?.u ?? '' : '';
+    const sgt = (this.db.prepare("SELECT g.sgt AS value, COALESCE(n.name, '') AS name FROM ip_sgt g LEFT JOIN sgt_names n ON n.dev_id = g.dev_id AND n.sgt = g.sgt WHERE g.ip = ? AND g.source != 'internal' ORDER BY g.last_seen DESC LIMIT 1").get(ip) as { value: number; name: string } | undefined) ?? null;
+    return mac || sgt ? { mac, user, sgt } : null;
+  }
+
   /** MAC addresses for an IP address, newest first, from the ARP tables of every polled router or Layer 3 switch. */
   macsForIp(ip: string): string[] {
     const rows = this.db.prepare('SELECT mac, MAX(last_seen) AS t FROM arp WHERE ip = ? GROUP BY mac ORDER BY t DESC LIMIT 3').all(ip) as unknown as { mac: string }[];

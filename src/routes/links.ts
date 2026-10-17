@@ -14,6 +14,9 @@ import { linkWarnings } from '../snmp/health.js';
 import { modelText, type Entity } from '../snmp/entity.js';
 import { authMethods, type AuthPort } from '../snmp/authsetup.js';
 import type { Aaa } from '../snmp/aaa.js';
+import type { Lisp } from '../snmp/lisp.js';
+import { byRloc, conversations, registrationCheck } from '../analysis/lispcheck.js';
+import { chooseTier } from './reports.js';
 import type { ConfigState } from '../snmp/confighist.js';
 import { daiReason, type Dai, type Nbar, type Processes, type Stack } from '../snmp/cisco_extra.js';
 
@@ -102,6 +105,15 @@ export async function linkDevices(app: App, minutes: number) {
   return { devices, thresholds: al };
 }
 
+/** What the health page keeps of the LISP read: the headline numbers and the problems. The tables are fetched when the fabric panel is opened. */
+export function lispSummary(l: Lisp | null) {
+  if (!l) return null;
+  const used = l.instances.filter(i => i.cacheSize > 0 || l.registered.some(r => r.iid === i.iid));
+  return { readAt: l.readAt, level: l.level, problems: l.problems, instances: used.length, cache: l.cacheTotal, active: l.cache.filter(e => e.active).length, registered: l.registered.length, servers: l.mapServers, resolvers: l.mapResolvers };
+}
+
+const ip32 = (s: string): number => s.split('.').reduce((t, o) => t * 256 + Number(o), 0);
+
 /** Sensors, PoE, spanning tree, routing neighbours and the link quality of each interface of one device, as last read. */
 export function linkHealth(app: App, dev: number) {
   const ifs = new Map(app.devices.interfaces(dev).map(i => [i.ifIndex, i]));
@@ -111,7 +123,7 @@ export function linkHealth(app: App, dev: number) {
   });
   const dai = app.devices.data<Dai>(dev, 'dai');
   const extras = {
-    procs: app.devices.data<Processes>(dev, 'procs'), stack: app.devices.data<Stack>(dev, 'stack'), nbar: app.devices.data<Nbar>(dev, 'nbar'), aaa: app.devices.data<Aaa>(dev, 'aaa'), config: app.devices.data<ConfigState>(dev, 'config'),
+    procs: app.devices.data<Processes>(dev, 'procs'), stack: app.devices.data<Stack>(dev, 'stack'), nbar: app.devices.data<Nbar>(dev, 'nbar'), aaa: app.devices.data<Aaa>(dev, 'aaa'), lisp: lispSummary(app.devices.data<Lisp>(dev, 'lisp')), config: app.devices.data<ConfigState>(dev, 'config'),
     dai: dai ? { ...dai, vlans: dai.vlans.map(v => ({ ...v, why: daiReason(v) })) } : null
   };
   return { health: app.devices.health(dev), ifExtra: extra, extras };
@@ -133,6 +145,33 @@ export function registerLinks(app: App): void {
     const dev = int(c.query.get('dev'), 0, 0, 1e9);
     if (!app.devices.row(dev)) throw new HttpError(404, 'No such device');
     c.json(linkHealth(app, dev));
+  });
+
+  // The LISP fabric view of one node: endpoints it sends to (with the NetFlow volume towards each), the registration check, and how the map cache has moved
+  w.get('/api/links/lisp', 'ro', async c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9);
+    const row = app.devices.row(dev);
+    if (!row) throw new HttpError(404, 'No such device');
+    const l = app.devices.data<Lisp>(dev, 'lisp');
+    if (!l) { c.json({ lisp: null }); return; }
+    const names = new Map<string, string>();
+    for (const d of app.devices.list()) { names.set(d.ip, d.name); for (const a of d.addresses) names.set(a.split('/')[0]!, d.name); }
+    const rlocName = (r: string): string => names.get(r) ?? '';
+    const own = new Set(app.devices.interfaces(dev).flatMap(i => i.addresses.map(a => a.split('/')[0]!)));
+    // volumes towards the endpoints in use, from the flows this node exported in the last hour
+    const act = l.cache.filter(e => e.active && e.kind === 'ip' && e.prefix === 32).slice(0, 500);
+    let traffic: Map<string, { bytes: number; flows: number }> | null = null;
+    if (act.length) {
+      try {
+        const now = Date.now(), range = { from: now - 3600_000, to: now };
+        const rep = await app.store.report({ range, tier: chooseTier(app, range, undefined), dims: ['dstIp'], prefix: 32, bidir: false, sortBy: 'bytes', topN: 2000,
+          conds: [{ kind: 'dst', m: act.map(e => ({ lo: ip32(e.eid), hi: ip32(e.eid) })) }, { kind: 'exporter', ips: [row.ip, ...own] }] });
+        traffic = new Map(rep.rows.map(r => [String(r.dims.dstIp), { bytes: r.bytes, flows: r.flows }]));
+      } catch { traffic = null; }
+    }
+    c.json({ lisp: { readAt: l.readAt, level: l.level, problems: l.problems, instances: l.instances.filter(i => i.cacheSize > 0 || l.registered.some(r => r.iid === i.iid) || i.requestsOut > 0 && i.iid < 8000), history: l.history, cacheTotal: l.cacheTotal, truncated: l.truncated, mapServers: l.mapServers, mapResolvers: l.mapResolvers,
+      registration: (() => { const r = registrationCheck(l, app.hosts.fabricHosts(dev), own); return { ...r, missing: r.missing.slice(0, 200), stale: r.stale.slice(0, 200), missingTotal: r.missing.length, staleTotal: r.stale.length }; })(),
+      conversations: conversations(l, ip => app.hosts.whoIs(ip), rlocName, traffic), fabricNodes: byRloc(l, rlocName), flowsKnown: traffic !== null } });
   });
 
   // Hosts learned on one port (from the switch's MAC address table, with IP addresses from ARP) and what LLDP/CDP says is at the other end

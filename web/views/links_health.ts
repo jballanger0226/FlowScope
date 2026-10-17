@@ -30,7 +30,7 @@ export interface Aaa { readAt: number; dtSec: number; servers: AaaServer[] }
 export interface ConfigEvent { at: number; what: string; user: string; via: string }
 export interface ConfigState { readAt: number; changedAt: number | null; savedAt: number | null; unsaved: boolean; unsavedSec: number; events: ConfigEvent[] }
 /** Cisco-only reads, each null when the device does not publish the table */
-export interface Extras { procs: Processes | null; stack: Stack | null; dai: Dai | null; nbar: Nbar | null; aaa?: Aaa | null; config?: ConfigState | null }
+export interface Extras { procs: Processes | null; stack: Stack | null; dai: Dai | null; nbar: Nbar | null; aaa?: Aaa | null; config?: ConfigState | null; lisp?: { readAt: number; level: 'ok' | 'warn' | 'bad'; problems: string[]; instances: number; cache: number; active: number; registered: number } | null }
 /** A configuration that has differed from the saved one for this long is worth a mention; a change a minute ago is just a change being made. */
 const UNSAVED_WARN_MS = 3600_000;
 export const unsavedFor = (c: ConfigState | null | undefined, now = Date.now()): number => (c?.unsaved && c.changedAt ? now - c.changedAt : 0);
@@ -96,6 +96,7 @@ export function extrasAttention(ex: Extras | undefined): { level: Level; text: s
   if ((ex.procs?.snmpOne ?? 0) >= 10) out.push({ level: 'warn', text: `SNMP engine using ${ex.procs!.snmpOne}% of the CPU` });
   for (const a of ex.aaa?.servers ?? []) if (a.level !== 'ok') out.push({ level: a.level, text: `${a.kind === 'tacacs' ? 'TACACS+' : 'RADIUS'} ${a.address}: ${a.up ? 'slow or dropping requests' : 'dead'}` });
   if (unsavedFor(ex.config) >= UNSAVED_WARN_MS) out.push({ level: 'warn', text: 'Configuration not saved' });
+  if (ex.lisp && ex.lisp.level !== 'ok') out.push({ level: ex.lisp.level, text: ex.lisp.problems.length === 1 ? 'LISP fabric problem' : `${ex.lisp.problems.length} LISP fabric problems` });
   return out;
 }
 
