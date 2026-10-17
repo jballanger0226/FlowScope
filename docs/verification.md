@@ -64,3 +64,6 @@ A route's wrong-interface drops only raise a warning when at least 10 packets we
 
 ### SNMP diagnostics page
 The Multicast routing check now counts IGMP queriers, rendezvous points and routes with RPF, and warns when the IGMP interface table (no queriers) or RPF interfaces are missing. The Forwarding table check states how many prefixes have equal-cost paths. A new Hardware model check reads ENTITY-MIB (Cisco devices). Check: run diagnostics on a Catalyst and see the model, "N IGMP queriers", "N rendezvous points" and "RPF for N routes".
+
+### Multicast load by interface
+Rate in and out are the routes' own rates added up for each interface (routes arriving on it, and routes with it as a forwarding outgoing interface), because on a Catalyst the interface's multicast byte counter can sit far below the real traffic (hardware-switched streams, as `show ip mroute count` shows 8,000 pps per source). The interface counter is the fallback, and is in the tooltip. Bytes are always the interface counter. Check: compare Rate in for a VLAN with the sum of `kbits per second` in `show ip mroute count` for routes arriving on it.

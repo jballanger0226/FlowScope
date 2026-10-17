@@ -415,8 +415,19 @@ function rpTable(rps: NonNullable<Detail['rps']>): VNode {
 
 /** Multicast bytes through each interface: replication multiplies it, so an interface can carry far more multicast out than came in. */
 function loadTable(list: NonNullable<Detail['load']>, routes: Route[], truncated: boolean): VNode {
-  const shown = list.slice(0, 20);
   const mono = 'font-size:12px';
+  /** The rate of every route arriving on / sent out of an interface, added up. The router measures each route itself, which is closer to the truth than the interface counter on a Catalyst. */
+  const sums = new Map<string, { inB: number; outB: number; any: boolean }>();
+  for (const r of routes) {
+    if (r.bps === null) continue;
+    if (r.inIf) { const e = sums.get(r.inIf) ?? { inB: 0, outB: 0, any: true }; e.inB += r.bps; sums.set(r.inIf, e); }
+    for (const o of r.out) if (o.forwarding) { const e = sums.get(o.name) ?? { inB: 0, outB: 0, any: true }; e.outB += r.bps; sums.set(o.name, e); }
+  }
+  const view = list.map(x => ({ ...x, sum: sums.get(x.name) ?? null })).sort((a, b) => ((b.sum?.inB ?? b.inBps ?? 0) + (b.sum?.outB ?? b.outBps ?? 0)) - ((a.sum?.inB ?? a.inBps ?? 0) + (a.sum?.outB ?? a.outBps ?? 0)));
+  const shown = view.slice(0, 20);
+  const rateCell = (fromRoutes: number | undefined, counter: number | null, what: string): VNode => fromRoutes !== undefined
+    ? h('span', { class: 'mono', style: mono, title: `Added up from the rate of each route ${what}. The interface's own counter gave ${counter === null ? 'no figure' : bps(counter)} over the last read.` }, bps(fromRoutes))
+    : h('span', { class: 'mono', style: mono, title: 'From the interface counter, since no route here reports a rate' }, counter === null ? '—' : bps(counter));
   /** The groups this interface carries: arriving on it (it is the route's incoming interface) or sent out of it (forwarding outgoing interface). */
   const groupsOn = (name: string): { r: Route; dir: 'in' | 'out' }[] => {
     const out: { r: Route; dir: 'in' | 'out' }[] = [];
@@ -443,13 +454,13 @@ function loadTable(list: NonNullable<Detail['load']>, routes: Route[], truncated
       gs.length > cap ? h('div', { class: 'dim', style: 'font-size:12px;padding-top:4px' }, `${num(gs.length - cap)} more groups not shown; use the search above to find one`) : null);
   };
   return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Multicast load by interface'),
-    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'rate since the previous read, and the total since the counters started; open an interface to see its groups')),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'rate is the routes\' own rates added up (interface counter when no route reports one); bytes are the interface counter since it started; open an interface to see its groups')),
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(140px,1fr) 110px 110px 130px 130px 90px;--w:700px' },
       h('div', { class: 'tr head' }, ...['Interface', 'Rate in', 'Rate out', 'Bytes in', 'Bytes out', 'Limit'].map(t => h('span', null, t))),
       shown.map(x => { const on = openLoad.has(x.name), n = new Set(groupsOn(x.name).map(g => g.r.group)).size; return h('div', { key: x.name },
         h('div', { class: 'tr', role: 'button', tabindex: 0, 'aria-expanded': on, style: 'cursor:pointer', onclick: () => toggleSet(openLoad, x.name), onkeydown: keyDown(() => toggleSet(openLoad, x.name)) },
           h('span', { class: 'mono', style: mono }, h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾ ' : '▸ '), x.name, h('span', { class: 'dim' }, `  ${num(n)} ${n === 1 ? 'group' : 'groups'}`)),
-          h('span', { class: 'mono', style: mono }, x.inBps === null ? '—' : bps(x.inBps)), h('span', { class: 'mono', style: mono }, x.outBps === null ? '—' : bps(x.outBps)),
+          rateCell(x.sum?.inB, x.inBps, 'arriving on it'), rateCell(x.sum?.outB, x.outBps, 'sent out of it'),
           h('span', { class: 'mono', style: mono }, x.inOctets === null ? '—' : num(x.inOctets)), h('span', { class: 'mono', style: mono }, x.outOctets === null ? '—' : num(x.outOctets)),
           h('span', { class: 'dim', style: mono }, x.rateLimit ? `${num(x.rateLimit)} kbps` : x.ttl ? `TTL ${x.ttl}` : 'none')),
         on ? sub(x.name) : null); }))),
