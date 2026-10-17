@@ -1,6 +1,7 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
 import { go, redraw } from '../state.js';
+import { lineChart } from '../components.js';
 import { btn, chip, empty, heading, note, select, spinner, stat, status as statusEl, textInput, toggle } from '../components.js';
 import { ago, bps, num, stamp } from '../util.js';
 
@@ -19,7 +20,7 @@ const VIA_WHY = { snmp: "From the router's IGMP cache over SNMP: the last host t
 const viaChip = (v: Member['via']): VNode => chip(VIA_TEXT[v ?? 'snmp'], v === 'both' ? 'ok' : 'default', VIA_WHY[v ?? 'snmp']);
 interface Out { ifIndex: number; name: string; pimMode?: string | null; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
 interface RpfPeer { id: number; name: string; ifIndex: number; ifName: string; forwarding: boolean | null }
-interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null; failuresNew?: number | null }
+interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null; failuresNew?: number | null; failuresShare?: number | null; failuresMajor?: boolean }
 interface IgmpIf { name: string; querier: string | null; who: string | null; self: boolean; version: number | null; intervalSec: number | null; upSec: number | null; expirySec: number | null; hosts: number }
 interface RpMap { range: string; rp: string; who: string | null; self: boolean; holdSec: number | null; expirySec: number | null }
 interface Route {
@@ -29,6 +30,7 @@ interface Route {
 interface Detail {
   igmpHint?: IgmpHint;
   device: { id: number; name: string; ip: string; role: string; model?: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
+  rpfHistory?: { ts: number; perMin: number; routes: number }[];
   routeSource?: 'ipmroute' | 'pim';
   netflowIgmp?: { reports: number; hosts: number; v3Hosts: number; windowMin: number; unmatched: number } | null;
   igmp?: IgmpIf[];
@@ -221,7 +223,7 @@ const sourceCell = (r: Route): VNode => h('span', { class: 'mono', style: 'font-
 function rpfProblems(x: Rpf | null | undefined): { key: string; text: string; title: string }[] {
   if (!x) return [];
   const out: { key: string; text: string; title: string }[] = [];
-  if (x.failuresNew) out.push({ key: 'drops', text: `${num(x.failuresNew)} RPF drops now`, title: 'Packets for this route arrived on an interface other than the one it accepts the group on, and were dropped, since the previous read. This happens when two equal-cost paths both deliver the group, or when the unicast route to the source changed.' });
+  if (x.failuresNew && x.failuresMajor) out.push({ key: 'drops', text: `${num(x.failuresNew)} RPF drops now`, title: `Packets for this route arrived on an interface other than the one it accepts the group on, and were dropped, since the previous read${x.failuresShare != null ? ` (${x.failuresShare}% of its packets)` : ''}. A large share points to a changed route or two paths both sending the group.` });
   if (x.peer && x.peer.forwarding === false) out.push({ key: 'nofwd', text: 'neighbour not forwarding', title: `${x.peer.name} does not list ${x.peer.ifName} as an outgoing interface for this group that is forwarding, so nothing is sent to this router` });
   if (x.loss) out.push({ key: 'loss', text: 'multicast lost on link', title: 'The neighbour sends more multicast out of its end of this link than this router receives' });
   return out;
@@ -240,7 +242,7 @@ function rpfLine(x: Rpf, group: string): VNode | null {
       linkBtn(`${x.peer.ifName} on ${x.peer.name}`, `Open ${x.peer.ifName} on ${x.peer.name} in Interfaces`, () => go('links', { dev: x.peer!.id, if: x.peer!.ifName }))
     ] : null,
     x.route ? h('span', { title: 'Reverse path forwarding: the unicast route back to the source (or to the rendezvous point for a shared tree) decides which interface the router accepts this group on. Traffic on any other interface is dropped.' }, 'via route ', h('b', { class: 'mono' }, x.route), x.proto ? ` (${x.proto})` : '') : null,
-    x.failures && !x.failuresNew ? h('span', { class: 'dim', title: 'A counter kept by the router since this route was created. It is not growing, so it is history.' }, `${num(x.failures)} packets dropped on the wrong interface since the route was created`) : null,
+    x.failures && !(x.failuresNew && x.failuresMajor) ? h('span', { class: 'dim', title: 'A counter kept by the router since this route was created. A small amount is typical when two equal-cost paths lead to the source and multicast multipath is on.' }, `${num(x.failures)} packets dropped on the wrong interface since the route was created${x.failuresNew ? `; ${num(x.failuresNew)} in the last read${x.failuresShare != null ? ` (${x.failuresShare}% of its packets)` : ''}, minor` : ''}`) : null,
     ...rpfFlags(x));
 }
 /** One line per distinct RPF interface and neighbour in a group. */
@@ -256,8 +258,9 @@ function flagsOf(list: Route[]): (VNode | string)[] {
   const by = new Map<string, { p: { key: string; text: string; title: string }; n: number }>();
   for (const r of list) for (const p of rpfProblems(r.rpf)) { const e = by.get(p.key); if (e) e.n++; else by.set(p.key, { p, n: 1 }); }
   if (!by.size) return [];
-  const all = [...by.values()], what = all.map(e => e.p.key === 'drops' ? 'RPF drops' : e.p.text).join(', ');
-  return [' ', chip(all.length === 1 ? what : `${all.length} RPF problems`, 'warn', `${what}${list.length > 1 ? ` (open the group for which sources)` : ''}`)];
+  const short: Record<string, string> = { drops: 'RPF drops', nofwd: 'not forwarding', loss: 'link loss' };
+  const all = [...by.values()], what = all.map(e => e.p.text).join(', ');
+  return [' ', chip(all.length === 1 ? short[all[0]!.p.key] ?? all[0]!.p.text : `${all.length} issues`, 'warn', `${what}${list.length > 1 ? ' (open the group for which sources)' : ''}`)];
 }
 
 function groupRows(g: Grp): VNode {
@@ -340,6 +343,7 @@ export function render(): VNode {
       loading && !detail ? spinner('Loading routes…') : null,
       detailError ? note(detailError, 'warn', true) : null,
       detail ? table(detail) : null,
+      detail ? rpfSection(detail) : null,
       detail?.load?.length ? loadTable(detail.load) : null,
       detail?.igmp?.length ? igmpTable(detail.igmp) : null,
       detail?.rps && (detail.rps.map.length || detail.rps.candidate.length || detail.rps.inUse?.length) ? rpTable(detail.rps) : null,
@@ -353,6 +357,26 @@ function netflowNote(n: NonNullable<Detail['netflowIgmp']> | null): VNode {
   return h('div', { class: 'dim', style: 'font-size:12.5px' }, `NetFlow: ${num(n.reports)} IGMP report${n.reports === 1 ? '' : 's'} from ${num(n.hosts)} host${n.hosts === 1 ? '' : 's'} in the last ${n.windowMin} minutes name a group (IGMP version 1 or 2). `,
     n.v3Hosts ? `${num(n.v3Hosts)} host${n.v3Hosts === 1 ? '' : 's'} also sent version 3 reports, which NetFlow cannot attribute to a group. ` : '',
     n.unmatched ? `${num(n.unmatched)} report${n.unmatched === 1 ? ' was' : 's were'} for a group or interface this router does not forward to and is left out.` : '');
+}
+
+/** Wrong-interface (RPF) drops: the routes dropping now, and how many drops per minute there were over the last day. Shown only when there is something to show. */
+function rpfSection(d: Detail): VNode | null {
+  const now = d.routes.filter(r => (r.rpf?.failuresNew ?? 0) > 0).sort((a, b) => (b.rpf!.failuresNew ?? 0) - (a.rpf!.failuresNew ?? 0));
+  const hist = d.rpfHistory ?? [];
+  if (!now.length && !hist.some(p => p.perMin > 0)) return null;
+  const to = Date.now(), from = to - 86_400_000, peak = Math.max(...hist.map(p => p.perMin), 1);
+  const fmtT = (t: number): string => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return h('div', { class: 'col', style: 'gap:8px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Wrong-interface drops (RPF)'),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'packets that arrived on an interface other than the one the route accepts its group on; counted by the router per route, read about every two minutes')),
+    hist.length > 1 ? lineChart({ title: 'Packets dropped per minute, last 24 hours', unit: v => (v >= 1000 ? (v / 1000).toFixed(1) + 'k' : String(Math.round(v))), fmtV: v => `${(Math.round(v * 10) / 10).toLocaleString('en-US')} per minute`, from, to, fmtT, wide: true, h: 160, yMax: peak * 1.15,
+      series: [{ name: 'Dropped', color: 'var(--s3)', points: hist.map(p => ({ t: p.ts, v: p.perMin })) }], aria: 'Packets dropped by the RPF check per minute over the last 24 hours' }) : null,
+    now.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) minmax(100px,0.8fr) 110px 120px 140px;--w:760px' },
+      h('div', { class: 'tr head' }, ...['Group', 'Source', 'Arrives on', 'Since last read', 'Share of packets', 'Since route created'].map(t => h('span', null, t))),
+      now.slice(0, 15).map(r => h('div', { key: keyOf(r), class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, linkBtn(r.group, `Show ${r.group} in the table`, () => { query = r.group; page = 0; redraw(); window.scrollTo({ top: 0 }); })),
+        h('span', { class: 'mono', style: 'font-size:12px' }, r.sharedTree ? '* (any source)' : r.source), h('span', { class: 'mono', style: 'font-size:12px' }, r.inIf ?? '—'),
+        h('span', { class: 'mono', style: 'font-size:12px' }, num(r.rpf!.failuresNew)), h('span', { class: 'mono', style: 'font-size:12px' }, r.rpf!.failuresShare != null ? h('span', null, `${r.rpf!.failuresShare}% `, r.rpf!.failuresMajor ? chip('high', 'warn', 'A large share of what the route carried: drops this size point to a changed route or two paths both sending the group') : h('span', { class: 'dim', title: 'A small share, typical of equal-cost paths with multicast multipath' }, 'minor')) : '—'), h('span', { class: 'mono dim', style: 'font-size:12px' }, num(r.rpf!.failures)))))) : h('span', { class: 'dim', style: 'font-size:12.5px' }, 'No route is dropping at the moment.'),
+    now.length > 15 ? h('span', { class: 'dim', style: 'font-size:12px' }, `${num(now.length - 15)} more routes are dropping.`) : null);
 }
 
 /** The IGMP querier on each interface: the router that sends the membership queries, which keeps memberships alive. */

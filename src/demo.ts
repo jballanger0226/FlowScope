@@ -535,6 +535,11 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
     app.devices.saveMulticast(id, { readAt: now, source: 'standard', routes: leafRoutes, receivers: [], pimInterfaces: [{ ifIndex: up, mode: 'dense', dr: '10.255.1.7' }], neighbors: [{ address: '10.255.1.1', ifIndex: up }], interfaces: [{ ifIndex: up, inOctets: null, outOctets: null, inBps: 800_000_000, outBps: 30_000_000_000, ttl: null, rateLimit: null }], truncated: false });
   }
   if (d.name === 'dc-spine-01') {
+    // a day of wrong-interface drops: quiet, a burst in the early morning, then a smaller one that is still going
+    if (!app.devices.rpfHistory(id, now - 86_400_000).length) {
+      for (let t = now - 86_400_000; t < now - 120_000; t += 120_000) { const h = (now - t) / 3_600_000; app.devices.noteRpf(id, t, 120, h > 15 && h < 17 ? 900 + Math.round(Math.sin(t / 7e5) * 300) : h < 2 ? 160 : 0, h > 15 && h < 17 ? 9 : h < 2 ? 4 : 0); }
+    }
+    app.devices.noteRpf(id, now, 60, 160, 4);
     // multicast state: video and market-data groups from a handful of encoders, receivers on both downlinks
     const e7 = ifIdx('Eth1/7') ?? 0, e9 = ifIdx('Eth1/9') ?? 0;
     const routes = [] as any[]; const receivers = [] as any[];

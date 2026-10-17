@@ -42,6 +42,19 @@ export interface McRoute {
   rpfFail?: number | null;
   /** How much that counter grew since the previous read: drops happening now, as opposed to ones since the route was created. Null on the first read or when the counter restarted. */
   rpfNew?: number | null;
+  /** Packets the route forwarded since the previous read, to put the drops in proportion */
+  pktsNew?: number | null;
+}
+
+/**
+ * Whether a route's wrong-interface drops matter. With equal-cost paths and multicast multipath a router accepts a group on one path, and a few
+ * copies that arrive on the other are counted without being a fault. A real problem drops a large share of the stream, or all of it, so the drops
+ * have to be at least 10 packets in a read and 5% of what the route carried in that read.
+ */
+export function rpfSignificant(r: Pick<McRoute, 'rpfNew' | 'pktsNew'>): boolean {
+  const d = r.rpfNew ?? 0; if (d < 10) return false;
+  if (r.pktsNew == null) return true;
+  return d / (d + Math.max(0, r.pktsNew)) >= 0.05;
 }
 /** IGMP on one interface (IGMP-STD-MIB igmpInterfaceTable). The querier is the router that sends the membership queries on that segment. */
 export interface McIgmpIf { ifIndex: number; querier: string | null; version: number | null; queryIntervalSec: number | null; querierUpSec: number | null; querierExpirySec: number | null }
@@ -356,7 +369,8 @@ export function withLoadRates(m: Multicast, prev: Multicast | null): Multicast {
   if (dt <= 0 || dt > 3600) return m;
   // growth of each route's wrong-interface counter since the previous read
   const was = new Map(prev.routes.map(r => [r.group + '|' + r.source, r.rpfFail] as const));
-  for (const r of m.routes) { const b = was.get(r.group + '|' + r.source); r.rpfNew = r.rpfFail == null || b == null || r.rpfFail < b ? null : r.rpfFail - b; }
+  const wasPkts = new Map(prev.routes.map(r => [r.group + '|' + r.source, r.pkts] as const));
+  for (const r of m.routes) { const b = was.get(r.group + '|' + r.source); r.rpfNew = r.rpfFail == null || b == null || r.rpfFail < b ? null : r.rpfFail - b; const pp = wasPkts.get(r.group + '|' + r.source); r.pktsNew = r.pkts == null || pp == null || r.pkts < pp ? null : r.pkts - pp; }
   if (!m.interfaces || !prev.interfaces) return m;
   const old = new Map(prev.interfaces.map(i => [i.ifIndex, i]));
   const rate = (a: number | null, b: number | null | undefined) => (a === null || b === null || b === undefined || a < b ? null : Math.round(((a - b) * 8) / dt));

@@ -61,10 +61,27 @@ test('wrong-interface drops are a warning only while the counter grows, history 
   assert.equal(same.routes[0]!.rpfNew, 0);
   let x = pimIssues(same, nm, []).find(i => i.kind === 'rpf')!;
   assert.equal(x.level, 'info'); assert.match(x.text, /history/);
-  const grew = withLoadRates(at(240_000, 9), at(120_000, 4));
-  assert.equal(grew.routes[0]!.rpfNew, 5);
+  const grew = withLoadRates(at(240_000, 19), at(120_000, 4));
+  assert.equal(grew.routes[0]!.rpfNew, 15);
   x = pimIssues(grew, nm, []).find(i => i.kind === 'rpf')!;
-  assert.equal(x.level, 'warn'); assert.match(x.text, /right now/); assert.match(x.text, /5 since the last read/);
+  assert.equal(x.level, 'warn'); assert.match(x.text, /right now/); assert.match(x.text, /15 since the last read/);
   assert.equal(withLoadRates(at(240_000, 2), at(120_000, 4)).routes[0]!.rpfNew, null, 'a counter that went backwards was reset');
   assert.equal(withLoadRates(at(120_000, 4), null).routes[0]!.rpfNew, undefined);
+});
+
+test('a few wrong-interface drops against a busy route are minor, a large share is a warning', async () => {
+  const { rpfSignificant } = await import('../src/snmp/multicast.js');
+  assert.equal(rpfSignificant({ rpfNew: 4, pktsNew: 100 }), false, 'under 10 packets in a read');
+  assert.equal(rpfSignificant({ rpfNew: 40, pktsNew: 100_000 }), false, 'a tiny share of a busy stream: an equal-cost path');
+  assert.equal(rpfSignificant({ rpfNew: 40, pktsNew: 200 }), true, 'a sixth of the stream');
+  assert.equal(rpfSignificant({ rpfNew: 400, pktsNew: 0 }), true, 'nothing forwarded, everything dropped');
+  assert.equal(rpfSignificant({ rpfNew: 40, pktsNew: null }), true, 'no packet counter to compare with');
+  assert.equal(rpfSignificant({ rpfNew: 0, pktsNew: 0 }), false);
+  const route = (fail: number, pkts: number) => ({ group: '239.1.1.1', source: '10.1.1.1', inIfIndex: 1, upstream: null, protocol: 8, pkts, bps: null, expirySec: null, flags: [], rp: null, oifs: [], rpfFail: fail });
+  const { withLoadRates } = await import('../src/snmp/multicast.js');
+  const at = (t: number, fail: number, pkts: number) => ({ ...mc([{ ifIndex: 1, mode: 'sparse', dr: null }]), readAt: t, routes: [route(fail, pkts)] as never });
+  const minor = withLoadRates(at(120_000, 50, 1_000_000), at(0, 10, 0));
+  assert.equal(minor.routes[0]!.pktsNew, 1_000_000);
+  const x = pimIssues(minor, nm, []).find(i => i.kind === 'rpf')!;
+  assert.equal(x.level, 'info'); assert.match(x.text, /equal-cost/);
 });

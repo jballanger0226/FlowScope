@@ -233,6 +233,15 @@ export class DeviceService {
       .map(r => ({ group: r.grp, ifIndex: r.if_index, ip: r.ip, firstSeen: r.first_seen, lastSeen: r.last_seen }));
   }
 
+  /** One read's worth of wrong-interface drops (growth since the previous read) for a router: how many packets, over how many seconds, on how many routes. Kept for a week. */
+  noteRpf(devId: number, ts: number, dtSec: number, drops: number, routes: number): void {
+    this.cdb.db.prepare('INSERT OR REPLACE INTO mcast_rpf(dev_id, ts, dt, drops, routes) VALUES (?,?,?,?,?)').run(devId, ts, Math.round(dtSec), drops, routes);
+    this.cdb.db.prepare('DELETE FROM mcast_rpf WHERE dev_id = ? AND ts < ?').run(devId, ts - 7 * 86_400_000);
+  }
+  rpfHistory(devId: number, sinceMs: number): { ts: number; dt: number; drops: number; routes: number }[] {
+    return this.cdb.db.prepare('SELECT ts, dt, drops, routes FROM mcast_rpf WHERE dev_id = ? AND ts >= ? ORDER BY ts').all(devId, sinceMs) as unknown as { ts: number; dt: number; drops: number; routes: number }[];
+  }
+
   multicast(id: number): Multicast | null {
     const r = this.cdb.db.prepare('SELECT data FROM device_mcast WHERE dev_id = ?').get(id) as { data: string } | undefined;
     return r ? JSON.parse(r.data) as Multicast : null;
@@ -366,7 +375,7 @@ export class DeviceService {
     const d = this.row(id);
     if (!d) throw new DeviceError('No such device', 404);
     this.cdb.tx(() => {
-      for (const t of ['interfaces', 'interface_names', 'mcast_members', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
+      for (const t of ['interfaces', 'interface_names', 'mcast_members', 'mcast_rpf', 'class_defs', 'device_ips', 'fdb', 'arp', 'neighbors', 'wlan_ap', 'wlan_radio', 'wlan_ssid', 'wlan_client']) this.cdb.db.prepare(`DELETE FROM ${t} WHERE dev_id = ?`).run(id);
       this.cdb.db.prepare('UPDATE exporters SET device_id = NULL WHERE device_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_resources WHERE dev_id = ?').run(id);
       this.cdb.db.prepare('DELETE FROM device_health WHERE dev_id = ?').run(id);

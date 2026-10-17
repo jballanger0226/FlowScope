@@ -15,12 +15,12 @@ interface OvHealth {
 }
 
 /** Where an issue is explained in detail: a tab of the device, and for interface problems, the interface and its section. */
-export type Target = { tab: 'interfaces' | 'hardware' | 'network' | 'wifi'; ifIndex?: number; section?: 'traffic' | 'quality' };
+export type Target = { tab: 'interfaces' | 'hardware' | 'network' | 'wifi'; ifIndex?: number; section?: 'traffic' | 'quality'; /** Open the Multicast page of this device instead of a tab */ multicast?: true };
 export interface Issue { level: 'bad' | 'warn'; title: string; detail: string; target?: Target }
 export interface Card { tab: Target['tab']; label: string; level: Level; headline: string; lines: string[] }
 
 interface OvIface { ifIndex: number; name: string; alias: string; oper: string; isVlanIf: boolean; flagged: boolean; utilIn: number | null; utilOut: number | null; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null }
-export interface OvDev { status: string; lastError: string | null; resources: { cpuPct: number | null; memPct: number | null; swapPct: number | null; disks: { name: string; usedPct: number }[]; tempC?: number | null } | null; interfaces: OvIface[]; hasWlan: boolean }
+export interface OvDev { rpfNow?: { routes: number; drops: number; top: string } | null; status: string; lastError: string | null; resources: { cpuPct: number | null; memPct: number | null; swapPct: number | null; disks: { name: string; usedPct: number }[]; tempC?: number | null } | null; interfaces: OvIface[]; hasWlan: boolean }
 export interface OvWlan { aps: { name: string; mac: string }[]; radios: { apMac: string; idx: number; band: string; up: boolean }[]; clients: unknown[] }
 export interface OvInput { dev: OvDev; health: OvHealth | null; wlan: OvWlan | null; neighbours: number | null; arp: number | null; hasHardware: boolean; thresholds: { util: number; drop: number; mcast?: number; priority?: number } }
 
@@ -32,6 +32,7 @@ export function issues(o: OvInput): Issue[] {
   const out: Issue[] = [];
   const { dev, health } = o;
   const names = new Map(dev.interfaces.map(i => [i.ifIndex, i.alias ? `${i.name} (${i.alias})` : i.name]));
+  if (dev.rpfNow) out.push({ level: 'warn', title: `${plural(dev.rpfNow.routes, 'multicast route')} dropping packets that arrive on the wrong interface`, detail: `${dev.rpfNow.drops.toLocaleString('en-US')} packets since the last read, most on ${dev.rpfNow.top}. The Multicast page lists the routes and graphs the drops over the last day.`, target: { tab: 'network', multicast: true } });
   const r = dev.resources;
   if (r) {
     if (r.cpuPct !== null && r.cpuPct >= 85) out.push({ level: r.cpuPct >= 95 ? 'bad' : 'warn', title: `CPU at ${pct(r.cpuPct)}`, detail: 'The history graphs on the Hardware tab show when it rose.', target: { tab: 'hardware' } });

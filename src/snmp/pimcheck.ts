@@ -1,4 +1,4 @@
-import type { Multicast } from './multicast.js';
+import { rpfSignificant, type Multicast } from './multicast.js';
 
 /** One finding about the PIM setup of a device. `warn` can stop traffic, `info` is worth knowing. */
 export interface PimIssue { level: 'warn' | 'info'; kind: 'rp-down' | 'mismatch' | 'link-loss' | 'mixed' | 'no-rp' | 'no-querier' | 'rpf' | 'rp-unknown'; text: string }
@@ -75,11 +75,13 @@ export function pimIssues(mc: Multicast, ifName: (ix: number) => string, peers: 
 
   // packets that arrived on a different interface than the one the route accepts the group on (ipMRouteDifferentInIfPackets). The counter runs since the
   // route was created, so only growth between two reads means it is happening now; a small total on an old route is usually a path change or an equal-cost path.
-  const growing = mc.routes.filter(r => (r.rpfNew ?? 0) > 0).sort((a, b) => (b.rpfNew ?? 0) - (a.rpfNew ?? 0));
+  const growing = mc.routes.filter(rpfSignificant).sort((a, b) => (b.rpfNew ?? 0) - (a.rpfNew ?? 0));
+  const minor = mc.routes.filter(r => (r.rpfNew ?? 0) > 0 && !rpfSignificant(r));
   const before = mc.routes.filter(r => (r.rpfFail ?? 0) > 0 && !(r.rpfNew ?? 0)).sort((a, b) => (b.rpfFail ?? 0) - (a.rpfFail ?? 0));
   const nm = (r: Multicast['routes'][number]): string => (r.source === '0.0.0.0' ? r.group : r.source + ', ' + r.group);
   const n = (v: number): string => v.toLocaleString('en-US');
   if (growing.length) out.push({ level: 'warn', kind: 'rpf', text: `${growing.length} route${growing.length === 1 ? ' is' : 's are'} dropping packets that arrive on the wrong interface right now (RPF check), most on ${nm(growing[0]!)} (${n(growing[0]!.rpfNew!)} since the last read). Traffic is coming in on an interface other than the one the route accepts it on. This happens when two equal-cost paths both deliver the group, or when the unicast route to the source has changed.` });
+  else if (minor.length) out.push({ level: 'info', kind: 'rpf', text: `${minor.length} route${minor.length === 1 ? ' is' : 's are'} dropping a few packets on the wrong interface, a small share of what ${minor.length === 1 ? 'it carries' : 'they carry'}. That is typical of equal-cost paths with multicast multipath, where the other path sends a few copies. It becomes a warning if the drops reach 5% of the route's packets.` });
   else if (before.length) out.push({ level: 'info', kind: 'rpf', text: `${before.length} route${before.length === 1 ? ' has' : 's have'} dropped some packets that arrived on the wrong interface since ${before.length === 1 ? 'it was' : 'they were'} created, most on ${nm(before[0]!)} (${n(before[0]!.rpfFail!)}). None is growing between reads, so this is history, not a current problem.` });
 
   // sparse mode with no rendezvous point mapped at all

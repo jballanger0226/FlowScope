@@ -20,7 +20,7 @@ interface Iface {
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
-interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; model?: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; resources: Resources | null; interfaces: Iface[] }
+interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; model?: string; rpfNow?: { routes: number; drops: number; top: string } | null; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; resources: Resources | null; interfaces: Iface[] }
 interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number; mcast: number; priority: number }; mibs: { name: string; what: string }[] }
 interface SeriesRes {
   util: { step: number; points: { ts: number; utilIn: number; utilOut: number; inBps: number; outBps: number; disc: number; err: number }[] };
@@ -877,6 +877,7 @@ function devTabs(dev: Dev, tab: DevTab): VNode {
 }
 /** Jump to what an Overview item is about: its tab, and for an interface problem the interface and the section with the detail. */
 function openTarget(dev: Dev, t: Target): void {
+  if (t.multicast) { go('multicast', { dev: dev.id }); return; }
   if (t.ifIndex !== undefined) { if (t.section) ifTab = t.section; select_(dev.id, t.ifIndex, t.tab); } else { devTab = t.tab; redraw(); }
   window.scrollTo({ top: 0 });
 }

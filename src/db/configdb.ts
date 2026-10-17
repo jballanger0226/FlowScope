@@ -270,6 +270,10 @@ const MIGRATIONS: string[] = [
   `
   -- hosts seen reporting membership of a multicast group on a VLAN interface, collected over time from the IGMP cache (it only holds the last reporter)
   CREATE TABLE mcast_members (dev_id INTEGER NOT NULL, grp TEXT NOT NULL, if_index INTEGER NOT NULL, ip TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, grp, if_index, ip)) WITHOUT ROWID;
+  `,
+  `
+  -- packets dropped because they arrived on the wrong interface (the RPF check), as growth between two reads of a router's multicast table, so the trend can be graphed
+  CREATE TABLE mcast_rpf (dev_id INTEGER NOT NULL, ts INTEGER NOT NULL, dt INTEGER NOT NULL, drops INTEGER NOT NULL, routes INTEGER NOT NULL, PRIMARY KEY (dev_id, ts)) WITHOUT ROWID;
   `
 
 ];

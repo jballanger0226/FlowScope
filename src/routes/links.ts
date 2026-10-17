@@ -1,3 +1,4 @@
+import { rpfSignificant } from '../snmp/multicast.js';
 import { neighborViews } from '../analysis/path.js';
 import { pathEnv } from './pathenv.js';
 import type { App } from '../app.js';
@@ -58,6 +59,7 @@ export async function linkDevices(app: App, minutes: number) {
   const counts = app.hosts.portCounts();
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
+    rpfNow: (() => { const g = (app.devices.multicast(d.id)?.routes ?? []).filter(rpfSignificant); return g.length ? { routes: g.length, drops: g.reduce((a, r) => a + (r.rpfNew ?? 0), 0), top: g.sort((a, b) => (b.rpfNew ?? 0) - (a.rpfNew ?? 0))[0]!.group } : null; })(),
     model: modelText(app.devices.data<Entity>(d.id, 'entity')), qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
     interfaces: app.devices.interfaces(d.id).map(i => {
       const mload = mcastLoad.get(d.id)?.get(i.ifIndex);

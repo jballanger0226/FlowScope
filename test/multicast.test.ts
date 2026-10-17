@@ -298,3 +298,20 @@ test('an NX-OS chassis row gives the model', async () => {
   const client = { column: agent(rows).column, get: async (oids: string[]) => new Map(oids.filter(o => o in rows).map(o => [o, { oid: o, type: 4, value: rows[o]! }])) } as unknown as SnmpClient;
   assert.equal(modelText(await readEntity(client, 1)), 'N9K-C93180YC-FX3');
 });
+
+test('wrong-interface drops are kept per read for a week and listed from a given time', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-rpf-'));
+  try {
+    const cdb = new ConfigDb(dir);
+    const devs = new DeviceService(cdb, { list: () => [] } as never, {} as never, {} as never);
+    const now = 10 * 86_400_000;
+    devs.noteRpf(1, now - 9 * 86_400_000, 120, 5, 1);   // older than a week
+    devs.noteRpf(1, now - 3_600_000, 120, 240, 3);
+    devs.noteRpf(1, now, 120, 0, 0);
+    devs.noteRpf(2, now, 60, 7, 1);
+    assert.deepEqual(devs.rpfHistory(1, 0).map(p => [p.drops, p.routes]), [[240, 3], [0, 0]], 'the old point went when a newer one was written');
+    assert.deepEqual(devs.rpfHistory(1, now - 1000).map(p => p.drops), [0]);
+    assert.equal(devs.rpfHistory(2, 0).length, 1);
+    cdb.close();
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

@@ -1,4 +1,5 @@
 import type { Multicast } from '../snmp/multicast.js';
+import { rpfSignificant } from '../snmp/multicast.js';
 import { multicastLoss, pimIssues, type PimPeer } from '../snmp/pimcheck.js';
 import type { App } from '../app.js';
 import { HttpError } from '../server/http.js';
@@ -135,13 +136,15 @@ export function registerMulticast(app: App): void {
     c.json({
       device: { id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device', model: modelText(app.devices.data<Entity>(id, 'entity')) }, readAt: m.readAt, stale: now - m.readAt > STALE_MS, source: m.source, truncated: m.truncated,
       routes: m.routes.map(r => ({
-        group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', rpf: r.inIfIndex || r.upstream || r.rpf ? { ...rpfPeer(r), inIf: r.inIfIndex ? name(r.inIfIndex) : null, inIfIndex: r.inIfIndex, neighbor: r.upstream, who: who(r.upstream), route: r.rpf ? `${r.rpf.prefix}/${maskLen(r.rpf.mask)}` : null, proto: r.rpf?.proto ? RT_PROTO[r.rpf.proto] ?? null : null, failures: r.rpfFail ?? null, failuresNew: r.rpfNew ?? null } : null, mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
+        group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', rpf: r.inIfIndex || r.upstream || r.rpf ? { ...rpfPeer(r), inIf: r.inIfIndex ? name(r.inIfIndex) : null, inIfIndex: r.inIfIndex, neighbor: r.upstream, who: who(r.upstream), route: r.rpf ? `${r.rpf.prefix}/${maskLen(r.rpf.mask)}` : null, proto: r.rpf?.proto ? RT_PROTO[r.rpf.proto] ?? null : null, failures: r.rpfFail ?? null, failuresNew: r.rpfNew ?? null, failuresShare: r.rpfNew && r.pktsNew != null ? Math.round((r.rpfNew / (r.rpfNew + Math.max(0, r.pktsNew))) * 1000) / 10 : null, failuresMajor: rpfSignificant(r) } : null, mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
           ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null, pimMode: pimMode.get(o.ifIndex) ?? null,
           members: (members.get(r.group + '|' + o.ifIndex) ?? []).map(x => ({ ip: x.ip, via: x.via, ageSec: x.lastSeen !== null ? Math.max(0, Math.round((now - x.lastSeen) / 1000)) : x.recent ? 300 : 1800, sinceSec: x.firstSeen !== null ? Math.round((now - x.firstSeen) / 1000) : null, approx: x.lastSeen === null })),
           joins: (joins.get(r.group + '|' + o.ifIndex) ?? []).map(j => ({ reporter: j.lastReporter, expirySec: j.expirySec, self: j.self }))
         }))
       })),
+      // wrong-interface drops per minute over the last day, one point per read
+      rpfHistory: app.devices.rpfHistory(id, now - 86_400_000).map(p => ({ ts: p.ts, perMin: p.dt > 0 ? Math.round((p.drops * 60 / p.dt) * 10) / 10 : 0, routes: p.routes })),
       routeSource: m.routeSource ?? 'ipmroute',
       netflowIgmp: nf ? { reports: nf.reports, hosts: nf.hosts, v3Hosts: nf.v3Hosts, windowMin: nf.windowMin, unmatched } : null,
       igmp, rps,
