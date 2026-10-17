@@ -16,7 +16,7 @@ const MAX_TEXT = 4000;
 
 export type Row = [oid: string, type: string, text: string];
 export interface WalkJob {
-  id: string; devId: number; device: string; address: string; startOid: string; user: string; startedAt: number; finishedAt: number | null;
+  id: string; devId: number; device: string; address: string; startOid: string; context: string; user: string; startedAt: number; finishedAt: number | null;
   state: 'running' | 'done' | 'cancelled' | 'error'; error: string | null; truncated: boolean; rows: Row[]; stop: boolean;
 }
 export class WalkBusy extends Error {}
@@ -34,11 +34,11 @@ export class WalkJobs {
   cancel(id: string): void { const j = this.jobs.get(id); if (j && !j.finishedAt) j.stop = true; }
 
   /** Starts a walk. `startOid` is empty for the whole tree. The client is closed when the walk ends, however it ends. */
-  start(dev: { id: number; name: string; ip: string }, client: SnmpClient, startOid: string, user: string, opts: { maxMs?: number; maxRows?: number } = {}): WalkJob {
+  start(dev: { id: number; name: string; ip: string }, client: SnmpClient, startOid: string, user: string, opts: { maxMs?: number; maxRows?: number; context?: string } = {}): WalkJob {
     this.prune();
     if (this.running(dev.id)) { client.close(); throw new WalkBusy('A walk is already running on this device. Wait for it to finish or cancel it.'); }
     if (this.running() >= MAX_RUNNING) { client.close(); throw new WalkBusy('Two walks are already running. Wait for one to finish.'); }
-    const job: WalkJob = { id: randomBytes(12).toString('hex'), devId: dev.id, device: dev.name, address: dev.ip, startOid, user, startedAt: Date.now(), finishedAt: null, state: 'running', error: null, truncated: false, rows: [], stop: false };
+    const job: WalkJob = { id: randomBytes(12).toString('hex'), devId: dev.id, device: dev.name, address: dev.ip, startOid, context: opts.context ?? '', user, startedAt: Date.now(), finishedAt: null, state: 'running', error: null, truncated: false, rows: [], stop: false };
     this.jobs.set(job.id, job);
     const deadline = job.startedAt + (opts.maxMs ?? MAX_MS), cap = opts.maxRows ?? MAX_ROWS;
     void (async () => {
@@ -64,8 +64,8 @@ export class WalkJobs {
 
 /* ------------------------------------------------------------------ views and exports */
 
-export interface JobView { id: string; device: string; address: string; startOid: string; state: WalkJob['state']; error: string | null; truncated: boolean; rows: number; startedAt: number; finishedAt: number | null; maxRows: number }
-export const jobView = (j: WalkJob): JobView => ({ id: j.id, device: j.device, address: j.address, startOid: j.startOid, state: j.state, error: j.error, truncated: j.truncated, rows: j.rows.length, startedAt: j.startedAt, finishedAt: j.finishedAt, maxRows: MAX_ROWS });
+export interface JobView { id: string; device: string; address: string; startOid: string; context: string; state: WalkJob['state']; error: string | null; truncated: boolean; rows: number; startedAt: number; finishedAt: number | null; maxRows: number }
+export const jobView = (j: WalkJob): JobView => ({ id: j.id, device: j.device, address: j.address, startOid: j.startOid, context: j.context, state: j.state, error: j.error, truncated: j.truncated, rows: j.rows.length, startedAt: j.startedAt, finishedAt: j.finishedAt, maxRows: MAX_ROWS });
 
 /** Rows whose OID, type or value contain every word of the filter (case-insensitive). No filter returns the job's own array. */
 export function filterRows(rows: Row[], q: string): Row[] {
@@ -82,10 +82,10 @@ const csvCell = (s: string): string => (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+
 
 /** The rows as one downloadable document. `txt` is one line per row in the style of snmpwalk: `.1.3.6.1.2.1.1.1.0 = OctetString: text`. */
 export function exportRows(j: WalkJob, rows: Row[], fmt: ExportFormat, q: string): { type: string; ext: string; body: string } {
-  const meta = { device: j.device, address: j.address, startOid: j.startOid ? '.' + j.startOid : '(whole tree)', walkedAt: new Date(j.startedAt).toISOString(), rows: rows.length, filter: q || undefined, truncated: j.truncated || undefined, note: j.error ?? undefined };
+  const meta = { device: j.device, address: j.address, startOid: j.startOid ? '.' + j.startOid : '(whole tree)', context: j.context || undefined, walkedAt: new Date(j.startedAt).toISOString(), rows: rows.length, filter: q || undefined, truncated: j.truncated || undefined, note: j.error ?? undefined };
   if (fmt === 'json') return { type: 'application/json', ext: 'json', body: JSON.stringify({ ...meta, results: rows.map(r => ({ oid: r[0], type: r[1], value: r[2] })) }, null, 1) };
   if (fmt === 'xml') {
-    const lines = ['<?xml version="1.0" encoding="UTF-8"?>', `<snmpwalk device="${xmlText(j.device)}" address="${xmlText(j.address)}" startOid="${xmlText(meta.startOid)}" walkedAt="${meta.walkedAt}" rows="${rows.length}"${q ? ` filter="${xmlText(q)}"` : ''}${j.truncated ? ' truncated="true"' : ''}>`];
+    const lines = ['<?xml version="1.0" encoding="UTF-8"?>', `<snmpwalk device="${xmlText(j.device)}" address="${xmlText(j.address)}" startOid="${xmlText(meta.startOid)}"${j.context ? ` context="${xmlText(j.context)}"` : ''} walkedAt="${meta.walkedAt}" rows="${rows.length}"${q ? ` filter="${xmlText(q)}"` : ''}${j.truncated ? ' truncated="true"' : ''}>`];
     for (const r of rows) lines.push(`  <varbind oid="${xmlText(r[0])}" type="${xmlText(r[1])}">${xmlText(r[2])}</varbind>`);
     lines.push('</snmpwalk>');
     return { type: 'text/xml; charset=utf-8', ext: 'xml', body: lines.join('\n') + '\n' };
@@ -94,6 +94,6 @@ export function exportRows(j: WalkJob, rows: Row[], fmt: ExportFormat, q: string
     const q2 = (x: string) => '"' + csvCell(x).replace(/"/g, '""') + '"';
     return { type: 'text/csv; charset=utf-8', ext: 'csv', body: ['oid,type,value', ...rows.map(r => r.map(q2).join(','))].join('\r\n') + '\r\n' };
   }
-  const head = [`# SNMP walk of ${j.device} (${j.address}) from ${meta.startOid}, ${meta.walkedAt}`, `# ${rows.length} rows${q ? `, filtered by "${q.replace(/[\r\n]+/g, ' ')}"` : ''}${j.truncated ? ', TRUNCATED' : ''}${j.error ? ', ' + j.error : ''}`];
+  const head = [`# SNMP walk of ${j.device} (${j.address}) from ${meta.startOid}${j.context ? `, context ${j.context}` : ''}, ${meta.walkedAt}`, `# ${rows.length} rows${q ? `, filtered by "${q.replace(/[\r\n]+/g, ' ')}"` : ''}${j.truncated ? ', TRUNCATED' : ''}${j.error ? ', ' + j.error : ''}`];
   return { type: 'text/plain; charset=utf-8', ext: 'txt', body: [...head, ...rows.map(r => `.${r[0]} = ${r[1]}: ${r[2].replace(/\r?\n/g, '\\n')}`)].join('\n') + '\n' };
 }

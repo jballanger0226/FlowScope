@@ -155,7 +155,7 @@ export function registerDevices(app: App): void {
     checkTarget(c, d.ip);
     if (busy.has(id)) throw new HttpError(429, 'A check is running on this device. Wait for it to finish.');
     let j;
-    try { const base = app.devices.open(d); let cl = base; if (context) { cl = base.forContext(context); base.close(); } j = walks.start({ id, name: d.name, ip: d.ip }, cl, oid, who(c)); }
+    try { const base = app.devices.open(d); let cl = base; if (context) { cl = base.forContext(context); base.close(); } j = walks.start({ id, name: d.name, ip: d.ip }, cl, oid, who(c), { context }); }
     catch (e) { if (e instanceof WalkBusy) throw new HttpError(429, e.message); throw e; }
     app.log.audit(who(c), `Started an SNMP walk of ${oid ? oid : 'the whole tree'} on ${d.name}${context ? ` in context ${context}` : ''}`);
     c.json({ job: jobView(j) }, 202);

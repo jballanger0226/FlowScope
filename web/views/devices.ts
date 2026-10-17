@@ -24,7 +24,7 @@ let mQ = ''; let sel = 0; let confirmRemove = false; let mMsg = ''; let mBusy = 
 interface Check { id: string; title: string; group: string; state: 'ok' | 'warn' | 'fail' | 'na'; count: number; detail: string; hint?: string }
 let diagFor = 0; let chk: { checkedAt: number; checks: Check[]; vendor: string; role: string } | null = null; let chkBusy = false; let chkErr = '';
 interface WalkRow { oid: string; type: string; text: string }
-interface WalkJob { id: string; device: string; startOid: string; state: 'running' | 'done' | 'cancelled' | 'error'; error: string | null; truncated: boolean; rows: number; startedAt: number; finishedAt: number | null; maxRows: number }
+interface WalkJob { id: string; device: string; startOid: string; context?: string; state: 'running' | 'done' | 'cancelled' | 'error'; error: string | null; truncated: boolean; rows: number; startedAt: number; finishedAt: number | null; maxRows: number }
 const PAGE = 100;
 let wCtx = ''; let wOid = ''; let wJob: WalkJob | null = null; let wRows: WalkRow[] = []; let wMatched = 0; let wOff = 0; let wQ = ''; let wBusy = false; let wErr = ''; let wOpen = false; let wTimer: number | undefined;
 // scan
@@ -171,7 +171,7 @@ const walkExport = (d: Dev, fmt: string): string => wJob ? `/api/devices/${d.id}
 
 function walkPanel(d: Dev): VNode {
   const running = wJob?.state === 'running';
-  const from = wJob ? (wJob.startOid ? '.' + wJob.startOid : 'the whole tree') : '';
+  const from = wJob ? (wJob.startOid ? '.' + wJob.startOid : 'the whole tree') + (wJob.context ? ` in context ${wJob.context}` : ' in the default context') : '';
   const cols = 'minmax(240px,2fr) 110px minmax(200px,3fr)';
   const first = wMatched ? wOff + 1 : 0, last = Math.min(wOff + PAGE, wMatched);
   const stateText = !wJob ? '' : running ? `Walking ${from}… ${num(wJob.rows)} rows so far (${dur(Date.now() - wJob.startedAt)})`

@@ -95,3 +95,14 @@ test('compareOid orders by arc, not by text', () => {
   assert.equal(compareOid('1.0.8802', '1.0.8802'), 0);
   assert.equal(compareOid('1.0', '1.0.8802'), -1);
 });
+
+test('a walk in an SNMP context says so in its status and exports', async () => {
+  const jobs = new WalkJobs(); const f = fakeClient(SAMPLE);
+  const j = jobs.start(dev, f.c, '1.3.6.1.2.1.83', 'netops', { context: 'vrf-MEDIA' });
+  const done = await settle(jobs, j.id);
+  assert.equal(jobView(done).context, 'vrf-MEDIA');
+  assert.match(exportRows(done, done.rows, 'xml', '').body, /<snmpwalk [^>]*context="vrf-MEDIA"/);
+  assert.match(exportRows(done, done.rows, 'txt', '').body, /context vrf-MEDIA/);
+  const d2 = await settle(jobs, jobs.start(dev, fakeClient(SAMPLE).c, '', 'netops').id);
+  assert.equal(jobView(d2).context, ''); assert.doesNotMatch(exportRows(d2, d2.rows, 'xml', '').body, /context=/);
+});
