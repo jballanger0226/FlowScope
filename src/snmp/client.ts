@@ -82,7 +82,7 @@ function classify(e: Error): SnmpError {
 export async function bulkStep<T>(fetch: (rep: number) => Promise<T>, rep: number, maxRep: number, sleep: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)), attempts = 6): Promise<{ rows: T; rep: number }> {
   let r = rep;
   for (let n = 1; ; n++) {
-    try { return { rows: await fetch(r), rep: Math.min(maxRep, r * 2) }; }
+    try { return { rows: await fetch(r), rep: Math.min(maxRep, r * 4) }; }
     catch (e) {
       if (!(e instanceof SnmpError) || e.kind !== 'timeout' || n >= attempts) throw e;
       r = Math.max(1, Math.floor(r / 2)); await sleep(500 * n);
