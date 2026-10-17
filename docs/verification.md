@@ -106,3 +106,7 @@ Checked against a full walk of a Catalyst 9300 SD-Access edge (`test/cisco_auth_
 ## PoE budget, reserved and drawn (Cisco Catalyst 9300 walk)
 
 `pethMainPsePower` (budget) and `pethMainPseConsumptionPower` (drawn) are standard; the power the switch has set aside for powered devices is the Cisco `cpeExtMainPseUsedPower` (mW, `.9.9.402.1.3.1.4`, with the remainder in `.5`). The reserved figure is what decides whether the next device is refused, so it is shown beside the drawn one. Walk: switch 1 budget 2063 W, drawn 474 W, reserved 1956.8 W (94.9%); switch 2 budget 1287 W, drawn 231 W, reserved 683.1 W (53.1%). Per port, `cpeExtPsePortPwrAllocated` (.7) and `cpeExtPsePortPwrConsumption` (.9) in mW, turned into an ifIndex through `cpeExtPsePortEntPhyIndex` (.11) and ENTITY-MIB `entAliasMappingIdentifier`. All 96 ports map; per-port sums (707.9 W drawn, 2639.6 W reserved) match the two main supplies (705 W, 2639.9 W). The format of the alias value (an OID ending in the ifIndex) is assumed from the walk text.
+
+## SNMP contexts for the walk form (Cisco Catalyst 9300 walk)
+
+CISCO-CONTEXT-MAPPING-MIB `cContextMappingVrfName` (.1.3.6.1.4.1.9.9.468.1.1.1.2) is indexed by the context name spelled as length plus character codes. The walk gives vrf-BRANCH, vrf-DEVICE, vrf-GUEST, vrf-MEDIA, vrf-PCI and vrf-USER. The standard vacmContextName fallback is not in that walk and is untested on a device.

@@ -26,6 +26,7 @@ let diagFor = 0; let chk: { checkedAt: number; checks: Check[]; vendor: string; 
 interface WalkRow { oid: string; type: string; text: string }
 interface WalkJob { id: string; device: string; startOid: string; context?: string; state: 'running' | 'done' | 'cancelled' | 'error'; error: string | null; truncated: boolean; rows: number; startedAt: number; finishedAt: number | null; maxRows: number }
 const PAGE = 100;
+let ctxList: { name: string; vrf: string }[] = []; let ctxFor = 0;
 let wCtx = ''; let wOid = ''; let wJob: WalkJob | null = null; let wRows: WalkRow[] = []; let wMatched = 0; let wOff = 0; let wQ = ''; let wBusy = false; let wErr = ''; let wOpen = false; let wTimer: number | undefined;
 // scan
 let dRange = '', dCred = '', dSec = '60', dTryOthers = false; let job: Job | null = null; let dMsg = ''; let picked = new Set<string>(); let scanTimer: number | undefined; let addFoundBusy = false;
@@ -139,7 +140,7 @@ const CHK_LABEL: Record<Check['state'], [string, 'ok' | 'warn' | 'bad' | 'defaul
 
 function syncDiag(d: Dev): void {
   if (diagFor === d.id) return;
-  diagFor = d.id; chk = null; chkErr = ''; wJob = null; wRows = []; wMatched = 0; wOff = 0; wQ = ''; wErr = ''; window.clearTimeout(wTimer);
+  diagFor = d.id; ctxList = []; ctxFor = 0; chk = null; chkErr = ''; wJob = null; wRows = []; wMatched = 0; wOff = 0; wQ = ''; wErr = ''; window.clearTimeout(wTimer);
 }
 async function runCheck(d: Dev): Promise<void> {
   chkBusy = true; chkErr = ''; redraw();
@@ -159,6 +160,13 @@ async function pollWalk(d: Dev): Promise<void> {
   window.clearTimeout(wTimer);
   if (wJob?.state === 'running' && diagFor === d.id && location.hash.startsWith('#/devices')) wTimer = window.setTimeout(() => void pollWalk(d), 900);
 }
+/** Fills the context list of the walk form from the device; the field stays free text, so a failed read costs nothing. */
+async function loadContexts(d: Dev): Promise<void> {
+  if (ctxFor === d.id) return;
+  ctxFor = d.id;
+  try { const r = await get<{ contexts: { name: string; vrf: string }[] }>(`/api/devices/${d.id}/contexts`); if (diagFor === d.id) ctxList = r.contexts; } catch { /* free text still works */ }
+  redraw();
+}
 async function startWalk(d: Dev): Promise<void> {
   wBusy = true; wErr = ''; wJob = null; wRows = []; wMatched = 0; wOff = 0; redraw();
   try { const r = await post<{ job: WalkJob }>(`/api/devices/${d.id}/walks`, { oid: wOid.trim(), context: wCtx.trim() || undefined }); wJob = r.job; wBusy = false; await pollWalk(d); }
@@ -170,6 +178,7 @@ function pageWalk(d: Dev, off: number): void { wOff = Math.max(0, off); void pol
 const walkExport = (d: Dev, fmt: string): string => wJob ? `/api/devices/${d.id}/walks/${wJob.id}/export` + qs({ format: fmt, q: wQ.trim() }) : '';
 
 function walkPanel(d: Dev): VNode {
+  void loadContexts(d);
   const running = wJob?.state === 'running';
   const from = wJob ? (wJob.startOid ? '.' + wJob.startOid : 'the whole tree') + (wJob.context ? ` in context ${wJob.context}` : ' in the default context') : '';
   const cols = 'minmax(240px,2fr) 110px minmax(200px,3fr)';
@@ -181,7 +190,8 @@ function walkPanel(d: Dev): VNode {
   return h('div', { class: 'col', style: 'gap:10px' },
     h('div', { class: 'row', style: 'align-items:end' },
       field('Starting OID (blank walks everything)', textInput(wOid, v => { wOid = v; }, { placeholder: 'blank = everything', aria: 'OID to walk', mono: true, width: '300px', onenter: () => { if (!running && !wBusy) void startWalk(d); } })),
-      field('SNMP context (optional)', textInput(wCtx, v => { wCtx = v; }, { placeholder: 'a VRF context, blank = default', aria: 'SNMP context to walk', mono: true, width: '200px', onenter: () => { if (!running && !wBusy) void startWalk(d); } })),
+      field('SNMP context (optional)', textInput(wCtx, v => { wCtx = v; }, { placeholder: ctxList.length ? 'pick one or type a name; blank = default' : 'a VRF context, blank = default', aria: 'SNMP context to walk', mono: true, width: '240px', list: 'walk-contexts', onenter: () => { if (!running && !wBusy) void startWalk(d); } })),
+      h('datalist', { id: 'walk-contexts' }, ctxList.map(x => h('option', { value: x.name }, x.vrf ? `VRF ${x.vrf}` : ''))),
       field('Common starting points', select('', [['', 'Pick one…'], ...WALK_PRESETS], v => { if (v) { wOid = v === '*' ? '' : v; redraw(); } }, { aria: 'Common OIDs' })),
       running ? btn('Cancel walk', { kind: 'danger', onclick: () => void cancelWalk(d) }) : btn(wBusy ? 'Starting…' : wOid.trim() ? 'Walk' : 'Walk everything', { kind: 'primary', disabled: wBusy, onclick: () => void startWalk(d) })),
     !wOid.trim() && !wJob ? h('span', { class: 'dim', style: 'font-size:12px' }, 'A full walk reads every value the device will give this credential. A large switch can take a few minutes and return tens of thousands of rows; it runs in the background and you can filter and export it when it finishes.') : null,

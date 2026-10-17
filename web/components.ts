@@ -22,8 +22,9 @@ export function field(label: Child, input: VNode, hint?: Child): VNode {
   return h('label', { class: 'field' }, h('span', { class: 'flabel' }, label), input, hint ? h('span', { class: 'hint' }, hint) : null);
 }
 
-export function textInput(value: string, oninput: (v: string) => void, o: { placeholder?: string; type?: string; aria?: string; disabled?: boolean; autocomplete?: string; mono?: boolean; onenter?: () => void; width?: string; id?: string; maxlength?: number } = {}): VNode {
+export function textInput(value: string, oninput: (v: string) => void, o: { placeholder?: string; type?: string; aria?: string; disabled?: boolean; autocomplete?: string; mono?: boolean; onenter?: () => void; width?: string; id?: string; maxlength?: number; list?: string } = {}): VNode {
   return h('input', {
+    list: o.list,
     class: cls('input', o.mono && 'mono'), type: o.type ?? 'text', value, placeholder: o.placeholder, 'aria-label': o.aria, disabled: o.disabled, id: o.id,
     autocomplete: o.autocomplete ?? 'off', spellcheck: 'false', maxlength: o.maxlength, style: o.width ? `width:${o.width}` : undefined,
     oninput: (e: Event) => { oninput((e.target as HTMLInputElement).value); redraw(); },
