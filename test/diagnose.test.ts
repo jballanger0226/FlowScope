@@ -152,9 +152,16 @@ function mcDevice(rows: Record<string, SnmpValue>) {
 }
 const CAT = { role: 'switch', cisco: true, objectId: '1.3.6.1.4.1.9.1.2504' };
 
-test('multicast routing: a Layer 3 switch with the tables passes, with counts', async () => {
+const IGMPIF = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'test', 'fixtures', 'igmpif-c9300.json'), 'utf8')) as Record<string, SnmpValue>;
+
+test('multicast routing: without the IGMP interface table it warns that there are no queriers', async () => {
   const c = byId(await runChecks(mcDevice(MC), CAT)).mcast!;
-  assert.equal(c.state, 'ok'); assert.equal(c.group, 'routing'); assert.equal(c.count, 25);
+  assert.equal(c.state, 'warn'); assert.match(c.detail, /no queriers/);
+});
+
+test('multicast routing: a Layer 3 switch with the tables passes, with counts', async () => {
+  const c = byId(await runChecks(mcDevice({ ...MC, ...IGMPIF }), CAT)).mcast!;
+  assert.equal(c.state, 'ok'); assert.match(c.detail, /IGMP querier/); assert.equal(c.group, 'routing'); assert.equal(c.count, 25);
   assert.match(c.detail, /25 routes for 13 groups/); assert.match(c.detail, /19 PIM interfaces/);
 });
 

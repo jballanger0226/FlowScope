@@ -61,3 +61,6 @@ Be aware of what has actually been exercised before relying on this in productio
 
 ### RPF drops and equal-cost paths
 A route's wrong-interface drops only raise a warning when at least 10 packets were dropped between two reads and they are at least 5% of what the route carried in that time. Smaller amounts are shown as quiet info ("typical of equal-cost paths with multicast multipath"). Check: on a router with two equal-cost paths to a source, `show ip mroute <group> count` drops stay small against forwarded packets and no warning appears; a changed route or two senders makes the share jump and the warning shows.
+
+### SNMP diagnostics page
+The Multicast routing check now counts IGMP queriers, rendezvous points and routes with RPF, and warns when the IGMP interface table (no queriers) or RPF interfaces are missing. The Forwarding table check states how many prefixes have equal-cost paths. A new Hardware model check reads ENTITY-MIB (Cisco devices). Check: run diagnostics on a Catalyst and see the model, "N IGMP queriers", "N rendezvous points" and "RPF for N routes".

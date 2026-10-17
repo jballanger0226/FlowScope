@@ -8,6 +8,7 @@ import { juniperSource, diffservSource, type QosSource } from './qos_vendors.js'
 import { readResources } from './resources.js';
 import { readIfExtra, readSensors, readPoe, readStp, readOspf, readBgp, readEigrp, readBfd } from './health.js';
 import { readFib } from './fib.js';
+import { readEntity, modelText } from './entity.js';
 import { readDhcpBindings } from './dhcp_snooping.js';
 import { readDai, readNbar, readProcesses, readStack } from './cisco_extra.js';
 import { readWlanFor, wlanVendor } from './wlan_vendors.js';
@@ -121,7 +122,7 @@ const WIFI_HINT: Record<string, string> = {
   cisco: 'Cisco wireless controllers publish access points and clients in CISCO-LWAPP-AP-MIB (.1.3.6.1.4.1.9.9.513) and CISCO-LWAPP-DOT11-CLIENT-MIB (.1.3.6.1.4.1.9.9.599).'
 };
 const GROUP: Record<string, CheckGroup> = { interfaces: 'basics', counters: 'basics', resources: 'basics', lldp: 'neighbours', cdp: 'neighbours', mac: 'hosts', arp: 'hosts', vlans: 'hosts',
-  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', dai: 'hosts', stack: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
+  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
 const GROUP_ORDER: CheckGroup[] = ['basics', 'neighbours', 'hosts', 'hardware', 'routing', 'quality', 'wifi'];
 
 async function attempt<T>(fn: () => Promise<T>, empty: T): Promise<{ v: T; error: string | null }> {
@@ -240,10 +241,10 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
   if (ex.mcast) {
     const m = mcast.v;
     const groups = m ? new Set(m.routes.map(r => r.group)).size : 0;
-    const missing = m ? [m.routeSource === 'pim' ? 'IPMROUTE-STD-MIB (as on NX-OS), so routes come from PIM-MIB with no interfaces or RPF' : null, m.source === 'standard' ? 'the Cisco rate and flags table (CISCO-IPMROUTE-MIB), so no rates' : null, m.pimInterfaces.length ? null : 'PIM-MIB, so no rendezvous points or neighbours', m.receivers.length ? null : 'any IGMP cache entry, so no joined hosts'].filter(Boolean) as string[] : [];
+    const missing = m ? [m.routeSource === 'pim' ? 'IPMROUTE-STD-MIB (as on NX-OS), so routes come from PIM-MIB with no interfaces or RPF' : null, m.source === 'standard' ? 'the Cisco rate and flags table (CISCO-IPMROUTE-MIB), so no rates' : null, m.pimInterfaces.length ? null : 'PIM-MIB, so no rendezvous points or neighbours', m.receivers.length ? null : 'any IGMP cache entry, so no joined hosts', (m.igmpInterfaces?.length ?? 0) || !m.receivers.length ? null : 'the IGMP interface table (IGMP-STD-MIB), so no queriers', m.routes.some(r => r.inIfIndex || r.upstream || r.rpf) ? null : 'any RPF interface or neighbour, so no RPF information'].filter(Boolean) as string[] : [];
     out.push(m ? { id: 'mcast', title: 'Multicast routing', group: 'routing', state: missing.length ? 'warn' : 'ok', count: m.routes.length,
-      detail: `${plural(m.routes.length, 'route')} for ${plural(groups, 'group')}, ${plural(m.receivers.length, 'IGMP join')}${m.pimInterfaces.length ? `, ${plural(m.pimInterfaces.length, 'PIM interface')}` : ''}.${missing.length ? ` Missing: ${missing.join('; ')}.` : ''}`,
-      hint: missing.length ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83), IGMP-STD-MIB (.1.3.6.1.2.1.85), PIM-MIB (.1.3.6.1.3.61) and Cisco CISCO-IPMROUTE-MIB (.1.3.6.1.4.1.9.10.2). Check the SNMP view of this credential includes them.' : undefined }
+      detail: `${plural(m.routes.length, 'route')} for ${plural(groups, 'group')}, ${plural(m.receivers.length, 'IGMP join')}${m.pimInterfaces.length ? `, ${plural(m.pimInterfaces.length, 'PIM interface')}` : ''}${m.igmpInterfaces?.length ? `, ${plural(m.igmpInterfaces.filter(i => i.querier).length, 'IGMP querier')} on ${plural(m.igmpInterfaces.length, 'interface')}` : ''}${(m.rpGroups?.length ?? 0) + (m.rpSet?.length ?? 0) ? `, ${plural(new Set([...(m.rpGroups ?? []).map(r => r.rp), ...(m.rpSet ?? []).map(r => r.rp)]).size, 'rendezvous point')}` : ''}${m.routes.some(r => r.rpf) ? `, RPF for ${plural(m.routes.filter(r => r.rpf).length, 'route')}` : ''}.${missing.length ? ` Missing: ${missing.join('; ')}.` : ''}`,
+      hint: missing.length ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83), IGMP-STD-MIB (.1.3.6.1.2.1.85, queriers in igmpInterfaceTable), PIM-MIB (.1.3.6.1.3.61) and Cisco CISCO-IPMROUTE-MIB (.1.3.6.1.4.1.9.10.2). Check the SNMP view of this credential includes them.' : undefined }
       : { id: 'mcast', title: 'Multicast routing', group: 'routing', state: 'na', count: 0, detail: mcast.error ?? 'No multicast routes (IPMROUTE-STD-MIB). Normal when this device does not route multicast.',
         hint: mcast.error ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83). Check the SNMP view of this credential includes them.' : undefined });
   }
@@ -265,7 +266,7 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
       out.push(count ? { id, title, group: GROUP[id], state: 'ok', count, detail: okText } : { id, title, group: GROUP[id], state: 'na', count: 0, detail: error ?? naText, hint: error ? `${hint} ${view}` : undefined });
     };
     if (ex.cRouting) {
-      row('fib', 'Forwarding table (CEF)', fib.v?.entries.length ?? 0, `${plural(fib.v?.entries.length ?? 0, 'prefix', 'prefixes')} with their outgoing interfaces${fib.v?.truncated ? ' (cut off at the most that FlowScope keeps)' : ''}. Used to check that a flow left the interface the routing table says it should.`,
+      row('fib', 'Forwarding table (CEF)', fib.v?.entries.length ?? 0, `${plural(fib.v?.entries.length ?? 0, 'prefix', 'prefixes')} with their outgoing interfaces${fib.v?.truncated ? ' (cut off at the most that FlowScope keeps)' : ''}. ${(() => { const n = fib.v?.entries.filter(e => e.paths.filter(p => p.kind !== 'receive').length > 1).length ?? 0; return n ? ` ${plural(n, 'prefix', 'prefixes')} have equal-cost paths, which the multicast page uses to read RPF drops.` : ''; })()} Used to check that a flow left the interface the routing table says it should.`,
         'No forwarding table (CISCO-CEF-MIB). It needs CEF, which is on by default on routers and Layer 3 switches.', fib.error, 'CISCO-CEF-MIB is .1.3.6.1.4.1.9.9.492.');
       row('eigrp', 'EIGRP neighbours', eigrp.v.length, `${plural(eigrp.v.length, 'neighbour')}, ${eigrp.v.filter(p => p.level === 'ok').length} without retransmissions.`, 'No EIGRP neighbours (CISCO-EIGRP-MIB). Normal when this device does not run EIGRP.', eigrp.error, 'CISCO-EIGRP-MIB is .1.3.6.1.4.1.9.9.449.');
       row('bfd', 'BFD sessions', bfd.v.length, `${plural(bfd.v.length, 'session')}, ${bfd.v.filter(b => b.level === 'ok').length} up.`, 'No BFD sessions (CISCO-IETF-BFD-MIB). Normal when BFD is not configured.', bfd.error, 'CISCO-IETF-BFD-MIB is .1.3.6.1.4.1.9.10.137.');
@@ -274,6 +275,12 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
       row('dhcp', 'DHCP snooping bindings', dhcp.v.length, `${plural(dhcp.v.length, 'binding')}: each gives a host's MAC address, IP address, VLAN and port without needing an ARP entry.`, 'No DHCP snooping bindings (CISCO-DHCP-SNOOPING-MIB). Normal when DHCP snooping is off.', dhcp.error, 'CISCO-DHCP-SNOOPING-MIB is .1.3.6.1.4.1.9.9.380.');
       row('stack', 'Stack members and ports', stack.v?.members.length ?? 0, `${plural(stack.v?.members.length ?? 0, 'member')}, ${stack.v?.ports.filter(p => p.level === 'ok').length ?? 0} of ${stack.v?.ports.length ?? 0} stack ports up${stack.v?.problems.length ? '. ' + stack.v.problems[0] : ''}.`, 'No stack information (CISCO-STACKWISE-MIB). Normal for a switch that is not stacked.', stack.error, 'CISCO-STACKWISE-MIB is .1.3.6.1.4.1.9.9.500.');
       row('dai', 'ARP inspection drops', dai.v ? 1 : 0, dai.v && dai.v.vlans.length ? `ARP packets were dropped on ${plural(dai.v.vlans.length, 'VLAN')}.` : 'The statistics are published and no VLAN has dropped an ARP packet.', 'No ARP inspection statistics (CISCO-DYNAMIC-ARP-INSPECTION-MIB). Normal when it is not configured.', dai.error, 'CISCO-DYNAMIC-ARP-INSPECTION-MIB is .1.3.6.1.4.1.9.9.374.');
+    }
+    {
+      const ent = await attempt(() => readEntity(cl, Date.now()), null);
+      const parts = (ent.v?.chassis.length ?? 0) + (ent.v?.modules.length ?? 0);
+      out.push(parts && modelText(ent.v) ? { id: 'entity', title: 'Hardware model', group: 'hardware', state: 'ok', count: parts, detail: `${modelText(ent.v)} (${plural(parts, 'chassis or module row')}).` }
+        : { id: 'entity', title: 'Hardware model', group: 'hardware', state: 'na', count: 0, detail: ent.error ?? 'No model name (ENTITY-MIB entPhysicalModelName). FlowScope shows the model next to the device name when this is published.', hint: ent.error ? 'ENTITY-MIB is .1.3.6.1.2.1.47. Check the SNMP view of this credential includes it.' : undefined });
     }
     row('procs', 'Process CPU', procs.v?.top.length ?? 0, `The busiest of the device's processes${procs.v?.snmpOne !== null && procs.v?.snmpOne !== undefined ? `; the SNMP engine uses ${procs.v.snmpOne}% over a minute` : ''}.`, 'No per-process CPU (CISCO-PROCESS-MIB).', procs.error, 'CISCO-PROCESS-MIB is .1.3.6.1.4.1.9.9.109.');
     row('nbar', 'Application statistics (NBAR2)', nbar.v ? Object.keys(nbar.v.interfaces).length : 0, `Recognised applications on ${plural(Object.keys(nbar.v?.interfaces ?? {}).length, 'interface')}.`, 'No NBAR2 statistics (CISCO-NBAR-PROTOCOL-DISCOVERY-MIB). Normal when protocol discovery is not switched on.', nbar.error, 'CISCO-NBAR-PROTOCOL-DISCOVERY-MIB is .1.3.6.1.4.1.9.9.244.');
