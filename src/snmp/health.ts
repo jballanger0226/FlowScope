@@ -20,7 +20,9 @@ export interface Sensor {
 export interface Poe { group: number; budgetW: number | null; usedW: number | null; usedPct: number | null; allocW: number | null; remainingW: number | null; allocPct: number | null; status: 'on' | 'off' | 'faulty' | 'unknown'; portsDelivering: number; portsFault: number; portsTotal: number }
 export interface Stp { rootId: string; isRoot: boolean; rootPort: number; rootCost: number; topChanges: number | null; sinceChangeSec: number | null; blockingPorts: number; ports: number }
 export interface OspfNeighbor { id: string; address: string; state: string; level: Level }
-export interface BgpPeer { address: string; as: number | null; state: string; level: Level; admin: string; upSec: number | null; updatesIn: number | null; updatesOut: number | null }
+/** Prefixes of one address family (CISCO-BGP4-MIB cbgpPeer2AddrFamilyTable): what the peer sent that was accepted and denied, and what was sent to it */
+export interface BgpFamily { name: string; accepted: number | null; denied: number | null; advertised: number | null }
+export interface BgpPeer { address: string; as: number | null; state: string; level: Level; admin: string; upSec: number | null; updatesIn: number | null; updatesOut: number | null; families?: BgpFamily[] }
 /** An EIGRP neighbour (CISCO-EIGRP-MIB). The table lists only neighbours that have formed, so a lost one is absent, not shown down. */
 export interface EigrpPeer { as: number; address: string; ifIndex: number; holdSec: number | null; upText: string; srttMs: number | null; retrans: number | null; retries: number | null; level: Level }
 /** A BFD session (CISCO-IETF-BFD-MIB): the fast failure detector that routing protocols are often tied to. */
@@ -271,7 +273,7 @@ export async function readOspf(c: SnmpClient): Promise<OspfNeighbor[]> {
 const BGP = { state: '1.3.6.1.2.1.15.3.1.2', admin: '1.3.6.1.2.1.15.3.1.3', as: '1.3.6.1.2.1.15.3.1.9', inUp: '1.3.6.1.2.1.15.3.1.10', outUp: '1.3.6.1.2.1.15.3.1.11', time: '1.3.6.1.2.1.15.3.1.16', local: '1.3.6.1.2.1.15.2.0' };
 const BGP_STATE: Record<number, [string, Level]> = { 1: ['idle', 'bad'], 2: ['connect', 'warn'], 3: ['active', 'warn'], 4: ['open sent', 'warn'], 5: ['open confirm', 'warn'], 6: ['established', 'ok'] };
 
-export async function readBgp(c: SnmpClient): Promise<{ peers: BgpPeer[]; localAs: number | null }> {
+export async function readBgp(c: SnmpClient, cisco = true): Promise<{ peers: BgpPeer[]; localAs: number | null }> {
   const col = colsOf(c);
   const [state, admin, as, inUp, outUp, time] = await Promise.all([col(BGP.state), col(BGP.admin), col(BGP.as), col(BGP.inUp), col(BGP.outUp), col(BGP.time)]);
   const peers: BgpPeer[] = [];
@@ -280,6 +282,28 @@ export async function readBgp(c: SnmpClient): Promise<{ peers: BgpPeer[]; localA
     const a = num(admin.get(k));
     peers.push({ address: k, as: num(as.get(k)), state: st, level: a === 1 && level !== 'ok' ? 'off' : level, admin: a === 1 ? 'stop' : 'start', upSec: level === 'ok' ? num(time.get(k)) : null, updatesIn: num(inUp.get(k)), updatesOut: num(outUp.get(k)) });
   }
+  // CISCO-BGP4-MIB: prefixes per address family, and IPv6 peers that BGP4-MIB does not list. Index: address type (1 IPv4, 2 IPv6), length, address bytes, then AFI and SAFI.
+  if (cisco) try {
+    const CB = '1.3.6.1.4.1.9.9.187.1.2';
+    const [cstate, cas, fname, acc, den, adv] = await Promise.all([col(`${CB}.5.1.3`), col(`${CB}.5.1.11`), col(`${CB}.7.1.3`), col(`${CB}.8.1.1`), col(`${CB}.8.1.2`), col(`${CB}.8.1.6`)]);
+    const addrOfIdx = (k: string): { addr: string; rest: string[] } | null => {
+      const p = k.split('.').map(Number); const len = p[1]; if (p[0] !== 1 && p[0] !== 2 || !len || p.length < 2 + len) return null;
+      const b = p.slice(2, 2 + len);
+      const addr = p[0] === 1 ? b.join('.') : Array.from({ length: len / 2 }, (_, i) => ((b[2 * i]! << 8) | b[2 * i + 1]!).toString(16)).join(':');
+      return { addr, rest: p.slice(2 + len).map(String) };
+    };
+    const byAddr = new Map(peers.map(p => [p.address, p]));
+    for (const [k, v] of cstate) {
+      const a = addrOfIdx(k); if (!a || byAddr.has(a.addr)) continue;
+      const [st, level] = BGP_STATE[num(v) ?? 0] ?? ['unknown', 'off' as Level];
+      const p: BgpPeer = { address: a.addr, as: num(cas.get(k)), state: st, level, admin: 'start', upSec: null, updatesIn: null, updatesOut: null };
+      peers.push(p); byAddr.set(a.addr, p);
+    }
+    for (const [k, nm] of fname) {
+      const a = addrOfIdx(k); const p = a && byAddr.get(a.addr); if (!p) continue;
+      (p.families ??= []).push({ name: toStr(nm), accepted: num(acc.get(k)), denied: num(den.get(k)), advertised: num(adv.get(k)) });
+    }
+  } catch { /* the Cisco table is optional */ }
   let localAs: number | null = null;
   if (peers.length) { try { localAs = num((await c.get([BGP.local])).get(BGP.local)?.value); } catch { /* optional */ } }
   return { peers: peers.sort((a, b) => a.address.localeCompare(b.address, undefined, { numeric: true })), localAs };
@@ -352,7 +376,7 @@ export async function readHealth(c: SnmpClient, objectId = '', now = Date.now())
   const h = EMPTY_HEALTH(now);
   const tasks: Promise<unknown>[] = [
     readSensors(c, objectId).then(x => { h.sensors = x; }), readPoe(c).then(x => { h.poe = x; }), readStp(c).then(x => { h.stp = x; }),
-    readOspf(c).then(x => { h.ospf = x; }), readBgp(c).then(x => { h.bgp = x.peers; h.bgpLocalAs = x.localAs; })
+    readOspf(c).then(x => { h.ospf = x; }), readBgp(c, !objectId || objectId.startsWith('1.3.6.1.4.1.9.')).then(x => { h.bgp = x.peers; h.bgpLocalAs = x.localAs; })
   ];
   // vendor-specific MIBs are only asked of the vendor that publishes them
   if (objectId.startsWith('1.3.6.1.4.1.9.')) tasks.push(readEigrp(c).then(x => { h.eigrp = x; }), readBfd(c).then(x => { h.bfd = x; }));

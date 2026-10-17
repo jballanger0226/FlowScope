@@ -16,6 +16,10 @@ import { readAuthSetup } from './authsetup.js';
 import { readPoePorts, type PoePort } from './poeports.js';
 import { readConfigState } from './confighist.js';
 import { readLisp, type Lisp } from './lisp.js';
+import { readRedundancy } from './redundancy.js';
+import { readNtp } from './clock.js';
+import { readLag } from './lag.js';
+import { readUdld } from './udld.js';
 
 /** The slow optional readers. `run` returns whether the device had the table. */
 interface SlowReader { name: string; cisco: boolean; every: number; emptyEvery: number; errorEvery: number; run(c: SnmpClient, d: DeviceRow, devs: DeviceService, now: number, cisco: boolean): Promise<boolean> }
@@ -58,6 +62,10 @@ const SLOW: SlowReader[] = [
   { name: 'fib', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs) => { const f = await readFib(c); devs.saveData(d.id, 'fib', f, f?.readAt); return !!f; } },
   // Cisco extras: the busiest processes, stack health, ARP inspection drops and the applications NBAR2 recognised
   { name: 'procs', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readProcesses(c, now); devs.saveData(d.id, 'procs', x, now); return !!x; } },
+  { name: 'rf', cisco: true, every: 120_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readRedundancy(c, now); devs.saveData(d.id, 'rf', x, now); return !!x; } },
+  { name: 'ntp', cisco: false, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now, cisco) => { const x = await readNtp(c, now, cisco); devs.saveData(d.id, 'ntp', x, now); return !!x; } },
+  { name: 'lag', cisco: false, every: 120_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readLag(c); devs.saveData(d.id, 'lag', x.length ? x : null, now); return x.length > 0; } },
+  { name: 'udld', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readUdld(c); devs.saveData(d.id, 'udld', x.length ? x : null, now); return x.length > 0; } },
   { name: 'stack', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readStack(c, now); devs.saveData(d.id, 'stack', x, now); return !!x; } },
   { name: 'dai', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readDai(c, devs.data<Dai>(d.id, 'dai'), now); devs.saveData(d.id, 'dai', x, now); return !!x; } },
   { name: 'nbar', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readNbar(c, now, devs.data<Nbar>(d.id, 'nbar')); devs.saveData(d.id, 'nbar', x, now); return !!x; } }

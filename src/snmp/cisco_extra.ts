@@ -39,8 +39,9 @@ export async function readProcesses(c: SnmpClient, now = Date.now()): Promise<Pr
 /* ------------------------------------------------------------------ stack */
 
 export interface StackMember { index: number; number: number | null; role: string; state: string; level: Level; mac: string }
-export interface StackPort { ifIndex: number; status: string; level: Level; neighbor: number | null }
-export interface Stack { readAt: number; members: StackMember[]; ports: StackPort[]; /** Plain-language problems, empty when the stack is whole */ problems: string[] }
+export interface StackPort { ifIndex: number; status: string; level: Level; neighbor: number | null; /** StackWise Virtual: the physical port this link uses and the port at the other end */ name?: string; neighborName?: string }
+export interface SvlBundle { switch: number; bundle: number; status: string; level: Level }
+export interface Stack { readAt: number; members: StackMember[]; ports: StackPort[]; /** StackWise Virtual: the link bundle between the two chassis, one row per chassis */ bundles?: SvlBundle[]; svl?: boolean; /** Plain-language problems, empty when the stack is whole */ problems: string[] }
 const ROLE: Record<number, string> = { 1: 'master', 2: 'member', 3: 'not a member', 4: 'standby' };
 const SW_STATE: Record<number, [string, Level]> = { 1: ['waiting', 'warn'], 2: ['progressing', 'warn'], 3: ['added', 'warn'], 4: ['ready', 'ok'], 5: ['SDM template mismatch', 'bad'], 6: ['version mismatch', 'bad'], 7: ['feature mismatch', 'bad'], 8: ['new master initialising', 'warn'], 9: ['provisioned', 'off'], 10: ['invalid', 'bad'], 11: ['removed', 'bad'] };
 const PORT_STATE: Record<number, [string, Level]> = { 1: ['up', 'ok'], 2: ['down', 'bad'], 3: ['forced down', 'warn'] };
@@ -59,12 +60,26 @@ export async function readStack(c: SnmpClient, now = Date.now()): Promise<Stack 
   const ports: StackPort[] = [];
   for (const [k, v] of pst) { const [st, level] = PORT_STATE[num(v) ?? 0] ?? ['unknown', 'off' as Level]; ports.push({ ifIndex: Number(k), status: st, level, neighbor: num(nbr.get(k)) }); }
   ports.sort((a, b) => a.ifIndex - b.ifIndex);
+  // StackWise Virtual (two Catalyst 9500/9600 chassis as one) has no stack cables: its stack links are ordinary front-panel ports, in cswDistrStackPhyPortTable (.2.4.1: .1 name,
+  // .2 oper status, .3 neighbour port, .4 neighbour switch; index switch.bundle.ifIndex) and the bundle of them in cswDistrStackLinkBundleTable (.2.3.1.2, index switch.bundle)
+  const bundles: SvlBundle[] = [];
+  if (!ports.length) {
+    const [pn, ps, pnb, pns, bs] = await Promise.all(['1', '2', '3', '4'].map(n => col(c, `1.3.6.1.4.1.9.9.500.1.2.4.1.${n}`)).concat(col(c, '1.3.6.1.4.1.9.9.500.1.2.3.1.2')));
+    for (const [k, v] of ps!) {
+      const p = k.split('.').map(Number), [st, level] = PORT_STATE[num(v) ?? 0] ?? ['unknown', 'off' as Level];
+      ports.push({ ifIndex: p[2] ?? 0, status: st, level, neighbor: num(pns!.get(k)), name: toStr(pn!.get(k) ?? null) || undefined, neighborName: toStr(pnb!.get(k) ?? null) || undefined });
+    }
+    for (const [k, v] of bs!) { const p = k.split('.').map(Number), [st, level] = PORT_STATE[num(v) ?? 0] ?? ['unknown', 'off' as Level]; bundles.push({ switch: p[0] ?? 0, bundle: p[1] ?? 0, status: st, level }); }
+    ports.sort((a, b) => a.ifIndex - b.ifIndex);
+  }
   const problems: string[] = [];
+  const downB = bundles.filter(b => b.level !== 'ok');
+  if (downB.length) problems.push(`The StackWise Virtual link bundle is ${downB.map(b => b.status).join(' / ')} on chassis ${downB.map(b => b.switch).join(', ')}. The two chassis may be running as separate switches, with duplicate addresses on the network.`);
   const downP = ports.filter(p => p.level !== 'ok');
   if (downP.length) problems.push(`${downP.length} stack port${downP.length === 1 ? ' is' : 's are'} not up. The stack ring is broken, so traffic between members has no second path and a further failure would split the stack.`);
   for (const m of members) if (m.level === 'bad' || m.level === 'warn') problems.push(`Stack member ${m.number ?? m.index} is ${m.state}.`);
   if (!members.some(m => m.role === 'master')) problems.push('No stack member reports itself as the master.');
-  return { readAt: now, members, ports, problems };
+  return { readAt: now, members, ports, ...(bundles.length ? { bundles, svl: true } : {}), problems };
 }
 
 /* ------------------------------------------------------------------ dynamic ARP inspection */

@@ -114,3 +114,14 @@ CISCO-CONTEXT-MAPPING-MIB `cContextMappingVrfName` (.1.3.6.1.4.1.9.9.468.1.1.1.2
 ## PoE power denied, per port
 
 `pethPsePortPowerDeniedCounter` (.1.3.6.1.2.1.105.1.1.1.12, index group.port as in the Cisco PoE table) is read with the per-port PoE columns. A port whose counter went up since the previous read, within the last day, gets a "PoE denied" tag beside its name in the interface table and a red note in its PoE box. The counter is 0 on all 96 ports of the walk, so this has not been checked against a port that was really refused.
+
+## Chassis health: StackWise Virtual, supervisor redundancy, NTP, port-channels, UDLD, BGP per family, PoE negotiation (eight Catalyst walks)
+Replayed against walks of a Catalyst 9300 stack, 9500/9600 StackWise Virtual pairs, dual-supervisor chassis and routers (a tool that loads a walk as a fake SNMP client).
+- StackWise Virtual (CISCO-STACKWISE-MIB `.9.9.500.1.2.3` / `.2.4`): the pair shows 4 stack-link ports and 2 link bundles, all up. Stack-cable switches have no such rows and keep the old reader.
+- CISCO-RF-MIB (`.9.9.176.1`): active with a hot standby on the dual-supervisor chassis; a single supervisor configured for SSO shows peer disabled and non-redundant, which is a note, not a fault.
+- NTP: every device is synchronised at stratum 2 with 2 or 3 sources; one source that does not answer is reported on three devices.
+- LACP (IEEE8023-LAG-MIB): 24 channels on one chassis and 9 on another, every member collecting and distributing. Unused aggregators (zero MAC) are ignored.
+- UDLD (CISCO-UDLDP-MIB): aggressive mode with "indeterminant" (nothing heard) on unconnected ports is shown as informational, "bidirectional" as ok. Fault states are not in any walk; any other value counts as a fault.
+- BGP (CISCO-BGP4-MIB): per address family accepted, denied and advertised prefixes, including VPNv4 peers and IPv6 peers that BGP4-MIB does not list.
+- PoE (cpeExtPsePortLldpPwrReq/Alloc): requested versus granted watts per port.
+Not covered by any walk: a down StackWise Virtual bundle, a failed-over supervisor and a UDLD fault; those paths are unit-tested only.
