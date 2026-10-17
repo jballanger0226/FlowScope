@@ -903,7 +903,7 @@ function streamsPanel(dev: Dev, itf: Iface): VNode {
 /** The sections of the selected interface. Link quality is listed once something is known about it. */
 function ifTabList(dev: Dev, itf: Iface): { id: IfTab; label: string }[] {
   const t: { id: IfTab; label: string }[] = [{ id: 'traffic', label: 'Traffic and queues' }];
-  if (healthRes?.ifExtra.some(x => x.ifIndex === itf.ifIndex) || opticMap(healthRes?.health?.sensors ?? []).has(itf.ifIndex)) t.push({ id: 'quality', label: 'Link quality' });
+  if (healthRes?.ifExtra.some(x => x.ifIndex === itf.ifIndex) || itf.poe?.detected || opticMap(healthRes?.health?.sensors ?? []).has(itf.ifIndex)) t.push({ id: 'quality', label: 'Link quality' });
   if (!itf.isVlanIf) t.push({ id: 'hosts', label: 'Hosts and neighbours' });
   void dev;
   return t;
@@ -924,13 +924,14 @@ function poeLine(itf: Iface): VNode | null {
 function ifBody(dev: Dev, itf: Iface): VNode {
   const tab = ifTabNow(dev, itf);
   const body = tab === 'quality' ? [
+      poeLine(itf),
       linkQuality(healthRes?.ifExtra.find(x => x.ifIndex === itf.ifIndex), (healthRes?.health?.sensors ?? []).filter(x => x.kind === 'optic' && x.ifIndex === itf.ifIndex), itf.speedMbps),
       qualityGraphs(itf)]
     : tab === 'hosts' ? [hostsPanel(dev, itf)]
     : [classTable(itf), nbarPanel(healthRes?.extras?.nbar, itf.ifIndex),
       seriesLoading && !series ? spinner('Loading the graphs…') : seriesError ? note(seriesError, 'bad', true) : series ? graphs(series, itf) : null,
       streamsPanel(dev, itf)];
-  return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:16px' }, tab === 'traffic' ? [poeLine(itf), ...body] : body);
+  return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:16px' }, body);
 }
 
 /** The sub-tabs of the selected device. Only those with something to show are listed. */
