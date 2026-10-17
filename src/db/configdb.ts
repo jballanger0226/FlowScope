@@ -278,7 +278,10 @@ const MIGRATIONS: string[] = [
 ,
   // multicast hosts are kept per VRF; '' is the default VRF
   `ALTER TABLE mcast_members ADD COLUMN vrf TEXT NOT NULL DEFAULT '';
-   ALTER TABLE arp ADD COLUMN vrf TEXT NOT NULL DEFAULT '';`
+   ALTER TABLE arp ADD COLUMN vrf TEXT NOT NULL DEFAULT '';`,
+  // authentication sessions (802.1X, MAB): the VLAN the authentication server put each client in, and its address; replaced as a whole at each read of a device
+  `CREATE TABLE auth_sessions (dev_id INTEGER NOT NULL, mac TEXT NOT NULL, if_index INTEGER NOT NULL, vlan INTEGER NOT NULL, ip TEXT NOT NULL, policy TEXT NOT NULL, profile TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, mac, if_index));
+   CREATE INDEX auth_mac ON auth_sessions(mac);`
 ];
 
 export class ConfigDb {

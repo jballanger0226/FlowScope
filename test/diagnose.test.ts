@@ -200,7 +200,8 @@ test('Cisco tables: a switch with them passes each check with counts, and the ch
 
 test('Cisco tables: ones the device does not publish are not applicable and say why, and other vendors are not asked', async () => {
   const c = byId(await runChecks(cxDevice({}), CAT));
-  for (const id of ['fib', 'eigrp', 'bfd', 'dhcp', 'stack', 'dai', 'procs', 'nbar']) assert.equal(c[id]!.state, 'na', id);
+  for (const id of ['fib', 'eigrp', 'bfd', 'dhcp', 'auth', 'vrf', 'stack', 'dai', 'procs', 'nbar']) assert.equal(c[id]!.state, 'na', id);
+  assert.equal(c.auth!.group, 'hosts'); assert.equal(c.vrf!.group, 'routing'); assert.match(c.auth!.detail, /no port uses 802\.1X/); assert.match(c.vrf!.detail, /only the default routing table/);
   assert.match(c.eigrp!.detail, /does not run EIGRP/); assert.match(c.dhcp!.detail, /DHCP snooping is off/);
   const asked: string[] = [];
   const other = await runChecks(fake({}, [], {}, asked), { role: 'switch', cisco: false, objectId: '1.3.6.1.4.1.2636.1.1', descr: 'Juniper' });
