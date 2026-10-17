@@ -590,7 +590,7 @@ function seedFabric(app: App, id: number, net: Net, now: number): void {
   app.devices.saveData(id, 'config', { readAt: now, changedAt: now - 4_600, savedAt: now - 23_700, unsaved: true, unsavedSec: 4.6, events: [{ at: now - 86_400_000, what: 'saved', user: 'netops', via: 'remote session' }] }, now);
   const ports = ['Gi1/0/12', 'Gi1/0/14', 'Gi1/0/15', 'Gi1/0/16', 'Gi1/0/20', 'Gi1/0/24'].map(n => net.ifIdx.get('dist-sw-01|' + n)).filter((x): x is number => !!x);
   app.devices.saveData(id, 'authsetup', ports.map(ifIndex => ({ ifIndex, dot1x: true, mab: true, mode: 'multi-auth', control: 'auto', open: ifIndex !== ports[5], reauth: false })), now);
-  app.devices.saveData(id, 'poeports', ports.map((ifIndex, n) => ({ ifIndex, allocW: n % 2 ? 15.4 : 30, drawnW: n % 2 ? 4.1 : 6.3 + n, maxW: 90, detected: true })), now);
+  app.devices.saveData(id, 'poeports', ports.map((ifIndex, n) => ({ ifIndex, allocW: n % 2 ? 15.4 : 30, drawnW: n % 2 ? 4.1 : 6.3 + n, maxW: 90, detected: true, denied: n === 2 ? 4 : 0, deniedAt: n === 2 ? now - 300_000 : null })), now);
   // LISP: endpoints the node resolved, what it registered, and a day of cache movement
   const rl = ['10.255.1.7', '10.255.1.11', '10.255.0.1'];
   const hostsIn = ['10.9.0.5', '10.9.0.12', '10.9.0.30', '10.9.2.30'];

@@ -110,3 +110,7 @@ Checked against a full walk of a Catalyst 9300 SD-Access edge (`test/cisco_auth_
 ## SNMP contexts for the walk form (Cisco Catalyst 9300 walk)
 
 CISCO-CONTEXT-MAPPING-MIB `cContextMappingVrfName` (.1.3.6.1.4.1.9.9.468.1.1.1.2) is indexed by the context name spelled as length plus character codes. The walk gives vrf-BRANCH, vrf-DEVICE, vrf-GUEST, vrf-MEDIA, vrf-PCI and vrf-USER. The standard vacmContextName fallback is not in that walk and is untested on a device.
+
+## PoE power denied, per port
+
+`pethPsePortPowerDeniedCounter` (.1.3.6.1.2.1.105.1.1.1.12, index group.port as in the Cisco PoE table) is read with the per-port PoE columns. A port whose counter went up since the previous read, within the last day, gets a "PoE denied" tag beside its name in the interface table and a red note in its PoE box. The counter is 0 on all 96 ports of the walk, so this has not been checked against a port that was really refused.
