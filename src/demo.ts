@@ -516,28 +516,62 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
   const h = demoHealth(d, now);
   app.devices.saveHealth(id, h.sensors.length || h.poe.length || h.stp || h.ospf.length || h.bgp.length || h.eigrp?.length || h.bfd?.length ? h : null);
   // Cisco extras: busiest processes on the switches and routers, a stack, ARP inspection drops and application statistics
+  const MODELS: Record<string, string> = { 'dist-sw-01': 'C9300-48UXM', 'dc-spine-01': 'C9300-48UXM', 'dc-leaf-07': 'N9K-C93180YC-FX3', 'dc-leaf-11': 'N9K-C93180YC-FX3', 'core-rtr-01': 'ASR1001-X', 'wan-rtr-01': 'ISR4451-X/K9', 'br-rtr-02': 'ISR4331/K9' };
+  if (MODELS[d.name]) app.devices.saveData(id, 'entity', { readAt: now, chassis: Array.from({ length: d.name === 'dc-spine-01' ? 3 : 1 }, (_, i) => ({ index: i + 1, name: 'Switch ' + (i + 1), model: MODELS[d.name]!, descr: '', serial: 'FDO2' + (1000 + i), sw: '' })), modules: [] }, now);
   if (d.role === 'switch' || d.role === 'router') {
     const wob = Math.round(((Math.sin(now / 600_000 + id) + 1) / 2) * 3);
     app.devices.saveData(id, 'procs', { readAt: now, top: [{ name: 'linux_iosd-imag', pid: 7813, five: 9 + wob, one: 8, fiveMin: 7 }, { name: 'fed main event', pid: 6121, five: 6, one: 5, fiveMin: 5 }, { name: 'SNMP ENGINE', pid: 4172, five: 3 + wob, one: 4, fiveMin: 3 }, { name: 'IP Input', pid: 220, five: 1, one: 1, fiveMin: 1 }], snmpFive: 3 + wob, snmpOne: 4 }, now);
   }
+  if (d.name === 'dc-leaf-07') {
+    // the far end of the spine's downlink, running dense where the spine runs sparse
+    const up = ifIdx('Eth1/52') ?? 0;
+    // the same streams as the spine sees them, sent up the link; every thirteenth is not forwarded towards the spine
+    const leafRoutes = [] as any[];
+    for (let g = 0; g < 130; g++) {
+      const gi = Math.floor(g / 5), group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`;
+      leafRoutes.push({ group, source: `10.9.0.${30 + (g % 9)}`, inIfIndex: ifIdx('Eth1/12') ?? 0, upstream: null, protocol: 9, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: [], rp: null, oifs: [{ ifIndex: up, forwarding: g % 13 !== 0, pkts: 80_000 * (g + 1) }] });
+    }
+    // VLAN 310 has its SVI in a VRF, so the access ports in it (Eth1/10-12) and the hosts on them are in that VRF although the ports themselves have no VRF
+    app.devices.saveData(id, 'vrfs', [{ name: 'APPS', ifIndexes: [ifIdx('Vl310') ?? 0] }], now);
+    app.cdb.db.prepare('UPDATE device_ips SET if_index = ? WHERE dev_id = ? AND ip = ?').run(up, id, d.ip);
+    app.devices.saveMulticast(id, { readAt: now, source: 'standard', routes: leafRoutes, receivers: [], pimInterfaces: [{ ifIndex: up, mode: 'dense', dr: '10.255.1.7' }], neighbors: [{ address: '10.255.1.1', ifIndex: up }], interfaces: [{ ifIndex: up, inOctets: null, outOctets: null, inBps: 800_000_000, outBps: 30_000_000_000, ttl: null, rateLimit: null }], truncated: false });
+  }
   if (d.name === 'dc-spine-01') {
+    // a day of wrong-interface drops: quiet, a burst in the early morning, then a smaller one that is still going
+    if (!app.devices.rpfHistory(id, now - 86_400_000).length) {
+      for (let t = now - 86_400_000; t < now - 120_000; t += 120_000) { const h = (now - t) / 3_600_000; app.devices.noteRpf(id, t, 120, h > 15 && h < 17 ? 900 + Math.round(Math.sin(t / 7e5) * 300) : h < 2 ? 160 : 0, h > 15 && h < 17 ? 9 : h < 2 ? 4 : 0); }
+    }
+    app.devices.noteRpf(id, now, 60, 160, 4);
     // multicast state: video and market-data groups from a handful of encoders, receivers on both downlinks
     const e7 = ifIdx('Eth1/7') ?? 0, e9 = ifIdx('Eth1/9') ?? 0;
     const routes = [] as any[]; const receivers = [] as any[];
     for (let g = 0; g < 130; g++) {
       const gi = Math.floor(g / 5), group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`; const src = `10.9.0.${30 + (g % 9)}`;
-      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: '10.255.0.1',
+      routes.push({ group, source: src, inIfIndex: e7, upstream: '10.255.1.7', protocol: g % 11 === 0 ? 9 : 8, pkts: 90_000 * (g + 1), bps: 400_000 + g * 37_000, expirySec: 180, flags: ['sparse'], rp: g % 11 === 0 ? null : '10.255.0.1', rpf: { prefix: src.replace(/\.\d+$/, '.0'), mask: '255.255.255.0', proto: 13 }, rpfFail: g % 17 === 0 ? 120 * (g + 1) : 0, rpfNew: g % 34 === 0 ? 40 : 0,
         oifs: [{ ifIndex: e9, forwarding: g % 5 !== 0, pkts: 80_000 * (g + 1) }] });
       if (g % 3 === 0) receivers.push({ group, ifIndex: e9, lastReporter: `10.1.4.${20 + (g % 40)}`, expirySec: 200, self: false });
     }
-    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], truncated: false, interfaces: [{ ifIndex: e9, inOctets: null, outOctets: null, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: null, outOctets: null, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
+    app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }, { ifIndex: e9, mode: 'sparse-dense', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], igmpInterfaces: [{ ifIndex: e9, querier: '10.255.1.11', version: 2, queryIntervalSec: 125, querierUpSec: 5 * 86400, querierExpirySec: 240 }, { ifIndex: e7, querier: null, version: 2, queryIntervalSec: 125, querierUpSec: null, querierExpirySec: null }], rpGroups: [...new Set(routes.map((r: any) => r.group))].map((g: any, i: number) => ({ group: g, rp: i % 9 === 0 ? '10.255.1.7' : '10.255.0.1', up: true, sinceSec: 86400 })), rpSet: [], candidateRps: [], truncated: false, interfaces: [{ ifIndex: e9, inOctets: 91_000_000_000, outOctets: 1_820_000_000_000, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: 1_900_000_000_000, outOctets: 70_000_000_000, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
     // hosts collected over time from the IGMP cache: several per group on the downlink
     for (const r of receivers) app.devices.noteIgmp(id, Array.from({ length: 6 }, (_, k) => ({ group: r.group, ifIndex: r.ifIndex, reporter: `10.1.4.${20 + ((Number(r.group.split('.')[3]) + k * 7) % 40)}` })), now, false);
+    // an SD-Access style overlay VRF: one stream sent into the fabric (underlay group 232.0.2.19) and two arriving from it
+    const lisp = 9001; const mrt = (group: string, source: string, inIfIndex: number, oifs: any[], pkts: number, bps: number) => ({ group, source, inIfIndex, upstream: null, protocol: 8, pkts, bps, expirySec: 180, flags: ['sparse'], rp: null, rpf: null, oifs });
+    const vm = { readAt: now, source: 'cisco', receivers: [{ group: '239.202.29.2', ifIndex: e9, lastReporter: '10.133.47.77', expirySec: 200, self: false }], pimInterfaces: [], neighbors: [], names: { [lisp]: 'LISP0.4102' }, truncated: false,
+      routes: [mrt('239.202.29.2', '10.133.47.240', e9, [{ ifIndex: lisp, forwarding: true, pkts: 185_142, underlay: '232.0.2.19' }], 185_142, 2_400_000),
+        mrt('239.202.29.2', '10.245.201.253', lisp, [{ ifIndex: e9, forwarding: true, pkts: 90_000 }], 90_000, 1_100_000),
+        mrt('239.202.29.2', '10.245.84.248', lisp, [{ ifIndex: e9, forwarding: true, pkts: 88_000 }], 88_000, 1_000_000)] };
+    app.devices.saveData(id, 'vrfs', [{ name: 'MEDIA', ifIndexes: [e9, lisp] }], now);
+    app.devices.saveVrfMulticast(id, 'MEDIA', vm as any);
+    app.devices.noteIgmp(id, [{ group: '239.202.29.2', ifIndex: e9, reporter: '10.133.47.77' }], now, false, 'MEDIA');
+    // the underlay side: the same stream as a (local RLOC, 232.0.2.19) route in the default VRF
+    routes.push(mrt('232.0.2.19', '10.255.1.1', e7, [{ ifIndex: e7, forwarding: true, pkts: 185_142 }], 185_142, 2_400_000), mrt('232.0.2.19', '10.255.1.7', e7, [{ ifIndex: e9, forwarding: true, pkts: 90_000 }], 90_000, 1_100_000));
+    const m0 = app.devices.multicast(id)!; m0.routes = routes; app.devices.saveMulticast(id, m0);
   }
   if (d.name === 'dc-spine-01') {
     const m = (n: number, role: string) => ({ index: n * 1000, number: n, role, state: 'ready', level: 'ok', mac: `00:1c:73:01:0${n}:00` });
     app.devices.saveData(id, 'stack', { readAt: now, members: [m(1, 'master'), m(2, 'standby'), m(3, 'member')], ports: [88, 89, 191, 192, 272, 273].map((ifIndex, i) => ({ ifIndex, status: 'up', level: 'ok', neighbor: ((i + 1) % 3 + 1) * 1000 })), problems: [] }, now);
   }
+  if (d.name === 'dist-sw-01') seedFabric(app, id, net, now);
   if (d.name === 'dist-sw-01') {
     app.devices.saveData(id, 'dai', { readAt: now, dtSec: 300, vlans: [{ vlan: 140, forwarded: 290_344, dropped: 555_705, dhcpDenied: 555_705, aclDenied: 0, srcMac: 0, dstMac: 0, ip: 0, invalid: 0, droppedNow: 41 }] }, now);
     const gi = ifIdx('Gi1/0/12');
@@ -547,11 +581,35 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
   }
 }
 
+/** What an SD-Access edge node adds: RADIUS servers, per-port authentication setup, configuration state and the LISP map cache. */
+function seedFabric(app: App, id: number, net: Net, now: number): void {
+  const srv = (key: string, address: string, kind: 'radius' | 'tacacs', port: number, priority: number, o: Record<string, unknown>) => ({ key, address, kind, port, priority, up: true, stateSec: 956450, deadCount: 0, authReq: 0, authTimeouts: 0, authFail: 0, authMs: 0, acctReq: 0, acctTimeouts: 0, newReq: null, newTimeouts: null, newFail: null, newDead: null, level: 'ok', problems: [] as string[], ...o });
+  app.devices.saveData(id, 'aaa', { readAt: now, dtSec: 60, servers: [
+    srv('1.0', '10.254.185.15', 'tacacs', 49, 0, {}),
+    srv('2.1', '10.254.185.251', 'radius', 1812, 1, { authReq: 24115, authTimeouts: 77, authFail: 12, authMs: 925, acctReq: 3507, acctTimeouts: 67, deadCount: 2, newReq: 38, newTimeouts: 1, level: 'warn', problems: ['RADIUS server 10.254.185.251 did not answer 1 request since the last read.'] })] }, now);
+  app.devices.saveData(id, 'config', { readAt: now, changedAt: now - 4_600, savedAt: now - 23_700, unsaved: true, unsavedSec: 4.6, events: [{ at: now - 86_400_000, what: 'saved', user: 'netops', via: 'remote session' }] }, now);
+  const ports = ['Gi1/0/12', 'Gi1/0/14', 'Gi1/0/15', 'Gi1/0/16', 'Gi1/0/20', 'Gi1/0/24'].map(n => net.ifIdx.get('dist-sw-01|' + n)).filter((x): x is number => !!x);
+  app.devices.saveData(id, 'authsetup', ports.map(ifIndex => ({ ifIndex, dot1x: true, mab: true, mode: 'multi-auth', control: 'auto', open: ifIndex !== ports[5], reauth: false })), now);
+  // LISP: endpoints the node resolved, what it registered, and a day of cache movement
+  const rl = ['10.255.1.7', '10.255.1.11', '10.255.0.1'];
+  const hostsIn = ['10.9.0.5', '10.9.0.12', '10.9.0.30', '10.9.2.30'];
+  const entries = [...hostsIn.map((ip, i) => ({ iid: 4097, kind: 'ip', eid: ip, prefix: 32, active: true, authoritative: true, ageSec: 240 + i * 610, rlocs: [{ rloc: rl[i < 3 ? 0 : 1]!, priority: 10, weight: 10, up: true }], bytes: 0, pkts: 0 })),
+    ...Array.from({ length: 12 }, (_, i) => ({ iid: 4097, kind: 'ip', eid: `10.1.${20 + i}.${40 + i * 3}`, prefix: 32, active: i < 5, authoritative: true, ageSec: 900 + i * 700, rlocs: [{ rloc: rl[i % 2]!, priority: 10, weight: 10, up: true }], bytes: 0, pkts: 0 })),
+    { iid: 4097, kind: 'ip', eid: '10.133.0.0', prefix: 16, active: true, authoritative: true, ageSec: 5000, rlocs: [], bytes: 0, pkts: 0 }];
+  const regs = [...['10.1.4.21', '10.1.8.21', '10.1.4.33', '10.1.4.60', '10.1.7.88', '10.1.7.19'].map(eid => ({ iid: 4097, kind: 'ip', eid, prefix: 32, ageSec: 52_000 })), { iid: 4097, kind: 'ip', eid: '10.1.4.99', prefix: 32, ageSec: 7_300 }];
+  const history = Array.from({ length: 288 }, (_, i) => { const t = now - (287 - i) * 300_000; const cache = 150 + Math.round(18 * Math.sin(i / 20) + (i > 200 && i < 206 ? -60 + (i - 200) * 10 : 0)); return { t, cache, added: i % 7 === 0 ? 6 : 1, removed: i === 201 ? 58 : i % 9 === 0 ? 4 : 0 }; });
+  history[history.length - 1] = { t: now, cache: entries.length, added: 3, removed: 1 };
+  app.devices.saveData(id, 'lisp', { readAt: now, instances: [{ iid: 4097, vrf: '', cacheSize: entries.length, cacheLimit: 40448, etr: true, itr: false, pitr: true, petr: false, mapServer: false, mapResolver: false, requestsOut: 5424, repliesIn: 4081, registersOut: 282, newRequests: 12, newReplies: 12 }],
+    cache: entries, registered: regs, cacheTotal: entries.length, truncated: false, mapServers: { total: 2, down: [] }, mapResolvers: { total: 2, down: [] }, history, problems: [], level: 'ok' }, now);
+}
+
 function seedHosts(app: App, net: Net): void {
   const db = app.cdb.db; const now = Date.now(), first = now - 6 * 3600_000;
   const fdb = db.prepare(`INSERT INTO fdb(dev_id, mac, vlan, if_index, first_seen, last_seen, since) VALUES (?,?,?,?,?,?,?)
     ON CONFLICT(dev_id, mac, vlan) DO UPDATE SET last_seen = excluded.last_seen, if_index = excluded.if_index`);
   const arp = db.prepare(`INSERT INTO arp(dev_id, ip, mac, if_index, last_seen) VALUES (?,?,?,?,?) ON CONFLICT(dev_id, ip, mac) DO UPDATE SET last_seen = excluded.last_seen`);
+  // the hosts of the demo overlay VRF, read from its own ARP table
+  { const sp = net.ids.get('dc-spine-01'); if (sp) for (const [ip, m] of [['10.133.47.77', '00:50:56:aa:00:01'], ['10.133.47.240', '00:50:56:aa:00:02'], ['10.133.47.241', '00:50:56:aa:00:03']] as const) db.prepare('INSERT OR REPLACE INTO arp(dev_id, ip, mac, if_index, last_seen, vrf) VALUES (?,?,?,?,?,?)').run(sp, ip, m, net.idx('dc-spine-01', 'Eth1/9'), now, 'MEDIA'); }
   const nb = db.prepare(`INSERT OR REPLACE INTO neighbors(dev_id, if_index, proto, rem_key, rem_name, rem_port, rem_ip, kind, caps, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)`);
   const ix = (dev: string, port: string) => net.idx(dev, port);
   app.cdb.tx(() => {
@@ -559,6 +617,22 @@ function seedHosts(app: App, net: Net): void {
       const mac = hostMac(x.ip);
       fdb.run(net.ids.get(x.dev)!, mac, x.vlan, ix(x.dev, x.port), first, now, first);
       arp.run(net.ids.get(x.l3)!, x.ip, mac, ix(x.l3, 'Vl' + x.vlan), now);
+    }
+    // 802.1X / MAB sessions and security group tags on the edge switch: one host in a VLAN the server assigned, one that did not authenticate
+    { const sw = net.ids.get('dist-sw-01')!;
+      const sess = db.prepare('INSERT OR REPLACE INTO auth_sessions(dev_id, mac, if_index, vlan, ip, policy, profile, last_seen, domain, status) VALUES (?,?,?,?,?,?,?,?,?,?)');
+      const sgt = db.prepare('INSERT OR REPLACE INTO ip_sgt(dev_id, vrf, ip, sgt, source, last_seen) VALUES (?,?,?,?,?,?)');
+      db.prepare('INSERT OR REPLACE INTO sgt_names(dev_id, sgt, name) VALUES (?,?,?)').run(sw, 10, 'EMPLOYEES'); db.prepare('INSERT OR REPLACE INTO sgt_names(dev_id, sgt, name) VALUES (?,?,?)').run(sw, 74, 'DEVICE_CAMERA'); db.prepare('INSERT OR REPLACE INTO sgt_names(dev_id, sgt, name) VALUES (?,?,?)').run(sw, 30, 'DC_SERVERS');
+      const g12 = ix('dist-sw-01', 'Gi1/0/12'), g14 = ix('dist-sw-01', 'Gi1/0/14'), g15 = ix('dist-sw-01', 'Gi1/0/15'), g16 = ix('dist-sw-01', 'Gi1/0/16');
+      const m = hostMac;
+      sess.run(sw, m('10.1.4.21'), g12, 140, '10.1.4.21', 'jdoe', 'CAMPUS-USERS', now, 'data', 'authorized'); sgt.run(sw, '', '10.1.4.21', 10, 'authenticated', now);
+      sess.run(sw, m('10.1.8.21'), g12, 160, '10.1.8.21', 'SEP00505601080015', 'CAMPUS-VOICE', now, 'voice', 'authorized');
+      sess.run(sw, m('10.1.4.33'), g14, 140, '10.1.4.33', 'asmith', 'CAMPUS-USERS', now, 'data', 'authorized'); sgt.run(sw, '', '10.1.4.33', 10, 'authenticated', now);
+      sess.run(sw, m('10.1.4.60'), g15, 0, '10.1.4.60', '', '', now, 'unknown', 'idle');
+      // a camera whose port is configured for VLAN 140 but whose authentication assigned VLAN 150
+      fdb.run(sw, m('10.1.7.140'), 150, g16, first, now, first); arp.run(sw, '10.1.7.140', m('10.1.7.140'), ix('dist-sw-01', 'Vl150'), now);
+      sess.run(sw, m('10.1.7.140'), g16, 150, '10.1.7.140', 'cam-lobby-2', 'CAMPUS-WIFI', now, 'data', 'authorized'); sgt.run(sw, '', '10.1.7.140', 74, 'authenticated', now);
+      for (const ip of ['10.9.0.5', '10.9.0.12', '10.9.0.30', '10.9.2.30']) sgt.run(sw, '', ip, 30, 'authenticated', now);
     }
     for (const [sw, port, ip] of LEARNED_VIA) fdb.run(net.ids.get(sw)!, hostMac(ip), HOSTS.find(h => h.ip === ip)!.vlan, ix(sw, port), first, now, first);
     for (const [key, [proto, name, port, kind, caps]] of Object.entries(NEIGHBORS)) {
@@ -605,6 +679,21 @@ export async function startDemo(app: App): Promise<void> {
   app.log.info('demo', 'Demo mode: traffic and SNMP counters are simulated. Nothing here comes from your network.');
   let tick = 0;
   const every = (ms: number, fn: () => Promise<void>) => { const t = setInterval(() => { void fn().catch(e => app.log.error('demo', String(e))); }, ms); t.unref(); };
+  // IGMP version 2 membership reports as the spine exports them: three hosts per group also found over SNMP, one that only NetFlow sees, and version 3 reports
+  const igmpFlows = async (): Promise<void> => {
+    const spine = DEVS.find(d => d.name === 'dc-spine-01'), e9 = net.idx('dc-spine-01', 'Eth1/9'); if (!spine || !e9) return;
+    const t = Date.now(), recs: FlowRecord[] = [];
+    const rec = (src: string, dst: string, ago: number): FlowRecord => ({ ts0: t - ago, ts1: t - ago, exporter: spine.ip, inIf: e9, outIf: 0, srcIp: src, dstIp: dst, proto: 2, sport: 0, dport: 0, flags: 0, tos: 0xc0, postTos: null, ttlMin: 1, ttlMax: 1, bytes: 32, pkts: 1, srcMac: hostMac(src), dstMac: null, vlan: 140, natSrcIp: null, natDstIp: null, natSport: null, natDport: null, nextHop: null, sampling: 1 });
+    for (let gi = 0; gi < 26; gi += 2) {
+      const group = `239.${10 + (gi % 4)}.${20 + Math.floor(gi / 4)}.${30 + (gi % 7)}`, last = Number(group.split('.')[3]);
+      for (let k = 0; k < 3; k++) recs.push(rec(`10.1.4.${20 + ((last + k * 7) % 40)}`, group, 20_000 + k * 9_000));
+      recs.push(rec('10.1.4.99', group, 40_000));
+    }
+    for (let i = 150; i < 156; i++) recs.push(rec(`10.1.4.${i}`, '224.0.0.22', 30_000));
+    await app.store.insertFlows(recs);
+  };
+  await igmpFlows();
+  every(60_000, igmpFlows);
   // new sessions every few seconds while flow collection is on
   every(5000, async () => {
     if (!app.collect().flow) return;

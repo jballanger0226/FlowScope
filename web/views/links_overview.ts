@@ -12,7 +12,7 @@ export function attentionPanel(all: Issue[], go: (t: Target) => void): VNode {
     h('div', { class: 'row', style: 'gap:8px' }, h('b', null, 'Needs attention'), chip(String(all.length), all.some(i => i.level === 'bad') ? 'bad' : 'warn')),
     h('ul', { class: 'col', style: 'gap:6px;list-style:none;padding:0;margin:0' }, shown.map((i, n) => h('li', { key: n, class: 'row', style: 'flex-wrap:nowrap;gap:10px;justify-content:space-between;border:1px solid var(--line);border-radius:8px;padding:8px 12px' },
       h('div', { class: 'row', style: 'flex-wrap:nowrap;align-items:flex-start;gap:10px;min-width:0' }, chip(i.level === 'bad' ? 'Problem' : 'Warning', i.level), h('div', { class: 'col', style: 'gap:2px;min-width:0' }, h('span', { style: 'font-weight:600' }, i.title), i.detail ? h('span', { class: 'muted', style: 'font-size:12px' }, i.detail) : null)),
-      i.target ? h('span', { style: 'flex:none' }, btn(`Open ${TAB_NAME[i.target.tab]}`, { small: true, kind: 'ghost', onclick: () => go(i.target!) })) : null))),
+      i.target ? h('span', { style: 'flex:none' }, btn(i.target.multicast ? 'Open multicast' : `Open ${TAB_NAME[i.target.tab]}`, { small: true, kind: 'ghost', onclick: () => go(i.target!) })) : null))),
     all.length > shown.length ? h('span', { class: 'muted', style: 'font-size:12px' }, `${all.length - shown.length} more are listed in the tabs below.`) : null);
 }
 

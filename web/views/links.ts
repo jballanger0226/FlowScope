@@ -7,6 +7,7 @@ import { post } from '../api.js';
 import { correlate, verdict } from './correlate.js';
 import { attentionPanel, cards, cardsRow, issues, type Target } from './links_overview.js';
 import { hardwarePanel, hasHardware, hasOptics, linkQuality, nbarPanel, opticCell, opticMap, protocolsPanel, type HealthRes } from './links_health.js';
+import { lispPanel, type LispView } from './lisp.js';
 import { publicAddresses } from './ip_scope.js';
 import { neighborLines, openPort, KIND_TEXT, type Neighbor } from '../neighbors.js';
 
@@ -16,11 +17,11 @@ interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: nu
 interface Iface {
   mac: string; addresses: string[];
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
-  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number;
+  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[]; authSetup?: { methods: string; mode: string; open: boolean; control: string };
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
-interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; resources: Resources | null; interfaces: Iface[] }
+interface Dev { id: number; name: string; ip: string; role: string; hasWlan: boolean; status: string; lastOk: number | null; lastError: string | null; profile: string; model?: string; rpfNow?: { routes: number; drops: number; top: string } | null; qosNote: string | null; hostsAt: number | null; hostsNote: string | null; resources: Resources | null; interfaces: Iface[] }
 interface Overview { devices: Dev[]; windowMinutes: number; thresholds: { util: number; drop: number; mcast: number; priority: number }; mibs: { name: string; what: string }[] }
 interface SeriesRes {
   util: { step: number; points: { ts: number; utilIn: number; utilOut: number; inBps: number; outBps: number; disc: number; err: number }[] };
@@ -28,7 +29,7 @@ interface SeriesRes {
   step: number; tier: string;
 }
 interface Wifi { name: string; os: string; ssid: string; ap: string; radio: number | null; band: string; channel: string; snr: number; txRate: number; rxRate: number; txBytes: number; rxBytes: number; uptimeSec: number; readAt: number }
-interface PortHost { mac: string; vlan: number; vlanName: string; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean; wifi: Wifi | null }
+interface PortHost { sgt?: { value: number; name: string } | null; auth?: { user: string; vlan: number; authenticated: boolean } | null; vrf?: string; mac: string; vlan: number; vlanName: string; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean; wifi: Wifi | null }
 interface WlanAp { mac: string; name: string; ip: string; serial: string; model: string; cpuPct: number; memFree: number; memTotal: number; uptimeSec: number; role: string }
 interface WlanRadio { apMac: string; idx: number; mac: string; channel: string; band: string; txPower: number; noiseFloor: number; util4: number; util64: number; clients: number; mode: string; up: boolean }
 interface WlanSsid { apMac: string; bssid: string; name: string; radio: number | null; ssidId: number | null; clients: number; ifName: string | null }
@@ -48,7 +49,9 @@ let ifSearch = '';
 let hostsRes: HostsRes | null = null; let hostsLoading = false; let hostsError = '';
 let findQ = ''; let found: Located | null = null; let findError = ''; let finding = false;
 let readingHosts = false; let readMsg = '';
-interface ArpRow { ip: string; mac: string; ifIndex: number; ifName: string; lastSeen: number }
+interface ArpRow { ip: string; mac: string; ifIndex: number; ifName: string; lastSeen: number; vrf?: string }
+interface VrfView { name: string; context: string; interfaces: { ifIndex: number; name: string }[]; ports?: { ifIndex: number; name: string; vlan: number }[]; hosts: number; hostsReadAt: number | null; multicast: { routes: number; groups: number; forwarding: number; readAt: number; stale: boolean } | null }
+let vrfRes: VrfView[] | null = null;
 let arpRes: { rows: ArpRow[]; readAt: number | null } | null = null; let arpQ = '';
 let nbRes: NbRes | null = null; let nbError = ''; let nbLoading = false;
 let wlan: WlanRes | null = null; let wlanError = ''; let wlanLoading = false; let clientFilter = '';
@@ -121,12 +124,19 @@ function select_(d: number, i: number, tab?: DevTab): void {
   if (d !== prevDev) { devTab = 'overview'; graphZoom = null; resZoom = null; quality = null; }
   if (tab) devTab = tab;
   devId = d; ifIndex = i; series = null; quality = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
-  if (d !== prevDev) { arpRes = null; arpQ = ''; void loadArp(); nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); ifCpu = null; void loadResHist(); healthRes = null; void loadHealth(); }
+  if (d !== prevDev) { arpRes = null; arpQ = ''; void loadArp(); vrfRes = null; void loadVrfs(); nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); ifCpu = null; void loadResHist(); healthRes = null; lispRes = null; void loadHealth(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
 }
 
+let lispRes: LispView | null = null; let lseq2 = 0;
+async function loadLisp(): Promise<void> {
+  if (!devId) return;
+  const my = ++lseq2, d = devId;
+  try { const r = await get<{ lisp: LispView | null }>('/api/links/lisp' + qs({ dev: d })); if (my === lseq2 && d === devId) lispRes = r.lisp; } catch { if (my === lseq2) lispRes = null; }
+  if (my === lseq2) redraw();
+}
 let healthRes: HealthRes | null = null; let healthLoading = false;
 let hlseq = 0;
 async function loadHealth(quiet = false): Promise<void> {
@@ -134,7 +144,7 @@ async function loadHealth(quiet = false): Promise<void> {
   const my = ++hlseq, d = devId; if (!quiet) healthLoading = true;
   try {
     const r = await get<HealthRes>('/api/links/health' + qs({ dev: d }));
-    if (my === hlseq && d === devId) healthRes = r;
+    if (my === hlseq && d === devId) { healthRes = r; if (r.extras?.lisp) void loadLisp(); else lispRes = null; }
   } catch { if (my === hlseq && !quiet) healthRes = null; }
   if (my === hlseq) { healthLoading = false; redraw(); }
 }
@@ -215,6 +225,13 @@ async function loadStreams(): Promise<void> {
   streamsLoading = false; redraw();
 }
 
+let vseq = 0;
+async function loadVrfs(): Promise<void> {
+  if (!devId) return;
+  const my = ++vseq, d = devId;
+  try { const r = await get<{ vrfs: VrfView[] }>('/api/links/vrfs' + qs({ dev: d })); if (my === vseq && d === devId) vrfRes = r.vrfs; } catch { if (my === vseq) vrfRes = null; }
+  if (my === vseq) redraw();
+}
 let aseq = 0;
 async function loadArp(): Promise<void> {
   if (!devId) return;
@@ -331,10 +348,20 @@ const vlanIn = (list: string, v: number) => !!list && (list === 'all' || list.sp
 const vlanLabel = (id: number | null, name: string) => (id ? (name ? `${id} ${name}` : String(id)) : '');
 
 /** Words describing the VLAN(s) of a port, shown in the table and searched by the box above it. */
+/** The VRF of an interface: its own for an SVI or a routed port, otherwise that of the SVI of the VLAN it is in. */
+const vrfNote = (i: Iface): VNode | null => (i.vrf ? h('span', { class: 'dim', style: 'font-size:11px', title: i.vrfVia === 'interface' ? 'This interface is in the VRF' : i.vrfVia === 'vlans' ? 'The VLANs this trunk carries have their SVI in these VRFs' : "A port has no VRF of its own: the VRF is that of the SVI of the VLAN it is in" }, `${i.vrfVia === 'vlans' ? 'carries VRF ' : 'VRF '}${i.vrf}${i.vrfVia === 'vlan' ? ' (by VLAN)' : ''}`) : null);
 function vlanCell(i: Iface): VNode {
+  const base = vlanCellBase(i), v = vrfNote(i), a = i.authSetup;
+  const au = a ? h('span', { class: 'dim', style: 'font-size:11px', title: `This port authenticates its clients: ${a.methods}, host mode ${a.mode}, port control ${a.control}${a.open ? '. Open mode: clients get network access before they authenticate.' : ''}` }, `${a.methods} · ${a.mode}${a.open ? ' · open' : ''}`) : null;
+  return v || au ? h('span', { class: 'col', style: 'gap:1px' }, base, v, au) : base;
+}
+function vlanCellBase(i: Iface): VNode {
   if (i.isVlanIf || i.portMode === 'svi') return h('span', { class: 'muted' }, i.vlan ? `SVI for VLAN ${vlanLabel(i.vlan, i.vlanName)}` : 'SVI');
   if (i.portMode === 'trunk') return h('span', { class: 'col', style: 'gap:1px' }, h('span', null, h('span', { class: 'tag' }, 'trunk'), i.vlan ? ` native ${vlanLabel(i.vlan, i.vlanName)}` : ''), i.vlanList ? h('span', { class: 'dim mono', style: 'font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: `Allowed VLANs: ${i.vlanList}` }, `allowed ${i.vlanList}`) : null);
   if (i.portMode === 'routed') return h('span', { class: 'muted' }, 'routed port');
+  if (i.opVlans?.length) return h('span', { class: 'col', style: 'gap:1px' },
+    h('span', { title: 'Hosts on this port are in a different VLAN than the one configured, which is what an authenticating port (802.1X / MAB, VLAN from RADIUS) does' }, i.opVlans.map((o, n) => h('span', { style: 'font-weight:600' }, (n ? ', ' : '') + vlanLabel(o.vlan, o.name))), ' ', h('span', { class: 'tag' }, 'dynamic')),
+    h('span', { class: 'dim', style: 'font-size:11px' }, `configured ${vlanLabel(i.vlan, i.vlanName)}`), i.voiceVlan ? h('span', { class: 'dim', style: 'font-size:11px' }, `voice ${vlanLabel(i.voiceVlan, i.voiceVlanName)}`) : null);
   if (i.vlan) return h('span', { class: 'col', style: 'gap:1px' }, h('span', { style: 'font-weight:600' }, vlanLabel(i.vlan, i.vlanName)), i.voiceVlan ? h('span', { class: 'dim', style: 'font-size:11px' }, `voice ${vlanLabel(i.voiceVlan, i.voiceVlanName)}`) : null);
   return h('span', { class: 'dim' }, '—');
 }
@@ -347,7 +374,7 @@ function termMatches(i: Iface, raw: string): boolean {
   if (!t) return true;
   if (/^\d{1,4}$/.test(t)) {
     const n = Number(t);
-    if (i.vlan === n || i.voiceVlan === n || (i.portMode === 'trunk' && vlanIn(i.vlanList, n))) return true;
+    if (i.vlan === n || i.voiceVlan === n || i.opVlans?.some(o => o.vlan === n) || (i.portMode === 'trunk' && vlanIn(i.vlanList, n))) return true;
     if (vlanOnly) return false;
     return i.name.split(/\D+/).includes(t) || i.alias.split(/\D+/).includes(t);
   }
@@ -426,8 +453,8 @@ function arpPanel(dev: Dev): VNode | null {
   const rows = arpRes?.rows ?? [];
   if (!rows.length && dev.role !== 'router' && dev.role !== 'firewall') return null;
   const q = arpQ.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const shown = rows.filter(r => !q.length || q.every(t => `${r.ip} ${r.mac} ${r.ifName}`.toLowerCase().includes(t)));
-  const cols = 'minmax(150px,1.2fr) 150px minmax(110px,1fr) 110px';
+  const shown = rows.filter(r => !q.length || q.every(t => `${r.ip} ${r.mac} ${r.ifName} ${r.vrf ?? ''}`.toLowerCase().includes(t)));
+  const anyVrf = rows.some(r => r.vrf), cols = anyVrf ? 'minmax(150px,1.2fr) 150px minmax(110px,1fr) 110px 110px' : 'minmax(150px,1.2fr) 150px minmax(110px,1fr) 110px';
   return h('div', { class: 'col', style: 'gap:8px' },
     h('div', { class: 'row', style: 'justify-content:space-between' },
       h('div', { class: 'col', style: 'gap:2px' }, h('b', null, 'ARP and neighbour cache'),
@@ -435,12 +462,34 @@ function arpPanel(dev: Dev): VNode | null {
           : `${dev.name} has not returned any ARP entries. Use "Read tables now", or "Check what this device publishes" on the SNMP devices tab to see whether it publishes IP-MIB.`)),
       rows.length > 8 ? textInput(arpQ, v => { arpQ = v; redraw(); }, { placeholder: 'Search address, MAC or interface', aria: 'Search the ARP cache', width: '260px' }) : null),
     rows.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:560px` },
-      h('div', { class: 'tr head' }, ...['IP address', 'MAC address', 'Interface', 'Last seen'].map(t => h('span', null, t))),
-      h('div', { class: 'scroll', style: 'max-height:360px' }, shown.map(r => h('div', { key: r.ip + r.mac + r.ifIndex, class: 'tr' },
+      h('div', { class: 'tr head' }, ...['IP address', 'MAC address', 'Interface', ...(anyVrf ? ['VRF'] : []), 'Last seen'].map(t => h('span', null, t))),
+      h('div', { class: 'scroll', style: 'max-height:360px' }, shown.map(r => h('div', { key: (r.vrf ?? '') + r.ip + r.mac + r.ifIndex, class: 'tr' },
         h('span', { class: 'mono', style: 'font-size:12px' }, r.ip), h('span', { class: 'mono', style: 'font-size:12px' }, r.mac),
         r.ifName ? h('button', { type: 'button', class: 'lnk', style: 'text-align:left', onclick: () => select_(dev.id, r.ifIndex, 'interfaces') }, r.ifName) : h('span', { class: 'dim' }, '—'),
+        ...(anyVrf ? [r.vrf ? h('span', { class: 'mono', style: 'font-size:12px' }, r.vrf) : h('span', { class: 'dim', title: 'The default VRF' }, 'default')] : []),
         h('span', { class: 'muted' }, ago(r.lastSeen))))),
       !shown.length ? empty('No entry matches that search.') : null)) : null);
+}
+
+/** The VRFs a device has: what is in each, and the way into its multicast table. Each is read in its own SNMP context (vrf-<name>). */
+function vrfPanel(dev: Dev): VNode | null {
+  const v = vrfRes ?? [];
+  if (!v.length) return null;
+  const cols = 'minmax(110px,0.8fr) minmax(200px,2fr) 90px minmax(170px,1.4fr)';
+  return h('div', { class: 'col', style: 'gap:8px' },
+    h('div', { class: 'col', style: 'gap:2px' }, h('b', null, `VRFs on ${dev.name}`),
+      h('span', { class: 'muted', style: 'font-size:12px' }, `${num(v.length)} VRF${v.length === 1 ? '' : 's'} (MPLS-L3VPN-STD-MIB). Hosts and multicast of a VRF are read in the SNMP context named vrf-<name>; a VRF with no multicast shown has no context set up for this credential, or no multicast routing.`)),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:620px` },
+      h('div', { class: 'tr head' }, ...['VRF', 'Interfaces', 'Hosts (ARP)', 'Multicast'].map(t => h('span', null, t))),
+      v.map(x => h('div', { key: x.name, class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12.5px', title: `SNMP context ${x.context}` }, x.name),
+        h('span', { class: 'col', style: 'gap:4px' },
+          h('span', { class: 'row', style: 'gap:4px 8px;flex-wrap:wrap' }, x.interfaces.slice(0, 8).map(i => h('button', { type: 'button', class: 'lnk mono', style: 'font-size:12px', title: `Open ${i.name}`, onclick: () => select_(dev.id, i.ifIndex, 'interfaces') }, i.name)),
+            x.interfaces.length > 8 ? h('span', { class: 'dim', style: 'font-size:12px' }, `+${num(x.interfaces.length - 8)} more`) : null),
+          x.ports?.length ? h('span', { class: 'dim', style: 'font-size:12px', title: x.ports.map(p => `${p.name} (VLAN ${p.vlan})`).join(', ') }, `${num(x.ports.length)} access port${x.ports.length === 1 ? '' : 's'} in its VLANs: ${x.ports.slice(0, 4).map(p => p.name).join(', ')}${x.ports.length > 4 ? '…' : ''}`) : null),
+        h('span', { class: x.hosts ? 'mono' : 'dim' }, x.hosts ? num(x.hosts) : 'none read'),
+        x.multicast ? h('button', { type: 'button', class: 'lnk', style: 'text-align:left', title: `Open the multicast table of VRF ${x.name}`, onclick: () => go('multicast', { dev: dev.id, vrf: x.name }) }, `${num(x.multicast.groups)} ${x.multicast.groups === 1 ? 'group' : 'groups'}, ${num(x.multicast.forwarding)} forwarding`)
+          : h('span', { class: 'dim' }, 'not read'))))));
 }
 
 function neighborsPanel(dev: Dev): VNode {
@@ -507,7 +556,7 @@ function hostsPanel(dev: Dev, itf: Iface): VNode {
         wifiCols ? h('span', null, x.wifi ? [x.wifi.name || '—', x.wifi.os ? h('span', { class: 'dim', style: 'font-size:12px' }, ' · ' + x.wifi.os) : null] : h('span', { class: 'dim' }, '—')) : null,
         h('span', { class: 'mono', style: 'font-size:12px' }, x.mac), h('span', { class: 'mono', style: 'font-size:12px' }, x.ips.join(', ') || '—'),
         wifiCols ? (x.wifi ? h('span', { style: 'font-size:12px' }, `${x.wifi.ssid || 'Wi-Fi'} · ${bandText(x.wifi.band, x.wifi.channel)} · `, snrTag(x.wifi.snr)) : h('span', { class: 'dim' }, '—')) : null,
-        h('span', null, vlanLabel(x.vlan, x.vlanName) || '—'), h('span', { class: 'muted', style: 'font-size:12px' }, dayClock(x.firstSeen)),
+        h('span', { class: 'col', style: 'gap:1px' }, h('span', null, vlanLabel(x.vlan, x.vlanName) || '—'), x.vrf ? h('span', { class: 'dim', style: 'font-size:11px', title: "The VRF of the SVI of this VLAN" }, `VRF ${x.vrf}`) : null, x.sgt ? h('span', { class: 'dim', style: 'font-size:11px', title: 'The security group tag (TrustSec) the switch applies to this host' }, `SGT ${x.sgt.value}${x.sgt.name ? ' ' + x.sgt.name : ''}`) : null, x.auth ? h('span', { class: x.auth.authenticated ? 'dim' : 'warn', style: 'font-size:11px', title: x.auth.authenticated ? 'Authenticated on this port (802.1X / MAB) as this user name' + (x.auth.vlan ? '' : ' (no VLAN from the server, so the port VLAN applies)') : 'The switch saw this client but it has not authenticated (no policy was applied)' }, x.auth.authenticated ? x.auth.user || 'authenticated' : 'not authenticated') : null), h('span', { class: 'muted', style: 'font-size:12px' }, dayClock(x.firstSeen)),
         h('span', { class: x.active ? 'muted' : 'dim', style: 'font-size:12px' }, x.active ? ago(x.lastSeen) : 'gone ' + ago(x.lastSeen)),
         h('span', { class: 'row', style: 'gap:4px;flex-wrap:nowrap' },
           btn('Explorer', { small: true, kind: 'ghost', title: `Flows with ${x.ips[0] || x.mac} in Flow explorer`, aria: `Flow explorer for ${x.ips[0] || x.mac}`, onclick: () => go('explorer', { q: x.ips[0] ? 'ip:' + x.ips[0] : 'mac:' + x.mac, range: '1h' }) }),
@@ -704,6 +753,12 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
   const clsUtil: Series[] = speedBps > 0 ? mk(p => 100 * p.sentBps / speedBps) : [];
   const peak = (c: SeriesRes['classes'][0]) => Math.max(0, ...c.points.map(p => p.dropPct));
   const dropTs = [...new Set(s.classes.flatMap(c => c.points.filter(p => p.dropPps > 0 || p.dropPct > 0).map(p => p.ts)))];
+  // drops of the whole interface, which exist with or without a service policy; each queue class that dropped something adds its own line
+  const stepSec = Math.max(1, s.step / 1000);
+  const discSeries: Series = { name: 'Interface discards', color: 'var(--bad)', points: s.util.points.map(p => ({ t: p.ts, v: p.disc / stepSec })) };
+  const classDrops: Series[] = shown.filter(c => c.points.some(p => p.dropPps > 0)).map(c => ({ name: c.cls, color: classColor(c.cls, names), points: c.points.map(p => ({ t: p.ts, v: p.dropPps })) }));
+  const discPeriods: { a: number; b: number; pkts: number }[] = [];
+  for (const p of s.util.points) if (p.disc > 0) { const l = discPeriods[discPeriods.length - 1]; if (l && p.ts - l.b <= s.step * 1.5) { l.b = p.ts; l.pkts += p.disc; } else discPeriods.push({ a: p.ts, b: p.ts, pkts: p.disc }); }
   const match = cpuMatch([{ kind: 'Queue drops', ts: dropTs }, { kind: 'Discards', ts: s.util.points.filter(p => p.disc > 0).map(p => p.ts) }], from, to, fmtT);
   return h('div', { class: 'col', style: 'gap:14px' },
     h('div', { class: 'row end' },
@@ -714,7 +769,7 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
       s.classes.map(c => h('button', { key: c.cls, type: 'button', class: 'cbtn', 'aria-pressed': !hidden.has(c.cls), onclick: () => { if (hidden.has(c.cls)) hidden.delete(c.cls); else hidden.add(c.cls); redraw(); } },
         h('i', { class: 'sw', style: `background:${classColor(c.cls, names)};margin:0` }), h('span', null, c.cls), h('span', { class: 'dim' }, 'peak ' + pct(peak(c), 2))))) : null,
     match.note,
-    chartGrid((names.length ? 4 : 2) + (match.chart ? 1 : 0), size => [
+    chartGrid(3 + (names.length ? 2 : 0) + (match.chart ? 1 : 0), size => [
       lineChart({
         ...size, sync: 'iface', onZoom: zoomIf, title: 'Utilisation (% of line speed)', unit: v => v.toFixed(0) + '%', yMax: Math.max(100, ...s.util.points.map(p => Math.max(p.utilIn, p.utilOut)), ...clsUtil.flatMap(c => c.points.map(p => p.v))), threshold: data?.thresholds.util, from, to, fmtT, fmtV: v => pct(v, 1),
         series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilIn })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.utilOut })) }, ...clsUtil], aria: `Utilisation of ${itf.name}, with each queue class`
@@ -723,13 +778,19 @@ function graphs(s: SeriesRes, itf: Iface): VNode {
         ...size, sync: 'iface', onZoom: zoomIf, title: 'Throughput (bits per second)', unit: bpsAxis, fmtV: bps, yMax: niceCeil(Math.max(1000, ...s.util.points.map(p => Math.max(p.inBps, p.outBps)), ...mk(p => p.sentBps).flatMap(c => c.points.map(p => p.v)))), from, to, fmtT,
         series: [{ name: 'In', color: 'var(--s3)', points: s.util.points.map(p => ({ t: p.ts, v: p.inBps })) }, { name: 'Out', color: 'var(--s1)', points: s.util.points.map(p => ({ t: p.ts, v: p.outBps })) }, ...mk(p => p.sentBps)], aria: `Throughput of ${itf.name} in bits per second, with each queue class`
       }),
+      lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Packets dropped (per second)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '/s', series: [discSeries, ...classDrops], from, to, bands, fmtT, fmtV: v => (v < 10 ? v.toFixed(2) : v.toFixed(0)) + ' pkts/s', aria: `Packets dropped on ${itf.name}: the interface as a whole and each queue class that dropped` }),
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Packets dropped (% of the class)', unit: v => (v < 10 ? v.toFixed(1) : v.toFixed(0)) + '%', series: mk(p => p.dropPct), from, to, threshold: dropThr, bands, fmtT, fmtV: v => pct(v, 2), aria: `Drop percentage per class on ${itf.name}` }) : null,
       names.length ? lineChart({ ...size, sync: 'iface', onZoom: zoomIf, title: 'Bytes dropped (per second)', unit: v => bytes(v) + '/s', series: mk(p => p.dropBps / 8), from, to, bands, fmtT, aria: `Bytes dropped per class on ${itf.name}` }) : null,
       match.chart ? match.chart.build(size) : null
     ]),
-    h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Utilisation and throughput also draw a line for each queue class that is switched on above (what the class sent). Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
+    h('div', { class: 'legendrow' }, h('span', null, h('i', { class: 'sw', style: 'background:var(--s3)' }), 'In'), h('span', null, h('i', { class: 'sw', style: 'background:var(--s1)' }), 'Out'), h('span', null, 'Utilisation and throughput also draw a line for each queue class that is switched on above (what the class sent). Packets dropped starts from the interface\'s own discards, with a line for each class that dropped. Shaded bands mark periods when a shown class was above the threshold, on every graph. Percentages and bytes come from the same SNMP counter deltas at each poll.')),
     h('div', { class: 'col', style: 'gap:6px' },
       h('b', null, 'Drop events above the threshold'),
+      !names.length ? (discPeriods.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:150px 210px 90px 1fr;--w:640px' }, discPeriods.slice(-30).reverse().map((e, i) => h('div', { key: i, class: 'tr' },
+        h('span', null, h('i', { class: 'sw', style: 'background:var(--bad)' }), 'Interface discards'),
+        h('span', { class: 'mono', style: 'font-size:12px' }, `${dayClock(e.a)} → ${clock(e.b + s.step)}`), h('span', { class: 'muted' }, dur(e.b - e.a + s.step)),
+        h('span', { class: 'muted' }, `${num(e.pkts)} packets discarded`)))))
+        : h('span', { class: 'dim' }, 'No packets were discarded on this interface in this window (it has no queue classes, so only its own discard counters are shown).')) :
       evs.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:150px 210px 90px 110px 1fr;--w:760px' }, evs.slice(0, 30).map((e, i) => h('div', { key: i, class: 'tr' },
         h('span', null, h('i', { class: 'sw', style: `background:${classColor(e.cls, names)}` }), e.cls),
         h('span', { class: 'mono', style: 'font-size:12px' }, `${dayClock(e.a)} → ${clock(e.b + s.step)}`), h('span', { class: 'muted' }, dur(e.b - e.a + s.step)),
@@ -877,6 +938,7 @@ function devTabs(dev: Dev, tab: DevTab): VNode {
 }
 /** Jump to what an Overview item is about: its tab, and for an interface problem the interface and the section with the detail. */
 function openTarget(dev: Dev, t: Target): void {
+  if (t.multicast) { go('multicast', { dev: dev.id, t: 'rpf' }); return; }
   if (t.ifIndex !== undefined) { if (t.section) ifTab = t.section; select_(dev.id, t.ifIndex, t.tab); } else { devTab = t.tab; redraw(); }
   window.scrollTo({ top: 0 });
 }
@@ -895,7 +957,7 @@ function tabBody(dev: Dev, tab: DevTab): VNode {
   const body = tab === 'overview' ? overviewPanel(dev)
     : tab === 'interfaces' ? ifTable(dev)
     : tab === 'hardware' ? hardwareTab(dev)
-    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes, ifName: i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? '' }), arpPanel(dev), neighborsPanel(dev))
+    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes, ifName: i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? '' }), lispPanel(lispRes, i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? ''), vrfPanel(dev), arpPanel(dev), neighborsPanel(dev))
     : wlanPanel(dev);
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:14px' }, body);
 }
@@ -912,7 +974,7 @@ export function render(): VNode {
     h('div', { class: 'mainp' },
       dev ? h('section', { 'aria-label': 'Selected device', class: 'panel col', style: 'gap:14px' },
         h('div', { class: 'row', style: 'justify-content:space-between' },
-          h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, dev.name), h('span', { class: 'muted' }, `${roleLabel(dev.role)} · ${dev.ip} · ${dev.profile || 'generic'} · last answered ${ago(dev.lastOk)}`)),
+          h('div', { class: 'col', style: 'gap:4px' }, h('h3', { style: 'font-size:17px' }, dev.name), h('span', { class: 'muted' }, `${roleLabel(dev.role)} · ${dev.ip} · ${dev.model ? dev.model + ' · ' : ''}${dev.profile || 'generic'} · last answered ${ago(dev.lastOk)}`)),
           btn('Edit in SNMP devices', { kind: 'ghost', small: true, onclick: () => go('devices', { id: dev.id }) })),
         dev.status !== 'ok' && dev.lastError ? note(`The last poll failed: ${dev.lastError}`, 'warn') : null,
         devTabs(dev, tab),

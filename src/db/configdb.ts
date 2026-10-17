@@ -270,8 +270,26 @@ const MIGRATIONS: string[] = [
   `
   -- hosts seen reporting membership of a multicast group on a VLAN interface, collected over time from the IGMP cache (it only holds the last reporter)
   CREATE TABLE mcast_members (dev_id INTEGER NOT NULL, grp TEXT NOT NULL, if_index INTEGER NOT NULL, ip TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, grp, if_index, ip)) WITHOUT ROWID;
+  `,
   `
-
+  -- packets dropped because they arrived on the wrong interface (the RPF check), as growth between two reads of a router's multicast table, so the trend can be graphed
+  CREATE TABLE mcast_rpf (dev_id INTEGER NOT NULL, ts INTEGER NOT NULL, dt INTEGER NOT NULL, drops INTEGER NOT NULL, routes INTEGER NOT NULL, PRIMARY KEY (dev_id, ts)) WITHOUT ROWID;
+  `
+,
+  // multicast hosts are kept per VRF; '' is the default VRF
+  `ALTER TABLE mcast_members ADD COLUMN vrf TEXT NOT NULL DEFAULT '';
+   ALTER TABLE arp ADD COLUMN vrf TEXT NOT NULL DEFAULT '';`,
+  // authentication sessions (802.1X, MAB): the VLAN the authentication server put each client in, and its address; replaced as a whole at each read of a device
+  `CREATE TABLE auth_sessions (dev_id INTEGER NOT NULL, mac TEXT NOT NULL, if_index INTEGER NOT NULL, vlan INTEGER NOT NULL, ip TEXT NOT NULL, policy TEXT NOT NULL /* the user name */, profile TEXT NOT NULL /* cafSessionVlanGroupName, the VLAN name or group from the server */, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, mac, if_index));
+   CREATE INDEX auth_mac ON auth_sessions(mac);`,
+  // whether the session authenticated: its domain (data, voice) or 'unknown' for a client seen that did not
+  `ALTER TABLE auth_sessions ADD COLUMN domain TEXT NOT NULL DEFAULT '';`,
+  // security group tags (TrustSec) per host address and their names, replaced as a whole at each read of a device
+  `CREATE TABLE ip_sgt (dev_id INTEGER NOT NULL, vrf TEXT NOT NULL, ip TEXT NOT NULL, sgt INTEGER NOT NULL, source TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, vrf, ip));
+   CREATE INDEX ip_sgt_ip ON ip_sgt(ip);
+   CREATE TABLE sgt_names (dev_id INTEGER NOT NULL, sgt INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (dev_id, sgt));`,
+  // whether the session authenticated: cafSessionStatus as authorized, failed, idle or other
+  `ALTER TABLE auth_sessions ADD COLUMN status TEXT NOT NULL DEFAULT '';`
 ];
 
 export class ConfigDb {

@@ -152,9 +152,16 @@ function mcDevice(rows: Record<string, SnmpValue>) {
 }
 const CAT = { role: 'switch', cisco: true, objectId: '1.3.6.1.4.1.9.1.2504' };
 
-test('multicast routing: a Layer 3 switch with the tables passes, with counts', async () => {
+const IGMPIF = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'test', 'fixtures', 'igmpif-c9300.json'), 'utf8')) as Record<string, SnmpValue>;
+
+test('multicast routing: without the IGMP interface table it warns that there are no queriers', async () => {
   const c = byId(await runChecks(mcDevice(MC), CAT)).mcast!;
-  assert.equal(c.state, 'ok'); assert.equal(c.group, 'routing'); assert.equal(c.count, 25);
+  assert.equal(c.state, 'warn'); assert.match(c.detail, /no queriers/);
+});
+
+test('multicast routing: a Layer 3 switch with the tables passes, with counts', async () => {
+  const c = byId(await runChecks(mcDevice({ ...MC, ...IGMPIF }), CAT)).mcast!;
+  assert.equal(c.state, 'ok'); assert.match(c.detail, /IGMP querier/); assert.equal(c.group, 'routing'); assert.equal(c.count, 25);
   assert.match(c.detail, /25 routes for 13 groups/); assert.match(c.detail, /19 PIM interfaces/);
 });
 
@@ -193,7 +200,8 @@ test('Cisco tables: a switch with them passes each check with counts, and the ch
 
 test('Cisco tables: ones the device does not publish are not applicable and say why, and other vendors are not asked', async () => {
   const c = byId(await runChecks(cxDevice({}), CAT));
-  for (const id of ['fib', 'eigrp', 'bfd', 'dhcp', 'stack', 'dai', 'procs', 'nbar']) assert.equal(c[id]!.state, 'na', id);
+  for (const id of ['fib', 'eigrp', 'bfd', 'dhcp', 'auth', 'vrf', 'stack', 'dai', 'procs', 'nbar']) assert.equal(c[id]!.state, 'na', id);
+  assert.equal(c.auth!.group, 'hosts'); assert.equal(c.vrf!.group, 'routing'); assert.match(c.auth!.detail, /no port uses 802\.1X/); assert.match(c.vrf!.detail, /only the default routing table/);
   assert.match(c.eigrp!.detail, /does not run EIGRP/); assert.match(c.dhcp!.detail, /DHCP snooping is off/);
   const asked: string[] = [];
   const other = await runChecks(fake({}, [], {}, asked), { role: 'switch', cisco: false, objectId: '1.3.6.1.4.1.2636.1.1', descr: 'Juniper' });
@@ -201,4 +209,21 @@ test('Cisco tables: ones the device does not publish are not applicable and say 
   assert.ok(!asked.some(o => o.startsWith('1.3.6.1.4.1.9.9.380') || o.startsWith('1.3.6.1.4.1.9.9.449') || o.startsWith('1.3.6.1.4.1.9.9.500')));
   assert.equal(expectFor({ role: 'switch', cisco: true, objectId: '1.3.6.1.4.1.9.1.2504', descr: 'Cisco' }).cSwitch, true);
   assert.equal(expectFor({ role: 'router', cisco: true, objectId: '1.3.6.1.4.1.9.1.1', descr: 'Cisco' }).cSwitch, false, 'a router has no DHCP snooping or stack');
+});
+
+test('where to find the full IGMP snooping membership depends on the vendor', async () => {
+  const { igmpHint } = await import('../src/snmp/diagnose.js');
+  assert.deepEqual(igmpHint('cisco', 'Cisco IOS Software [Cupertino], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.4'), { vendor: 'cisco', platform: 'IOS XE', command: 'show ip igmp snooping groups' });
+  assert.equal(igmpHint('cisco', 'Cisco NX-OS(tm) n9000, Software').platform, 'NX-OS');
+  assert.equal(igmpHint('cisco', 'Cisco IOS Software, C3750 Software').platform, 'IOS');
+  assert.equal(igmpHint('juniper', 'Juniper Networks, Inc. ex4300-48t').command, 'show igmp snooping membership');
+  assert.equal(igmpHint('h3c', '').command, 'display igmp-snooping group');
+  assert.equal(igmpHint('mikrotik', 'RouterOS').command, null, 'a vendor with no known command gets none, not a guess');
+});
+
+test('other vendors: a switch is asked for 802.1X ports and VRFs from the standard MIBs, an access point is not, and Cisco has its own rows', async () => {
+  const c = byId(await runChecks(fake({}, [], {}, []), { role: 'switch', cisco: false, objectId: '1.3.6.1.4.1.2636.1.1', descr: 'Juniper' }));
+  assert.equal(c.dot1x!.state, 'na'); assert.equal(c.dot1x!.group, 'hosts'); assert.equal(c.vrf!.state, 'na'); assert.equal(c.vrf!.group, 'routing');
+  const ap = await runChecks(fake({}, [], {}, []), { role: 'ap', cisco: false, objectId: '1.3.6.1.4.1.14823.1', descr: 'Aruba Instant' });
+  assert.ok(!ap.some(k => k.id === 'dot1x' || k.id === 'vrf'));
 });

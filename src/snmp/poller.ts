@@ -1,6 +1,6 @@
 import type { DeviceRow, DeviceService } from './devices.js';
 import { hottest, readHealth, readIfExtra } from './health.js';
-import { readDai, readNbar, readProcesses, readStack, type Dai } from './cisco_extra.js';
+import { readDai, readNbar, readProcesses, readStack, type Dai, type Nbar } from './cisco_extra.js';
 import { classLabel, delta, perInterface, pollIfCounters, QOS_SOURCES, type ClassCounters, type IfCounters, type QosPolicy } from './collect.js';
 import type { HostOpts, HostTracker } from './hosts.js';
 import type { ClsPoint, IfPoint, TsStore } from '../store/types.js';
@@ -9,19 +9,56 @@ import type { SnmpClient } from './client.js';
 import { readResources } from './resources.js';
 import { readMulticast, readIgmpReporters, withLoadRates } from './multicast.js';
 import { readFib } from './fib.js';
+import { readVrfs, contextOf } from './vrf.js';
+import { readEntity } from './entity.js';
+import { readAaa, type Aaa } from './aaa.js';
+import { readAuthSetup } from './authsetup.js';
+import { readConfigState } from './confighist.js';
+import { readLisp, type Lisp } from './lisp.js';
 
 /** The slow optional readers. `run` returns whether the device had the table. */
 interface SlowReader { name: string; cisco: boolean; every: number; emptyEvery: number; errorEvery: number; run(c: SnmpClient, d: DeviceRow, devs: DeviceService, now: number, cisco: boolean): Promise<boolean> }
 const SLOW: SlowReader[] = [
-  { name: 'mcast', cisco: false, every: 115_000, emptyEvery: 3600_000, errorEvery: 600_000, run: async (c, d, devs, now, cisco) => { const m0 = await readMulticast(c, now, cisco); const m = m0 ? withLoadRates(m0, devs.multicast(d.id)) : null; devs.saveMulticast(d.id, m); if (m) devs.noteIgmp(d.id, m.receivers.filter(r => r.lastReporter && !r.self).map(r => ({ group: r.group, ifIndex: r.ifIndex, reporter: r.lastReporter as string })), now, !m.truncated); return !!m; } },
+  { name: 'mcast', cisco: false, every: 115_000, emptyEvery: 3600_000, errorEvery: 600_000, run: async (c, d, devs, now, cisco) => { const m0 = await readMulticast(c, now, cisco); const prev = devs.multicast(d.id); const m = m0 ? withLoadRates(m0, prev) : null; devs.saveMulticast(d.id, m); if (m && prev && m.routes.some(r => r.rpfNew != null)) devs.noteRpf(d.id, now, (m.readAt - prev.readAt) / 1000, m.routes.reduce((a, r) => a + (r.rpfNew ?? 0), 0), m.routes.filter(r => (r.rpfNew ?? 0) > 0).length); if (m) devs.noteIgmp(d.id, m.receivers.filter(r => r.lastReporter && !r.self).map(r => ({ group: r.group, ifIndex: r.ifIndex, reporter: r.lastReporter as string })), now, !m.truncated); return !!m; } },
   // The IGMP cache keeps only the last host to report a group, so it is sampled every 30 seconds to catch the others as they answer queries
   { name: 'igmp', cisco: false, every: 30_000, emptyEvery: 600_000, errorEvery: 600_000, run: async (c, d, devs, now) => { if (!devs.multicast(d.id)) return false; const rows = await readIgmpReporters(c); devs.noteIgmp(d.id, rows, now); return rows.length > 0; } },
+  // the hardware model (chassis and modules) hardly ever changes
+  { name: 'entity', cisco: false, every: 6 * 3600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readEntity(c, now); devs.saveData(d.id, 'entity', x, now); return !!x; } },
+  // The VRFs a device has (MPLS-L3VPN-STD-MIB). Each is read for multicast in its own SNMP context, below.
+  { name: 'vrfs', cisco: false, every: 3600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => {
+    const v = await readVrfs(c);
+    for (const old of devs.vrfs(d.id)) if (!v?.some(x => x.name === old.name)) devs.saveVrfMulticast(d.id, old.name, null);
+    devs.saveData(d.id, 'vrfs', v, now); return !!v;
+  } },
+  // Multicast routing inside each VRF. Needs `snmp-server context vrf-<NAME>` and `snmp context vrf-<NAME>` under the VRF's address family, and a v3 group that may read the context.
+  { name: 'vrfmc', cisco: true, every: 295_000, emptyEvery: 3600_000, errorEvery: 600_000, run: async (c, d, devs, now, cisco) => {
+    const dflt = devs.multicast(d.id); let any = false;
+    for (const v of devs.vrfs(d.id)) {
+      const cc = c.forContext(contextOf(v.name));
+      try {
+        const m0 = await readMulticast(cc, now, cisco);
+        if (!m0 || !m0.routes.length) { devs.saveVrfMulticast(d.id, v.name, null); continue; }
+        // the VRF's own context does not publish the names of VLAN and tunnel interfaces; they are the same on the whole device
+        m0.names = { ...(dflt?.names ?? {}), ...(m0.names ?? {}) }; m0.down = [...new Set([...(dflt?.down ?? []), ...(m0.down ?? [])])];
+        const m = withLoadRates(m0, devs.vrfMulticast(d.id, v.name));
+        devs.saveVrfMulticast(d.id, v.name, m); any = true;
+        devs.noteIgmp(d.id, m.receivers.filter(r => r.lastReporter && !r.self).map(r => ({ group: r.group, ifIndex: r.ifIndex, reporter: r.lastReporter as string })), now, !m.truncated, v.name);
+      } catch { /* a VRF whose context is not set up is skipped */ } finally { cc.close(); }
+    }
+    return any;
+  } },
+  // Authentication servers (RADIUS / TACACS+) as the device sees them, the way each port is set up to authenticate, and whether the running configuration was saved
+  { name: 'aaa', cisco: true, every: 60_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readAaa(c, devs.data<Aaa>(d.id, 'aaa'), now); devs.saveData(d.id, 'aaa', x, now); return !!x?.servers.length; } },
+  { name: 'authsetup', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readAuthSetup(c); devs.saveData(d.id, 'authsetup', x.length ? x : null, now); return x.length > 0; } },
+  { name: 'config', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readConfigState(c, now); devs.saveData(d.id, 'config', x, now); return !!x; } },
+  // LISP map cache, registrations and map servers of an SD-Access node. Each read is compared with the last to see what entered and left the cache.
+  { name: 'lisp', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readLisp(c, devs.data<Lisp>(d.id, 'lisp'), now); devs.saveData(d.id, 'lisp', x, now); return !!x; } },
   { name: 'fib', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs) => { const f = await readFib(c); devs.saveData(d.id, 'fib', f, f?.readAt); return !!f; } },
   // Cisco extras: the busiest processes, stack health, ARP inspection drops and the applications NBAR2 recognised
   { name: 'procs', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readProcesses(c, now); devs.saveData(d.id, 'procs', x, now); return !!x; } },
   { name: 'stack', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readStack(c, now); devs.saveData(d.id, 'stack', x, now); return !!x; } },
   { name: 'dai', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readDai(c, devs.data<Dai>(d.id, 'dai'), now); devs.saveData(d.id, 'dai', x, now); return !!x; } },
-  { name: 'nbar', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readNbar(c, now); devs.saveData(d.id, 'nbar', x, now); return !!x; } }
+  { name: 'nbar', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readNbar(c, now, devs.data<Nbar>(d.id, 'nbar')); devs.saveData(d.id, 'nbar', x, now); return !!x; } }
 ];
 
 interface PrevIf { t: number; c: IfCounters }

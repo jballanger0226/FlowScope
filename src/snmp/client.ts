@@ -74,6 +74,38 @@ function classify(e: Error): SnmpError {
 }
 
 /** A thin promise wrapper over a net-snmp session. */
+/**
+ * One step of a long walk that survives a device that is slow to answer (a busy switch takes longer for big GETBULK replies): on a timeout the step is
+ * repeated asking for fewer rows each time, after a short pause, and only a device that stays silent through every attempt fails the walk. After a
+ * success the next step asks for the full amount again, so a walk that slowed for a moment is back at full speed at once. Returns the rows and the number to ask for next.
+ */
+export async function bulkStep<T>(fetch: (rep: number) => Promise<T>, rep: number, ceiling: number, sleep: (ms: number) => Promise<void> = ms => new Promise(r => setTimeout(r, ms)), attempts = 6): Promise<{ rows: T; rep: number; worked: number; timedOut: boolean }> {
+  let r = Math.min(rep, ceiling), timedOut = false;
+  for (let n = 1; ; n++) {
+    try { return { rows: await fetch(r), rep: r, worked: r, timedOut }; }
+    catch (e) {
+      if (!(e instanceof SnmpError) || e.kind !== 'timeout' || n >= attempts) throw e;
+      timedOut = true; r = Math.max(1, Math.floor(r / 2)); await sleep(150 * n);
+    }
+  }
+}
+
+/**
+ * How many rows a walk asks for next. A device that drops a big reply drops it every time (an oversized UDP reply is lost on the way, or a busy switch cannot
+ * build it in time), so going back to full size after one good reply made every step pay a whole ladder of 6 second timeouts. Instead the size that worked
+ * becomes the ceiling, the walk grows back toward it by doubling, and the ceiling itself is tried upward again only after a long run of clean steps.
+ */
+export class RowPacer {
+  private ceiling: number; private rep: number; private clean = 0;
+  constructor(readonly max: number, private readonly probeEvery = 10) { this.ceiling = max; this.rep = max; }
+  get ask(): number { return Math.min(this.rep, this.ceiling); }
+  done(step: { worked: number; timedOut: boolean }): void {
+    if (step.timedOut) { this.ceiling = Math.max(1, step.worked); this.rep = step.worked; this.clean = 0; return; }
+    this.rep = Math.min(this.ceiling, this.rep * 2);
+    if (this.ceiling < this.max && ++this.clean >= this.probeEvery) { this.ceiling = Math.min(this.max, this.ceiling * 2); this.rep = this.ceiling; this.clean = 0; }
+  }
+}
+
 export class SnmpClient {
   private s: any;
   closed = false;
@@ -142,11 +174,13 @@ export class SnmpClient {
     if (leaf) { onRows([leaf]); return 'done'; }
     const prefix = oid ? oid + '.' : '';
     let cur = oid || '1.0';   // an empty OID is the whole tree: start just before 1.0.8802 (LLDP), the lowest OID a device is likely to have
+    const pace = new RowPacer(maxRep);
     for (;;) {
-      const vbs = await new Promise<any[]>((resolve, reject) => {
+      const step = await bulkStep(r => new Promise<any[]>((resolve, reject) => {
         const cb = (err: Error | null, v: any[]) => err ? reject(classify(err)) : resolve(v ?? []);
-        if (this.cred.version === 'v1') this.s.getNext([cur], cb); else this.s.getBulk([cur], 0, maxRep, cb);
-      });
+        if (this.cred.version === 'v1') this.s.getNext([cur], cb); else this.s.getBulk([cur], 0, r, cb);
+      }), pace.ask, maxRep);
+      const vbs = step.rows; pace.done(step);
       const batch: VarBind[] = [];
       let end = false;
       // GETBULK hands back one array of varbinds per OID asked about (the repeaters), where GETNEXT hands back plain varbinds
@@ -176,6 +210,13 @@ export class SnmpClient {
   forVlan(vlan: number): SnmpClient {
     const c = this.cred;
     const cred: SnmpCredential = c.version === 'v3' ? { ...c, context: `vlan-${vlan}` } : { ...c, community: `${c.community || 'public'}@${vlan}` };
+    return new SnmpClient(this.target, cred);
+  }
+
+  /** A second session that reads one SNMP context (a VRF on IOS XE): the SNMPv3 context, or community@name for v1/v2c. The caller closes the session. */
+  forContext(name: string): SnmpClient {
+    const c = this.cred;
+    const cred: SnmpCredential = c.version === 'v3' ? { ...c, context: name } : { ...c, community: `${c.community || 'public'}@${name}` };
     return new SnmpClient(this.target, cred);
   }
 

@@ -1,7 +1,7 @@
 type Level = 'ok' | 'warn' | 'bad' | 'off';
 /** The parts of the health read the Overview looks at, kept structural so this file has no dependency on the browser code. */
 interface OvHealth {
-  extras?: { stack: null | { problems: string[] }; dai: null | { vlans: { vlan: number; droppedNow: number | null; dhcpDenied: number; why: string }[] }; procs: null | { snmpOne: number | null } };
+  extras?: { stack: null | { problems: string[] }; dai: null | { vlans: { vlan: number; droppedNow: number | null; dhcpDenied: number; why: string }[] }; procs: null | { snmpOne: number | null }; aaa?: null | { servers: { address: string; kind: string; up: boolean; level: Level; problems: string[] }[] }; config?: null | { unsaved: boolean; changedAt: number | null }; lisp?: null | { level: Level; problems: string[] } };
   ifExtra: { ifIndex: number; warnings: { level: Level; text: string }[] }[];
   health: null | {
     sensors: { kind: string; name: string; state: Level; stateText: string; ifIndex?: number }[];
@@ -15,12 +15,12 @@ interface OvHealth {
 }
 
 /** Where an issue is explained in detail: a tab of the device, and for interface problems, the interface and its section. */
-export type Target = { tab: 'interfaces' | 'hardware' | 'network' | 'wifi'; ifIndex?: number; section?: 'traffic' | 'quality' };
+export type Target = { tab: 'interfaces' | 'hardware' | 'network' | 'wifi'; ifIndex?: number; section?: 'traffic' | 'quality'; /** Open the Multicast page of this device instead of a tab */ multicast?: true };
 export interface Issue { level: 'bad' | 'warn'; title: string; detail: string; target?: Target }
 export interface Card { tab: Target['tab']; label: string; level: Level; headline: string; lines: string[] }
 
 interface OvIface { ifIndex: number; name: string; alias: string; oper: string; isVlanIf: boolean; flagged: boolean; utilIn: number | null; utilOut: number | null; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null }
-export interface OvDev { status: string; lastError: string | null; resources: { cpuPct: number | null; memPct: number | null; swapPct: number | null; disks: { name: string; usedPct: number }[]; tempC?: number | null } | null; interfaces: OvIface[]; hasWlan: boolean }
+export interface OvDev { rpfNow?: { routes: number; drops: number; top: string } | null; status: string; lastError: string | null; resources: { cpuPct: number | null; memPct: number | null; swapPct: number | null; disks: { name: string; usedPct: number }[]; tempC?: number | null } | null; interfaces: OvIface[]; hasWlan: boolean }
 export interface OvWlan { aps: { name: string; mac: string }[]; radios: { apMac: string; idx: number; band: string; up: boolean }[]; clients: unknown[] }
 export interface OvInput { dev: OvDev; health: OvHealth | null; wlan: OvWlan | null; neighbours: number | null; arp: number | null; hasHardware: boolean; thresholds: { util: number; drop: number; mcast?: number; priority?: number } }
 
@@ -32,6 +32,7 @@ export function issues(o: OvInput): Issue[] {
   const out: Issue[] = [];
   const { dev, health } = o;
   const names = new Map(dev.interfaces.map(i => [i.ifIndex, i.alias ? `${i.name} (${i.alias})` : i.name]));
+  if (dev.rpfNow) out.push({ level: 'warn', title: `${plural(dev.rpfNow.routes, 'multicast route')} dropping packets that arrive on the wrong interface`, detail: `${dev.rpfNow.drops.toLocaleString('en-US')} packets since the last read, most on ${dev.rpfNow.top}. The Multicast page lists the routes and graphs the drops over the last day.`, target: { tab: 'network', multicast: true } });
   const r = dev.resources;
   if (r) {
     if (r.cpuPct !== null && r.cpuPct >= 85) out.push({ level: r.cpuPct >= 95 ? 'bad' : 'warn', title: `CPU at ${pct(r.cpuPct)}`, detail: 'The history graphs on the Hardware tab show when it rose.', target: { tab: 'hardware' } });
@@ -61,6 +62,9 @@ export function issues(o: OvInput): Issue[] {
   for (const t of ex?.stack?.problems ?? []) out.push({ level: 'warn', title: 'Stack problem', detail: t, target: { tab: 'hardware' } });
   for (const v of ex?.dai?.vlans ?? []) if ((v.droppedNow ?? 0) > 0) out.push({ level: 'warn', title: `ARP packets dropped on VLAN ${v.vlan}`, detail: `${plural(v.droppedNow!, 'packet')} since the last read. ${v.why}.`, target: { tab: 'network' } });
   if ((ex?.procs?.snmpOne ?? 0) >= 10) out.push({ level: 'warn', title: 'SNMP engine is using the CPU', detail: `${ex!.procs!.snmpOne}% over the last minute. Polling is part of this device's load.`, target: { tab: 'hardware' } });
+  for (const sv of ex?.aaa?.servers ?? []) if (sv.level !== 'ok') out.push({ level: sv.level === 'bad' ? 'bad' : 'warn', title: `${sv.kind === 'tacacs' ? 'TACACS+' : 'RADIUS'} server ${sv.address} ${sv.up ? 'is struggling' : 'is dead'}`, detail: sv.problems.join(' '), target: { tab: 'hardware' } });
+  if (ex?.config?.unsaved && ex.config.changedAt && Date.now() - ex.config.changedAt >= 3600_000) out.push({ level: 'warn', title: 'Configuration not saved', detail: 'The running configuration differs from startup and has for over an hour. A reload would lose the change.', target: { tab: 'hardware' } });
+  if (ex?.lisp && ex.lisp.level !== 'ok') for (const t of ex.lisp.problems) out.push({ level: ex.lisp.level === 'bad' ? 'bad' : 'warn', title: 'LISP fabric', detail: t, target: { tab: 'network' } });
   const hl = health?.health;
   if (hl) {
     for (const s of hl.sensors) {

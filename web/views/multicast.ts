@@ -1,6 +1,7 @@
 import { h, type VNode } from '../vdom.js';
 import { get, qs } from '../api.js';
-import { redraw } from '../state.js';
+import { go, redraw } from '../state.js';
+import { lineChart, tabs } from '../components.js';
 import { btn, chip, empty, heading, note, select, spinner, stat, status as statusEl, textInput, toggle } from '../components.js';
 import { ago, bps, num, stamp } from '../util.js';
 
@@ -9,25 +10,57 @@ import { ago, bps, num, stamp } from '../util.js';
  * interfaces a group is sent out of, and the hosts that asked for it, come from the router's own multicast table read over SNMP.
  */
 
-interface DevSummary { id: number; name: string; ip: string; role: string; readAt: number; stale: boolean; source: 'cisco' | 'standard'; routes: number; groups: number; receivers: number; forwarding: number; truncated: boolean }
-interface HostAt { dev: string; port: string; vlan: number; confidence: string; neighbor: string | null }
+interface DevSummary { id: number; name: string; ip: string; role: string; readAt: number; stale: boolean; source: 'cisco' | 'standard'; routes: number; groups: number; receivers: number; forwarding: number; truncated: boolean; vrfs?: { name: string; readAt: number; routes: number; groups: number; forwarding: number }[] }
+interface HostAt { vrf?: string; dev: string; devId?: number; ifIndex?: number; port: string; vlan: number; confidence: string; neighbor: string | null }
 interface Join { reporter: string | null; expirySec: number | null; self: boolean }
-interface Member { ip: string; ageSec: number; sinceSec: number }
-interface Out { ifIndex: number; name: string; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
+interface IgmpHint { vendor: string; platform: string; command: string | null }
+interface Member { ip: string; ageSec: number; sinceSec: number | null; via?: 'snmp' | 'netflow' | 'both'; approx?: boolean }
+const VIA_TEXT = { snmp: 'SNMP', netflow: 'NetFlow', both: 'SNMP and NetFlow' } as const;
+const VIA_WHY = { snmp: "From the router's IGMP cache over SNMP: the last host to report the group on this interface, collected over time.", netflow: 'Seen in NetFlow as an IGMP version 1 or 2 membership report from this host to the group. Not in the IGMP cache.', both: 'In the IGMP cache over SNMP and also seen as an IGMP report in NetFlow: two independent sources agree.' } as const;
+const viaChip = (v: Member['via']): VNode => chip(VIA_TEXT[v ?? 'snmp'], v === 'both' ? 'ok' : 'default', VIA_WHY[v ?? 'snmp']);
+interface Out { ifIndex: number; name: string; pimMode?: string | null; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
+interface RpfPeer { id: number; name: string; ifIndex: number; ifName: string; forwarding: boolean | null }
+interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null; failuresNew?: number | null; failuresShare?: number | null; failuresMajor?: boolean; paths?: number | null }
+interface IgmpIf { name: string; querier: string | null; who: string | null; self: boolean; version: number | null; intervalSec: number | null; upSec: number | null; expirySec: number | null; hosts: number }
+interface RpMap { range: string; rp: string; who: string | null; self: boolean; holdSec: number | null; expirySec: number | null }
+interface Under { group: string; sources: { source: string; pkts: number | null }[]; exact: boolean }
+interface Overlay { vrf: string; group: string }
 interface Route {
-  group: string; source: string; sharedTree: boolean; inIf: string | null; upstream: string | null; rp: string | null; bps: number | null; pkts: number | null; flags: string[]; protocol: number | null; expirySec: number | null; out: Out[];
+  /** The VRF the route was read in; '' is the default VRF */
+  vrf: string;
+  /** A default-VRF group that only carries VRF groups between the switches */
+  carrier?: boolean;
+  rpf?: Rpf | null;
+  /** SD-Access: the underlay group this overlay group is carried in (read in a VRF) */
+  underlay?: Under | null;
+  /** SD-Access: the overlay groups an underlay group carries (read in the default VRF) */
+  overlay?: Overlay[] | null;
+  group: string; source: string; sharedTree: boolean; inIf: string | null; upstream: string | null; rp: string | null; bps: number | null; pkts: number | null; flags: string[]; protocol: number | null; mode?: 'sparse' | 'dense' | null; expirySec: number | null; out: Out[];
 }
 interface Detail {
-  device: { id: number; name: string; ip: string; role: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
-  pim: { interfaces: { name: string; mode: string; dr: string | null }[]; neighbors: { address: string; ifName: string }[] };
+  vrfs?: { name: string; routes: number | null; groups: number | null }[]; ifVrf?: Record<string, string>;
+  igmpHint?: IgmpHint;
+  device: { id: number; name: string; ip: string; role: string; model?: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
+  rpfHistory?: { ts: number; perMin: number; routes: number }[];
+  routeSource?: 'ipmroute' | 'pim';
+  netflowIgmp?: { reports: number; hosts: number; v3Hosts: number; windowMin: number; unmatched: number } | null;
+  igmp?: IgmpIf[];
+  rps?: { inUse?: { rp: string; who: string | null; self: boolean; up: boolean; groups: string[]; sinceSec: number | null }[]; map: RpMap[]; candidate: { range: string; rp: string; self: boolean }[] };
+  pimIssues?: { level: 'warn' | 'info'; kind: string; text: string }[];
+  pim: { interfaces: { name: string; mode: string; dr: string | null; passive?: boolean }[]; neighbors: { address: string; ifName: string }[] };
   hosts?: Record<string, HostAt | null>;
   load?: { name: string; inBps: number | null; outBps: number | null; inOctets: number | null; outOctets: number | null; ttl: number | null; rateLimit: number | null }[];
 }
 
 let devs: DevSummary[] | null = null; let devError = '';
+let vrfSel = 'all';                       // which VRF the tables show: 'all', '@' for the default VRF, or a VRF name
+let showCarriers = false;                  // default-VRF groups that only carry VRF groups
 let devId = 0; let detail: Detail | null = null; let detailError = ''; let loading = false;
 let query = ''; let onlyForwarding = false; let hideIdle = false;
 const open = new Set<string>();            // routes whose details are shown (group|source)
+type Tab = 'routes' | 'load' | 'rpf' | 'igmp';
+let tab: Tab = 'routes';
+const openLoad = new Set<string>();        // interfaces in the load table whose groups are shown
 const openHosts = new Set<string>();       // outgoing interfaces whose host list is open
 const openGroups = new Set<string>();      // groups whose sources are listed
 const closedWhileSearching = new Set<string>();
@@ -35,14 +68,27 @@ const SIZES = [25, 50, 100, 250, 500];
 let page = 0; let pageSize = 50;
 /** Where a host is plugged in, as found by host tracking: "dist-sw-01 Gi1/0/12" */
 const at = (ip: string | null): string => { const a = ip ? detail?.hosts?.[ip] : null; return a ? `${a.dev} ${a.port}` : ''; };
+/** Where a host is plugged in: the port name only (the page is already about one device), with buttons to its Flows by port and to its interface in Network health. */
+function portCell(ip: string): VNode {
+  const a = detail?.hosts?.[ip];
+  if (!a) return h('span', { class: 'dim', style: 'font-size:12px' }, 'not located');
+  const stop = (fn: () => void) => (e: Event): void => { e.stopPropagation(); fn(); };
+  return h('span', { class: 'row', style: 'gap:8px;align-items:center;flex-wrap:wrap', title: `${a.dev}, VLAN ${a.vlan}${a.vrf ? `, VRF ${a.vrf} (the VRF of the VLAN's SVI)` : ''}` },
+    h('span', { class: 'mono', style: 'font-size:12px' }, a.port),
+    a.vrf ? h('span', { class: 'dim', style: 'font-size:11px' }, `VLAN ${a.vlan} · VRF ${a.vrf}`) : null,
+    a.devId !== undefined && a.ifIndex !== undefined ? btn('Flows', { small: true, kind: 'ghost', title: `Flows by port: the busiest flows entering or leaving ${a.port} on ${a.dev}`, aria: `Flows through ${a.port}`, onclick: stop(() => go('ports', { dev: a.devId!, if: a.ifIndex! })) }) : null,
+    btn('Interface', { small: true, kind: 'ghost', title: `Open ${a.port} on ${a.dev} in Network health`, aria: `Interface details for ${a.port}`, onclick: stop(() => go('links', { dev: a.dev, if: a.port })) }));
+}
 let seq = 0;
 
 export function enter(p: URLSearchParams): void {
   page = 0;
   const d = Number(p.get('dev'));
-  if (Number.isInteger(d) && d > 0 && d !== devId) { devId = d; detail = null; }
+  if (Number.isInteger(d) && d > 0 && d !== devId) { devId = d; detail = null; vrfSel = 'all'; }
+  if (p.has('vrf')) vrfSel = p.get('vrf') || 'all';
+  const t = p.get('t'); if (t === 'routes' || t === 'load' || t === 'rpf' || t === 'igmp') tab = t;
   if (p.has('q')) query = p.get('q') ?? '';
-  const g = p.get('g'); if (g) { openGroups.add(g); query = query || g; }
+  const g = p.get('g'); if (g) { openGroups.add(g); query = g; tab = 'routes'; }
   void loadDevices().then(() => { if (devId) void loadDetail(); });
 }
 
@@ -61,18 +107,34 @@ async function loadDetail(): Promise<void> {
   if (my === seq) { loading = false; redraw(); }
 }
 
-function pickDevice(v: string): void { page = 0; devId = Number(v); detail = null; open.clear(); openGroups.clear(); openHosts.clear(); closedWhileSearching.clear(); void loadDetail(); }
+function pickDevice(v: string): void { page = 0; devId = Number(v); vrfSel = 'all'; detail = null; open.clear(); openGroups.clear(); openHosts.clear(); closedWhileSearching.clear(); void loadDetail(); }
+
+/** Opens an underlay group (default VRF) in the table: those are hidden unless asked for, since the real group is the inner one. */
+function showUnderlay(group: string): void { page = 0; vrfSel = 'all'; showCarriers = true; query = group; tab = 'routes'; closedWhileSearching.clear(); redraw(); }
+/** Opens an overlay group in its VRF. */
+function showOverlay(vrf: string, group: string): void { page = 0; vrfSel = vrf; query = group; tab = 'routes'; closedWhileSearching.clear(); redraw(); }
+/** The key of a group row: the same group can exist in more than one VRF. */
+const gkey = (vrf: string, group: string): string => vrf + '|' + group;
+/** The group a host joins: the inner group, which is the real one. */
+const grpLabel = (group: string): VNode => h('span', { class: 'mono', style: 'font-weight:600' }, group);
+const UNDERLAY_WHY = 'The underlay group: the fabric wraps the real (inner) group in this default-VRF group to carry it between the switches. No host joins it.';
+/** The "Underlay group" column: the group a VRF group is carried in, or for an underlay group itself, what it carries. */
+function underlayCell(r: Route | undefined): VNode {
+  if (r?.underlay) return h('span', { class: 'mono', style: 'font-size:12px', title: UNDERLAY_WHY }, r.underlay.group);
+  if (r?.overlay?.length) return h('span', { class: 'dim', style: 'font-size:12px', title: 'An underlay group: it carries these VRF groups between the switches' }, `carries ${r.overlay.map(o => `${o.group} (${o.vrf})`).join(', ')}`);
+  return h('span', { class: 'dim' }, '—');
+}
 
 const rate = (r: Route): string => (r.bps === null ? '—' : r.bps === 0 ? '0' : bps(r.bps));
 const sec = (s: number | null): string => (s === null ? '—' : s < 90 ? `${s}s` : `${Math.round(s / 60)}m`);
 
 function matches(r: Route, q: string): boolean {
   if (!q) return true;
-  const hay = [r.group, r.source === '0.0.0.0' ? '* shared' : r.source, at(r.source), r.inIf ?? '', r.rp ?? '', r.upstream ?? '', ...r.out.map(o => o.name), ...r.out.flatMap(o => [...o.joins.flatMap(j => [j.reporter ?? '', at(j.reporter)]), ...(o.members ?? []).flatMap(m => [m.ip, at(m.ip)])])].join(' ').toLowerCase();
+  const hay = [r.group, r.vrf, r.underlay?.group ?? '', r.source === '0.0.0.0' ? '* shared' : r.source, at(r.source), r.inIf ?? '', r.rp ?? '', r.upstream ?? '', ...r.out.map(o => o.name), ...r.out.flatMap(o => [...o.joins.flatMap(j => [j.reporter ?? '', at(j.reporter)]), ...(o.members ?? []).flatMap(m => [m.ip, at(m.ip)])])].join(' ').toLowerCase();
   return q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t));
 }
 
-const keyOf = (r: Route) => r.group + '|' + r.source;
+const keyOf = (r: Route) => r.vrf + '|' + r.group + '|' + r.source;
 
 function outChips(r: Route): VNode {
   const fwd = r.out.filter(o => o.forwarding), pruned = r.out.length - fwd.length;
@@ -80,32 +142,123 @@ function outChips(r: Route): VNode {
   return h('span', { class: 'mono', style: 'font-size:12px' }, fwd.slice(0, 4).map(o => o.name).join(', '), fwd.length > 4 ? ` +${fwd.length - 4}` : '', pruned ? h('span', { class: 'dim', title: 'Pruned: in the list but no one downstream wants the group' }, ` (${pruned} pruned)`) : null);
 }
 
+/** Shown wherever hosts that joined are listed: the router does not keep a full membership list for SNMP to read. */
+/** How PIM mode changes what a router does with receivers. Dense floods and prunes; sparse waits for a join. */
+const DENSE_WHY = 'PIM dense mode sends the group out of every PIM interface and then prunes the ones with no receiver, and floods again about every three minutes. An interface can show as forwarding with nobody behind it until it is pruned.';
+const SPARSE_DENSE_WHY = 'PIM sparse-dense mode: a group with a rendezvous point runs sparse, and a group without one falls back to dense and is flooded to every PIM interface.';
+const pimChip = (mode: string | null | undefined): VNode | null => (mode === 'dense' ? chip('PIM dense', 'warn', DENSE_WHY) : mode === 'sparse-dense' ? chip('PIM sparse-dense', 'warn', SPARSE_DENSE_WHY) : null);
+
+/** The PIM modes the router runs, as a line above the table; dense and sparse-dense are flagged, since they change what a receiver gets. */
+function pimSummary(d: Detail): VNode | null {
+  const n = new Map<string, number>(); let passive = 0;
+  for (const p of d.pim.interfaces) { if (p.passive) passive++; else n.set(p.mode, (n.get(p.mode) ?? 0) + 1); }
+  if (!n.size && !passive) return null;
+  const flagged = (n.get('dense') ?? 0) + (n.get('sparse-dense') ?? 0) > 0;
+  const text = [...[...n].map(([m, k]) => `${num(k)} ${m}`), ...(passive ? [`${num(passive)} passive`] : [])].join(', ');
+  const dense = d.routes.filter(r => r.mode === 'dense').length;
+  return h('div', { class: 'row', style: 'gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px' },
+    h('span', { class: 'dim' }, 'PIM interfaces:'), h('span', { class: 'mono' }, text),
+    n.get('dense') ? pimChip('dense') : null, n.get('sparse-dense') ? pimChip('sparse-dense') : null,
+    passive ? h('span', { class: 'dim', title: 'ip pim passive: the interface faces hosts, sends no PIM messages and elects no designated router, so its mode does not count' }, 'passive interfaces are left out of the mode checks') : null,
+    dense ? h('span', { class: 'dim' }, `${num(dense)} route${dense === 1 ? ' runs' : 's run'} in dense mode`) : null,
+    flagged ? h('span', { class: 'dim' }, 'Receivers behave differently here: hover a flag for how.') : null);
+}
+
+const VENDOR_NAME: Record<string, string> = { cisco: 'Cisco', juniper: 'Juniper', arista: 'Arista', h3c: 'H3C / HPE Comware' };
+/** Where to look for the full list, by the switch's vendor. A vendor without a known command is pointed at its IGMP snooping table. */
+function whereToLook(): string {
+  const hint = detail?.igmpHint;
+  if (!hint?.command) return 'check the switch\'s IGMP snooping table';
+  const model = detail?.device.model ? ` (${detail.device.model})` : '';
+  return `check the switch${model}: on ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run ${hint.command}`;
+}
+let copiedCmd = false;
+/** The command to run on the switch, in a box that selects whole on one click, with a Copy button. */
+function commandBox(cmd: string): VNode {
+  const copy = (): void => {
+    const done = (): void => { copiedCmd = true; redraw(); setTimeout(() => { copiedCmd = false; redraw(); }, 1800); };
+    if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(cmd).then(done, () => undefined); else done();
+  };
+  return h('span', { class: 'row', style: 'gap:6px;align-items:center;display:inline-flex' },
+    h('code', { class: 'code', style: 'user-select:all;cursor:text;font-size:12.5px;padding:3px 8px', title: 'Click to select the whole command' }, cmd),
+    btn(copiedCmd ? 'Copied' : 'Copy', { small: true, onclick: copy }));
+}
+/** The sentence above the host lists: why the list is partial, and the command that gives the full one. */
+/** The warning above a host table, with the command in a copyable box. */
+/** The snooping command narrowed to the VLAN of an interface such as Vl1247 or Vlan1247; the plain command for any other interface. */
+const forVlan = (command: string, ifName?: string, group?: string, vendor?: string): string => {
+  const v = /^vl(?:an)?\s*(\d{1,4})$/i.exec(ifName ?? ''); if (!v || !/ groups$/.test(command)) return command;
+  const base = `${command} vlan ${v[1]}`;
+  return group && /^\d{1,3}(\.\d{1,3}){3}$/.test(group) ? `${base} | ${vendor === 'arista' ? 'grep' : 'section'} ${group}` : base;
+};
+function incompleteNote(ifName?: string, group?: string): VNode {
+  const hint = detail?.igmpHint;
+  const why = 'Not a complete list. The router keeps only the last host to report each group, so FlowScope collects reporters as they answer queries (and, where the flow export includes IGMP, from NetFlow) and can miss hosts that have not been the last to report. ';
+  if (!hint?.command) return note(why + "For the full membership, check the switch's IGMP snooping table.", 'warn');
+  const model = detail?.device.model ? ` (${detail.device.model})` : '';
+  return note(h('span', { style: 'display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center' }, `${why}For the full membership, check the switch${model}. On ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run:`, commandBox(forVlan(hint.command, ifName, group, hint.vendor))), 'warn');
+}
+function fullListNote(): VNode {
+  const hint = detail?.igmpHint;
+  const lead = "Hosts that joined come from the router's IGMP cache over SNMP and are not a complete list. For the full membership, ";
+  if (!hint?.command) return h('div', { class: 'dim', style: 'font-size:12.5px' }, lead + "check the switch's IGMP snooping table.");
+  const model = detail?.device.model ? ` (${detail.device.model})` : '';
+  return h('div', { class: 'dim row', style: 'font-size:12.5px;gap:6px;align-items:center;flex-wrap:wrap' }, `${lead}check the switch${model}. On ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run:`, commandBox(hint.command));
+}
+const incomplete = (): string => `Not a complete list. The router keeps only the last host to report each group, so FlowScope collects reporters as they answer queries (and, where the flow export includes IGMP, from NetFlow) and can miss hosts that have not been the last to report. For the full membership, ${whereToLook()}.`;
+
 const ageText = (s: number): string => (s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129_600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`);
+
+/** The hosts that joined a group on one interface: the notice with the switch command for that VLAN and group, and each host with its port. */
+function hostList(members: Member[], ifName: string, group: string, viaNeighbor: boolean): VNode {
+  return h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
+    viaNeighbor ? null : incompleteNote(ifName, group),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 150px 120px 110px;--w:700px' },
+      h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Seen by', 'Last reported', 'Known for'].map(t => h('span', null, t))),
+      members.map(m => h('div', { key: m.ip, class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, m.ip),
+        portCell(m.ip),
+        h('span', null, viaChip(m.via)),
+        h('span', { style: 'font-size:12px' }, m.approx ? h('span', { class: 'dim', title: 'NetFlow gives a window, not a time' }, m.ageSec <= 300 ? 'within 5 min' : 'within 30 min') : m.ageSec < 150 ? chip('now', 'ok', 'Reported in the last two minutes') : h('span', { class: 'dim' }, ageText(m.ageSec))),
+        h('span', { class: 'dim', style: 'font-size:12px' }, m.sinceSec === null ? '—' : ageText(m.sinceSec).replace(' ago', '')))))));
+}
 
 /** One outgoing interface. The hosts that joined are every reporter seen over time, so a VLAN with many receivers is a collapsible list. */
 function oilRow(r: Route, o: Out): VNode {
-  const hk = `${keyOf(r)}|${o.ifIndex}`, members = o.members ?? [], many = members.length > 1, on = openHosts.has(hk);
+  const hk = `${keyOf(r)}|${o.ifIndex}`, members = o.members ?? [], many = members.length > 1 || members.some(m => m.via === 'netflow' || m.via === 'both'), on = openHosts.has(hk);
   const joined = (): VNode | string => {
     if (o.loopback && !o.joins.some(j => j.reporter)) return 'the router joined the group itself';
-    if (many) return h('button', { type: 'button', class: 'rowbtn', 'aria-expanded': on, title: 'Hosts seen reporting this group on this interface. The router remembers only the last reporter, so FlowScope collects them over time.', onclick: () => toggleSet(openHosts, hk) }, `${on ? '▾' : '▸'} ${num(members.length)} hosts`);
-    if (o.joins.length) return o.joins.slice(0, 4).map(j => (j.self ? 'this router' : (j.reporter ?? '?') + (at(j.reporter) ? ` on ${at(j.reporter)}` : '')) + (j.expirySec !== null ? ` (${sec(j.expirySec)})` : '')).join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : '');
+    if (many) return h('button', { type: 'button', class: 'rowbtn', 'aria-expanded': on, title: o.neighbor ? undefined : incomplete(), onclick: () => toggleSet(openHosts, hk) }, `${on ? '▾' : '▸'} ${num(members.length)} hosts`);
+    if (o.joins.length) return h('span', { title: o.neighbor ? undefined : incomplete() }, o.joins.slice(0, 4).map(j => (j.self ? 'this router' : (j.reporter ?? '?') + (at(j.reporter) ? ` on ${at(j.reporter)}` : '')) + (j.expirySec !== null ? ` (${sec(j.expirySec)})` : '')).join(', ') + (o.joins.length > 4 ? ` +${o.joins.length - 4}` : ''));
     return h('span', { class: 'dim' }, o.neighbor ? 'via the neighbour' : 'none seen');
   };
   return h('div', { key: o.ifIndex },
     h('div', { class: 'tr' },
         h('span', { class: 'mono', style: 'font-size:12px' }, o.name),
         h('span', null, o.linkDown ? chip('link down', 'bad', 'The route lists this interface' + (o.forwarding ? ' as forwarding' : '') + ', but the port is not up, so nothing is arriving over it') : o.forwarding ? chip('forwarding', 'ok') : chip('pruned', 'default', 'Listed, but no one downstream wants the group')),
-        h('span', { class: 'mono dim', style: 'font-size:12px' }, o.neighbor ? `PIM neighbour ${o.neighbor}` : o.loopback ? 'this router (loopback)' : o.joins.length ? 'hosts on this segment' : '—'),
+        h('span', { class: 'mono dim', style: 'font-size:12px' }, o.neighbor ? `PIM neighbour ${o.neighbor}` : o.loopback ? 'this router (loopback)' : o.joins.length ? 'hosts on this segment' : '—', ' ', pimChip(o.pimMode)),
         h('span', { class: 'mono', style: 'font-size:12px' }, joined()),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts))),
-    many && on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
-      h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 120px 110px;--w:560px' },
-        h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Last reported', 'Known for'].map(t => h('span', null, t))),
-        members.map(m => h('div', { key: m.ip, class: 'tr' },
-          h('span', { class: 'mono', style: 'font-size:12px' }, m.ip),
-          h('span', { class: 'mono', style: 'font-size:12px' }, at(m.ip) || h('span', { class: 'dim' }, 'not located')),
-          h('span', { style: 'font-size:12px' }, m.ageSec < 150 ? chip('now', 'ok', 'Reported in the last two minutes') : h('span', { class: 'dim' }, ageText(m.ageSec))),
-          h('span', { class: 'dim', style: 'font-size:12px' }, ageText(m.sinceSec).replace(' ago', ''))))))) : null);
+    many && on ? hostList(members, o.name, r.group, !!o.neighbor) : null);
+}
+
+/** SD-Access: the underlay group (in the default VRF) an overlay group is carried in. The switch names it on the routes it encapsulates itself. */
+function underlayLine(u: Under): VNode {
+  const rlocs = u.sources.filter(x => x.source !== '0.0.0.0').map(x => x.source);
+  return h('span', { class: 'row', style: 'gap:6px;align-items:center;flex-wrap:wrap' },
+    chip('SD-Access', 'default', 'This VRF is an overlay. The fabric carries each overlay multicast group in an underlay group (232.x) in the default VRF, sent between the switches\' RLOCs.'),
+    h('span', null, 'carried in underlay group ', h('b', { class: 'mono' }, u.group)),
+    u.exact ? null : h('span', { class: 'dim', title: 'The switch names the underlay group on the streams it encapsulates itself. This stream comes from elsewhere, so the group is the one the same overlay group uses on this switch.' }, '(from another source of this group)'),
+    rlocs.length ? h('span', { class: 'dim' }, `sent by ${rlocs.join(', ')}`) : null,
+    btn('Underlay', { small: true, kind: 'ghost', title: `Open ${u.group} in the default VRF`, aria: `Open underlay group ${u.group}`, onclick: () => showUnderlay(u.group) }));
+}
+/** SD-Access: the overlay groups (in VRFs) an underlay group carries. */
+function overlayLine(o: Overlay[]): VNode {
+  return h('span', { class: 'row', style: 'gap:6px;align-items:center;flex-wrap:wrap' },
+    chip('SD-Access', 'default', 'This is an underlay group. The fabric uses it to carry the overlay group named here between the switches.'),
+    h('span', null, 'carries'),
+    ...o.map(x => h('span', { class: 'row', style: 'gap:4px;align-items:center' }, h('b', { class: 'mono' }, `${x.group}`), h('span', { class: 'dim' }, `in VRF ${x.vrf}`),
+      btn('Overlay', { small: true, kind: 'ghost', title: `Open ${x.group} in VRF ${x.vrf}`, aria: `Open ${x.group} in VRF ${x.vrf}`, onclick: () => showOverlay(x.vrf, x.group) }))));
 }
 
 function expanded(r: Route): VNode {
@@ -113,24 +266,28 @@ function expanded(r: Route): VNode {
   return h('div', { class: 'mcdetail', style: 'padding:6px 12px 14px' },
     h('div', { class: 'row', style: 'gap:8px 18px;flex-wrap:wrap;color:var(--muted);font-size:12.5px;margin-bottom:8px' },
       h('span', null, r.sharedTree ? 'Shared tree (*,G)' : `Source ${r.source}`, !r.sharedTree && at(r.source) ? h('span', null, ' · plugged in at ', h('b', { class: 'mono' }, at(r.source))) : null),
+      r.mode === 'dense' ? pimChip('dense') : r.mode === 'sparse' ? chip('PIM sparse', 'default', 'The route runs in PIM sparse mode: it is sent only where a receiver has joined.') : null,
       r.inIf ? h('span', null, 'Arrives on ', h('b', { class: 'mono' }, r.inIf)) : null,
-      r.upstream ? h('span', null, 'Upstream ', h('b', { class: 'mono' }, r.upstream)) : null,
+      r.rpf ? rpfLine(r.rpf, r.group) : r.upstream ? h('span', null, 'Upstream ', h('b', { class: 'mono' }, r.upstream)) : null,
       r.rp ? h('span', null, 'Rendezvous point ', h('b', { class: 'mono' }, r.rp)) : null,
+      r.vrf ? chip(`VRF ${r.vrf}`, 'default', `Read in the SNMP context vrf-${r.vrf}`) : null,
+      r.underlay ? underlayLine(r.underlay) : null,
+      r.overlay?.length ? overlayLine(r.overlay) : null,
       r.pkts !== null ? h('span', null, `${num(r.pkts)} packets`) : null,
       r.expirySec !== null ? h('span', null, r.expirySec === 0 ? 'route does not age out' : `route expires in ${sec(r.expirySec)}`) : null,
       r.flags.length ? h('span', null, 'Flags: ', r.flags.join(', ')) : null),
     r.out.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:780px` },
       h('div', { class: 'tr head' }, ...['Sent out of', 'State', 'Reaches', 'Hosts that joined (IGMP)', 'Packets'].map(t => h('span', null, t))),
-      r.out.map(o => oilRow(r, o)))) : note('Nothing is joined downstream of this router, so it forwards this group nowhere.', 'info'));
+      r.out.map(o => oilRow(r, o)))) : detail?.routeSource === 'pim' ? null : note('Nothing is joined downstream of this router, so it forwards this group nowhere.', 'info'));
 }
 
-interface Grp { group: string; routes: Route[] }
+interface Grp { group: string; vrf: string; routes: Route[] }
 
 const toggleSet = (set: Set<string>, k: string): void => { if (set.has(k)) set.delete(k); else set.add(k); redraw(); };
 const keyDown = (fn: () => void) => (e: KeyboardEvent): void => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } };
 /** Searching opens the groups that match, so the matching sources are in view; a group closed by hand stays closed. */
-const groupOpen = (g: string): boolean => (query ? !closedWhileSearching.has(g) : openGroups.has(g));
-const toggleGroup = (g: string): void => { if (query) toggleSet(closedWhileSearching, g); else toggleSet(openGroups, g); };
+const groupOpen = (g: Grp): boolean => (query ? !closedWhileSearching.has(gkey(g.vrf, g.group)) : openGroups.has(gkey(g.vrf, g.group)) || openGroups.has(g.group));
+const toggleGroup = (g: Grp): void => { const k = gkey(g.vrf, g.group); if (query) toggleSet(closedWhileSearching, k); else { openGroups.delete(g.group); toggleSet(openGroups, k); } };
 
 /** One route as a row, opening its details (arrival interface, outgoing interfaces and the hosts that joined). */
 function routeRow(r: Route, cols: string, lead: VNode[]): VNode {
@@ -142,55 +299,129 @@ function routeRow(r: Route, cols: string, lead: VNode[]): VNode {
 }
 const sourceCell = (r: Route): VNode => h('span', { class: 'mono', style: 'font-size:12px' }, r.sharedTree ? h('span', { class: 'dim', title: 'Any source: the shared tree (*,G)' }, '* (any source)') : r.source, !r.sharedTree && at(r.source) ? h('span', { class: 'dim' }, ` · ${at(r.source)}`) : null);
 
+/** What is wrong with the RPF link of a route: drops, a neighbour that does not forward the group to this router, or multicast lost on the link. */
+function rpfProblems(x: Rpf | null | undefined): { key: string; text: string; title: string }[] {
+  if (!x) return [];
+  const out: { key: string; text: string; title: string }[] = [];
+  if (x.failuresNew && x.failuresMajor) out.push({ key: 'drops', text: `${num(x.failuresNew)} RPF drops now`, title: `Packets for this route arrived on an interface other than the one it accepts the group on, and were dropped, since the previous read${x.failuresShare != null ? ` (${x.failuresShare}% of its packets)` : ''}. A large share points to a changed route or two paths both sending the group.` });
+  if (x.peer && x.peer.forwarding === false) out.push({ key: 'nofwd', text: 'neighbour not forwarding', title: `${x.peer.name} does not list ${x.peer.ifName} as an outgoing interface for this group that is forwarding, so nothing is sent to this router` });
+  if (x.loss) out.push({ key: 'loss', text: 'multicast lost on link', title: 'The neighbour sends more multicast out of its end of this link than this router receives' });
+  return out;
+}
+const rpfFlags = (x: Rpf | null | undefined): VNode[] => rpfProblems(x).map(p => chip(p.text, 'warn', p.title));
+const linkBtn = (text: string, title: string, onclick: () => void): VNode => h('button', { type: 'button', class: 'lnk', title, onclick: (e: Event) => { e.stopPropagation(); onclick(); } }, text);
+/** The RPF interface and neighbour of a route, with links to the neighbour's multicast table and to the interface statistics on both switches. */
+function rpfLine(x: Rpf, group: string): VNode | null {
+  if (!x.inIf && !x.neighbor) return null;
+  const me = detail?.device;
+  return h('span', { class: 'row', style: 'gap:6px 10px;flex-wrap:wrap;align-items:center' },
+    x.inIf ? h('span', null, 'RPF interface ', me ? linkBtn(x.inIf, `Open ${x.inIf} on ${me.name} in Interfaces`, () => go('links', { dev: me.id, if: x.inIf ?? undefined })) : h('b', { class: 'mono' }, x.inIf)) : null,
+    x.neighbor ? h('span', null, 'neighbour ', h('b', { class: 'mono' }, x.neighbor), x.who ? ` (${x.who})` : '') : null,
+    x.peer ? [
+      linkBtn(`${x.peer.name} multicast table`, `Open ${group} on ${x.peer.name}`, () => go('multicast', { dev: x.peer!.id, g: group })),
+      linkBtn(`${x.peer.ifName} on ${x.peer.name}`, `Open ${x.peer.ifName} on ${x.peer.name} in Interfaces`, () => go('links', { dev: x.peer!.id, if: x.peer!.ifName }))
+    ] : null,
+    x.route ? h('span', { title: 'Reverse path forwarding: the unicast route back to the source (or to the rendezvous point for a shared tree) decides which interface the router accepts this group on. Traffic on any other interface is dropped.' }, 'via route ', h('b', { class: 'mono' }, x.route), x.proto ? ` (${x.proto})` : '') : null,
+    x.paths && x.paths > 1 ? h('span', { class: 'dim', title: 'From the router\'s forwarding table (CISCO-CEF-MIB): more than one next hop for the route to the source' }, `${x.paths} equal-cost paths to the source`) : null,
+    x.failures && !(x.failuresNew && x.failuresMajor) ? h('span', { class: 'dim', title: 'A counter kept by the router since this route was created. ' + (x.paths && x.paths > 1 ? `The router has ${x.paths} equal-cost paths to this source, so a small amount is expected.` : 'A small amount is typical when two equal-cost paths lead to the source and multicast multipath is on.') }, `${num(x.failures)} packets dropped on the wrong interface since the route was created${x.failuresNew ? `; ${num(x.failuresNew)} in the last read${x.failuresShare != null ? ` (${x.failuresShare}% of its packets)` : ''}, minor` : ''}`) : null,
+    ...rpfFlags(x));
+}
+/** One line per distinct RPF interface and neighbour in a group. */
+function groupRpf(list: Route[], group: string): VNode | null {
+  const by = new Map<string, { x: Rpf; n: number }>();
+  for (const r of list) { if (!r.rpf) continue; const k = `${r.rpf.inIf}|${r.rpf.neighbor}`; const e = by.get(k); if (e) { e.n++; if (r.rpf.failures) e.x = { ...e.x, failures: (e.x.failures ?? 0) + r.rpf.failures }; if (r.rpf.peer?.forwarding === false && e.x.peer) e.x = { ...e.x, peer: { ...e.x.peer, forwarding: false } }; } else by.set(k, { x: { ...r.rpf }, n: 1 }); }
+  if (!by.size) return null;
+  return h('div', { class: 'col', style: 'gap:4px;margin:4px 0 8px;font-size:12.5px' }, [...by.values()].slice(0, 6).map(e => h('div', { key: e.x.inIf + '|' + e.x.neighbor, class: 'row', style: 'gap:8px;align-items:center;flex-wrap:wrap' }, rpfLine({ ...e.x, route: by.size === 1 ? e.x.route : null }, group), by.size > 1 ? h('span', { class: 'dim' }, `${num(e.n)} source${e.n === 1 ? '' : 's'}`) : null)));
+}
+
+/** One chip per kind of RPF problem across a group's routes, so a collapsed group still shows that something is wrong. */
+function flagsOf(list: Route[]): (VNode | string)[] {
+  const by = new Map<string, { p: { key: string; text: string; title: string }; n: number }>();
+  for (const r of list) for (const p of rpfProblems(r.rpf)) { const e = by.get(p.key); if (e) e.n++; else by.set(p.key, { p, n: 1 }); }
+  if (!by.size) return [];
+  const short: Record<string, string> = { drops: 'RPF drops', nofwd: 'not forwarding', loss: 'link loss' };
+  const all = [...by.values()], what = all.map(e => e.p.text).join(', ');
+  return [' ', chip(all.length === 1 ? short[all[0]!.p.key] ?? all[0]!.p.text : `${all.length} issues`, 'warn', `${what}${list.length > 1 ? ' (open the group for which sources)' : ''}`)];
+}
+
 function groupRows(g: Grp): VNode {
-  const cols = '28px minmax(120px,1fr) minmax(110px,1fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
+  const cols = '28px minmax(120px,1fr) minmax(110px,0.9fr) minmax(110px,1fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
   const list = g.routes;
   // a group with one route needs no middle level: its row opens the route directly
-  if (list.length === 1) return routeRow(list[0]!, cols, [h('span', { class: 'mono', style: 'font-weight:600' }, g.group), sourceCell(list[0]!)]);
-  const on = groupOpen(g.group);
+  if (list.length === 1) return routeRow(list[0]!, cols, [grpLabel(g.group), underlayCell(list[0]), sourceCell(list[0]!)]);
+  const on = groupOpen(g);
   const fwd = new Set<string>(); for (const r of list) for (const o of r.out) if (o.forwarding) fwd.add(o.name);
   const arrives = [...new Set(list.map(r => r.inIf).filter((x): x is string => !!x))];
   const total = list.some(r => r.bps !== null) ? list.reduce((a, r) => a + (r.bps ?? 0), 0) : null;
   const rps = [...new Set(list.map(r => r.rp).filter((x): x is string => !!x))];
   const sub = 'minmax(150px,1.2fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
-  const sorted = [...list].sort((a, b) => (b.bps ?? -1) - (a.bps ?? -1) || a.source.localeCompare(b.source, undefined, { numeric: true }));
-  return h('div', { key: 'g|' + g.group },
-    h('div', { class: 'tr', role: 'button', tabindex: 0, 'aria-expanded': on, style: 'cursor:pointer', onclick: () => toggleGroup(g.group), onkeydown: keyDown(() => toggleGroup(g.group)) },
+  const sorted = [...list].sort((a, b) => Number(b.sharedTree) - Number(a.sharedTree) || (b.bps ?? -1) - (a.bps ?? -1) || a.source.localeCompare(b.source, undefined, { numeric: true }));
+  return h('div', { key: 'g|' + gkey(g.vrf, g.group) },
+    h('div', { class: 'tr', role: 'button', tabindex: 0, 'aria-expanded': on, style: 'cursor:pointer', onclick: () => toggleGroup(g), onkeydown: keyDown(() => toggleGroup(g)) },
       h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾' : '▸'),
-      h('span', { class: 'mono', style: 'font-weight:600' }, g.group),
+      grpLabel(g.group), underlayCell(list.find(r => r.underlay || r.overlay?.length)),
       h('span', { class: 'mono', style: 'font-size:12px' }, chip(`${num(list.length)} sources`, 'default', 'Click to list the sources of this group')),
-      h('span', { class: 'mono', style: 'font-size:12px' }, arrives.slice(0, 2).join(', ') + (arrives.length > 2 ? ` +${arrives.length - 2}` : '') || '—'),
+      h('span', { class: 'mono', style: 'font-size:12px' }, arrives.slice(0, 2).join(', ') + (arrives.length > 2 ? ` +${arrives.length - 2}` : '') || '—', ...(flagsOf(list))),
       h('span', { class: 'mono', style: 'font-size:12px' }, [...fwd].slice(0, 4).join(', ') || h('span', { class: 'dim' }, 'nowhere'), fwd.size > 4 ? ` +${fwd.size - 4}` : ''),
       h('span', { class: 'mono', style: 'font-size:12px' }, total === null ? '—' : total === 0 ? '0' : bps(total)),
       h('span', { class: 'mono dim', style: 'font-size:12px' }, rps.length ? rps[0] + (rps.length > 1 ? ` +${rps.length - 1}` : '') : '—')),
     on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 28px;border-left:2px solid var(--line);padding-left:10px' },
+      groupRpf(list, g.group),
       h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:28px ${sub};--w:760px` },
         h('div', { class: 'tr head' }, ...['', 'Source', 'Arrives on', 'Sent out of', 'Rate', 'Rendezvous point'].map(t => h('span', null, t))),
         sorted.map(r => routeRow(r, cols, [sourceCell(r)]))))) : null);
 }
 
+/** Whether a route is shown with the VRF filter and the underlay setting. A search for an underlay group shows it. */
+const inView = (r: Route): boolean => (vrfSel === 'all' || (vrfSel === '@' ? r.vrf === '' : r.vrf === vrfSel)) && (!r.carrier || showCarriers || !!query);
+
 function table(d: Detail): VNode {
-  const rows = d.routes.filter(r => matches(r, query) && (!onlyForwarding || r.out.some(o => o.forwarding)) && (!hideIdle || (r.bps ?? 1) > 0));
+  const rows = d.routes.filter(r => inView(r) && matches(r, query) && (!onlyForwarding || r.out.some(o => o.forwarding)) && (!hideIdle || (r.bps ?? 1) > 0));
   const by = new Map<string, Route[]>();
-  for (const r of rows) { const a = by.get(r.group); if (a) a.push(r); else by.set(r.group, [r]); }
-  const groups: Grp[] = [...by].map(([group, routes]) => ({ group, routes }));
+  for (const r of rows) { const k = gkey(r.vrf, r.group); const a = by.get(k); if (a) a.push(r); else by.set(k, [r]); }
+  // the VRFs first, in name order, then the default VRF
+  const order = (v: string): string => (v === '' ? '\uffff' : v);
+  const groups: Grp[] = [...by.values()].map(routes => ({ group: routes[0]!.group, vrf: routes[0]!.vrf, routes })).sort((x, y) => order(x.vrf).localeCompare(order(y.vrf)) || x.group.localeCompare(y.group, undefined, { numeric: true }));
   const pages = Math.max(1, Math.ceil(groups.length / pageSize));
   if (page >= pages) page = pages - 1;
   const shown = groups.slice(page * pageSize, (page + 1) * pageSize);
-  const cols = '28px minmax(120px,1fr) minmax(110px,1fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
+  const cols = '28px minmax(120px,1fr) minmax(110px,0.9fr) minmax(110px,1fr) minmax(90px,0.8fr) minmax(200px,2fr) 90px minmax(100px,0.9fr)';
+  const inVrf = (v: string): number => groups.filter(g => g.vrf === v).length;
+  const hiddenCarriers = d.routes.filter(r => r.carrier && !showCarriers && !query).length;
+  const out: VNode[] = []; let last: string | null = null;
+  for (const g of shown) {
+    if (g.vrf !== last) {
+      last = g.vrf;
+      out.push(h('div', { key: 'vrf|' + g.vrf, class: 'tr', style: 'background:var(--panel2,transparent);font-weight:600;cursor:default' },
+        h('span', null, ''), h('span', { style: 'grid-column:2 / -1;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap' },
+          g.vrf ? `VRF ${g.vrf}` : 'Default VRF', h('span', { class: 'dim', style: 'font-weight:400;font-size:12px' }, `${num(inVrf(g.vrf))} group${inVrf(g.vrf) === 1 ? '' : 's'}`,
+            g.vrf ? ` · the group is the real one; the underlay group is the default-VRF group that carries it between the switches` : ' · the underlay: groups that carry the VRF groups are hidden unless you ask for them'))));
+    }
+    out.push(groupRows(g));
+  }
   return h('div', null,
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:900px` },
-      h('div', { class: 'tr head' }, ...['', 'Group', 'Source', 'Arrives on', 'Sent out of', 'Rate', 'Rendezvous point'].map(t => h('span', null, t))),
-      shown.map(groupRows),
+    hiddenCarriers && !showCarriers ? h('div', { class: 'dim', style: 'font-size:12.5px;margin-bottom:6px' }, `${num(hiddenCarriers)} underlay route${hiddenCarriers === 1 ? '' : 's'} hidden: default-VRF groups that only carry the VRF groups between the switches. Each VRF group shows its underlay group in its own column.`) : null,
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:1010px` },
+      h('div', { class: 'tr head' }, ...['', 'Group', 'Underlay group', 'Source', 'Arrives on', 'Sent out of', 'Rate', 'Rendezvous point'].map(t => h('span', { title: t === 'Underlay group' ? UNDERLAY_WHY : undefined }, t))),
+      out,
       !shown.length ? empty(d.routes.length ? 'No routes match the filter.' : 'This device holds no multicast routes.') : null)),
     groups.length ? pager(groups.length, pages, page * pageSize + 1, page * pageSize + shown.length) : null);
+}
+
+/** The VRFs read for this device, each a button that narrows the tables to it. */
+function vrfLine(d: Detail): VNode {
+  return h('div', { class: 'row', style: 'gap:8px;align-items:center;flex-wrap:wrap;font-size:12.5px' },
+    h('span', { class: 'dim' }, 'VRFs, each read in its own SNMP context:'),
+    ...d.vrfs!.map(v => v.routes === null ? chip(`${v.name} (not read)`, 'warn', `No multicast could be read in the context vrf-${v.name}. It may not be set up for this credential, or the VRF does not route multicast.`)
+      : h('button', { type: 'button', class: 'lnk', title: `Show only VRF ${v.name}`, onclick: () => { vrfSel = vrfSel === v.name ? 'all' : v.name; page = 0; redraw(); } }, `${v.name} (${num(v.groups ?? 0)} ${v.groups === 1 ? 'group' : 'groups'})`)),
+    h('span', { class: 'dim' }, 'All are shown together. Ports are in the VRF of their VLAN\'s SVI.'));
 }
 
 function summary(s: DevSummary): VNode {
   return h('div', { class: 'row', style: 'gap:12px;flex-wrap:wrap' },
     stat('Groups', num(s.groups), `${num(s.routes)} routes`),
     stat('Forwarding', num(s.forwarding), 'routes with receivers'),
-    stat('IGMP joins', num(s.receivers), 'hosts reported'));
+    stat('IGMP joins', num(s.receivers), 'last reporter per group'));
 }
 
 export function render(): VNode {
@@ -208,29 +439,171 @@ export function render(): VNode {
         cur ? chip(cur.source === 'cisco' ? 'IPMROUTE + Cisco rates' : 'IPMROUTE standard', 'default', cur.source === 'cisco' ? 'Rates and route flags come from CISCO-IPMROUTE-MIB' : 'The device does not publish rates; only the standard table was read') : null,
         btn('Refresh', { small: true, onclick: () => { void loadDevices().then(() => loadDetail()); } })),
       cur ? summary(cur) : null,
+      detail?.vrfs?.length ? vrfLine(detail) : null,
+      detail ? pimSummary(detail) : null,
+      ...(detail?.pimIssues ?? []).map(i => note(i.text, i.level === 'warn' ? 'warn' : 'info')),
+      detail?.netflowIgmp !== undefined ? netflowNote(detail.netflowIgmp) : null,
+      cur ? fullListNote() : null,
+      detail?.routeSource === 'pim' ? note('This device does not publish the standard multicast routing table (IPMROUTE-STD-MIB), as NX-OS does not. The groups and sources below come from PIM, so they have no incoming or outgoing interfaces, rates or RPF information. Use the device\'s CLI (show ip mroute) for those.', 'info') : null,
       cur?.truncated ? note('This device holds more routes than FlowScope keeps. The list is cut off.', 'warn') : null,
-      h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },
-        textInput(query, v => { query = v; page = 0; }, { placeholder: 'Search groups and source hosts: 239.1.1.1, 10.2.3.4, a port, a switch…', aria: 'Search groups and source hosts', width: '420px', id: 'mc-filter' }),
-        toggle('Only groups with receivers', onlyForwarding, () => { onlyForwarding = !onlyForwarding; page = 0; redraw(); }),
-        cur?.source === 'cisco' ? toggle('Hide idle routes', hideIdle, () => { hideIdle = !hideIdle; page = 0; redraw(); }, { onText: 'Hiding idle', offText: 'Showing idle' }) : null),
+      detail ? tabBar(detail) : null,
       loading && !detail ? spinner('Loading routes…') : null,
       detailError ? note(detailError, 'warn', true) : null,
-      detail ? table(detail) : null,
-      detail?.load?.length ? loadTable(detail.load) : null,
-      detail && detail.pim.neighbors.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'PIM neighbours: ', detail.pim.neighbors.map(n => `${n.address} on ${n.ifName}`).join(', ')) : null) : null);
+      detail && tab === 'routes' ? h('div', { class: 'col', style: 'gap:14px' },
+        h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },
+          textInput(query, v => { query = v; page = 0; }, { placeholder: 'Search groups and source hosts: 239.1.1.1, 10.2.3.4, a port, a switch…', aria: 'Search groups and source hosts', width: '420px', id: 'mc-filter' }),
+          detail.vrfs?.length ? select(vrfSel, [['all', 'All VRFs'] as [string, string], ['@', 'Default VRF only'] as [string, string], ...detail.vrfs.map(v => [v.name, `VRF ${v.name}`] as [string, string])], v => { vrfSel = v; page = 0; redraw(); }, { aria: 'Show the groups of one VRF', width: '180px' }) : null,
+          detail.routes.some(r => r.carrier) ? toggle('Underlay groups', showCarriers, () => { showCarriers = !showCarriers; page = 0; redraw(); }, { onText: 'Shown', offText: 'Hidden' }) : null,
+          toggle('Only groups with receivers', onlyForwarding, () => { onlyForwarding = !onlyForwarding; page = 0; redraw(); }),
+          cur?.source === 'cisco' ? toggle('Hide idle routes', hideIdle, () => { hideIdle = !hideIdle; page = 0; redraw(); }, { onText: 'Hiding idle', offText: 'Showing idle' }) : null),
+        table(detail)) : null,
+      detail && tab === 'load' ? (detail.load?.length ? loadTable(detail.load, detail.routes.filter(r => vrfSel === 'all' || (vrfSel === '@' ? r.vrf === '' : r.vrf === vrfSel)), !!detail.truncated, detail.ifVrf ?? {}) : empty('This device publishes no per-interface multicast counters.')) : null,
+      detail && tab === 'rpf' ? (rpfSection(detail) ?? empty('No wrong-interface drops now, and none in the last 24 hours.')) : null,
+      detail && tab === 'igmp' ? h('div', { class: 'col', style: 'gap:14px' },
+        detail.igmp?.length ? igmpTable(detail.igmp) : null,
+        detail.rps && (detail.rps.map.length || detail.rps.candidate.length || detail.rps.inUse?.length) ? rpTable(detail.rps) : null,
+        detail.pim.neighbors.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'PIM neighbours: ', detail.pim.neighbors.map(n => `${n.address} on ${n.ifName}`).join(', ')) : null,
+        !detail.igmp?.length && !(detail.rps && (detail.rps.map.length || detail.rps.candidate.length || detail.rps.inUse?.length)) && !detail.pim.neighbors.length ? empty('This device published no IGMP querier, rendezvous point or PIM neighbour information.') : null) : null) : null);
+}
+
+/** The sections of the page, one tab each: the routes themselves, the load on each interface, wrong-interface drops, and the IGMP and rendezvous point setup. */
+function tabBar(d: Detail): VNode {
+  const dropping = d.routes.filter(r => (r.rpf?.failuresNew ?? 0) > 0).length;
+  const items: { id: Tab; label: string }[] = [
+    { id: 'routes', label: `Routes (${num(new Set(d.routes.map(r => r.group)).size)} groups)` },
+    { id: 'load', label: `Interface load${d.load?.length ? ` (${num(d.load.length)})` : ''}` },
+    { id: 'rpf', label: dropping ? `RPF drops (${num(dropping)} now)` : 'RPF drops' },
+    { id: 'igmp', label: 'IGMP and rendezvous points' }
+  ];
+  return tabs('Multicast sections', items.map(i => ({ ...i, on: tab === i.id })), id => { tab = id as Tab; redraw(); });
+}
+
+/** What NetFlow contributed to the host lists, so an empty result can be told from a feed that does not carry IGMP. */
+function netflowNote(n: NonNullable<Detail['netflowIgmp']> | null): VNode {
+  if (!n) return h('div', { class: 'dim', style: 'font-size:12.5px' }, 'NetFlow: no flow exporter is matched to this device, so hosts come from SNMP only.');
+  if (!n.reports && !n.v3Hosts) return h('div', { class: 'dim', style: 'font-size:12.5px' }, `NetFlow: no IGMP reports from this device in the last ${n.windowMin} minutes, so hosts come from SNMP only. Either no host is reporting through it, or its flow export does not include IGMP (many do not, and sampled exports drop most of it).`);
+  return h('div', { class: 'dim', style: 'font-size:12.5px' }, `NetFlow: ${num(n.reports)} IGMP report${n.reports === 1 ? '' : 's'} from ${num(n.hosts)} host${n.hosts === 1 ? '' : 's'} in the last ${n.windowMin} minutes name a group (IGMP version 1 or 2). `,
+    n.v3Hosts ? `${num(n.v3Hosts)} host${n.v3Hosts === 1 ? '' : 's'} also sent version 3 reports, which NetFlow cannot attribute to a group. ` : '',
+    n.unmatched ? `${num(n.unmatched)} report${n.unmatched === 1 ? ' was' : 's were'} for a group or interface this router does not forward to and is left out.` : '');
+}
+
+/** Wrong-interface (RPF) drops: the routes dropping now, and how many drops per minute there were over the last day. Shown only when there is something to show. */
+function rpfSection(d: Detail): VNode | null {
+  const now = d.routes.filter(r => (vrfSel === 'all' || (vrfSel === '@' ? r.vrf === '' : r.vrf === vrfSel)) && (r.rpf?.failuresNew ?? 0) > 0).sort((a, b) => (b.rpf!.failuresNew ?? 0) - (a.rpf!.failuresNew ?? 0));
+  const hist = d.rpfHistory ?? [];
+  if (!now.length && !hist.some(p => p.perMin > 0)) return null;
+  const to = Date.now(), from = to - 86_400_000, peak = Math.max(...hist.map(p => p.perMin), 1);
+  const fmtT = (t: number): string => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return h('div', { class: 'col', style: 'gap:8px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Wrong-interface drops (RPF)'),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'packets that arrived on an interface other than the one the route accepts its group on; counted by the router per route, read about every two minutes')),
+    hist.length > 1 ? lineChart({ title: 'Packets dropped per minute, last 24 hours', unit: v => (v >= 1000 ? (v / 1000).toFixed(1) + 'k' : String(Math.round(v))), fmtV: v => `${(Math.round(v * 10) / 10).toLocaleString('en-US')} per minute`, from, to, fmtT, wide: true, h: 160, yMax: peak * 1.15,
+      series: [{ name: 'Dropped', color: 'var(--s3)', points: hist.map(p => ({ t: p.ts, v: p.perMin })) }], aria: 'Packets dropped by the RPF check per minute over the last 24 hours' }) : null,
+    now.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) minmax(100px,0.8fr) 110px 120px 140px;--w:760px' },
+      h('div', { class: 'tr head' }, ...['Group', 'Source', 'Arrives on', 'Since last read', 'Share of packets', 'Since route created'].map(t => h('span', null, t))),
+      now.slice(0, 15).map(r => h('div', { key: keyOf(r), class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, linkBtn(r.group, `Show ${r.group} in the table`, () => { query = r.group; page = 0; tab = 'routes'; redraw(); window.scrollTo({ top: 0 }); }), r.vrf ? h('span', { class: 'dim', style: 'font-size:11px' }, `  VRF ${r.vrf}`) : null),
+        h('span', { class: 'mono', style: 'font-size:12px' }, r.sharedTree ? '* (any source)' : r.source), h('span', { class: 'mono', style: 'font-size:12px' }, r.inIf ?? '—'),
+        h('span', { class: 'mono', style: 'font-size:12px' }, num(r.rpf!.failuresNew)), h('span', { class: 'mono', style: 'font-size:12px' }, r.rpf!.failuresShare != null ? h('span', null, `${r.rpf!.failuresShare}% `, r.rpf!.failuresMajor ? chip('high', 'warn', 'A large share of what the route carried: drops this size point to a changed route or two paths both sending the group') : h('span', { class: 'dim', title: 'A small share, typical of equal-cost paths with multicast multipath' }, 'minor')) : '—'), h('span', { class: 'mono dim', style: 'font-size:12px' }, num(r.rpf!.failures)))))) : h('span', { class: 'dim', style: 'font-size:12.5px' }, 'No route is dropping at the moment.'),
+    now.length > 15 ? h('span', { class: 'dim', style: 'font-size:12px' }, `${num(now.length - 15)} more routes are dropping.`) : null);
+}
+
+/** The IGMP querier on each interface: the router that sends the membership queries, which keeps memberships alive. */
+function igmpTable(list: IgmpIf[]): VNode {
+  return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'IGMP queriers'),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'on a segment with several routers, the one with the lowest address queries; hosts only answer queries')),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(120px,1fr) minmax(170px,1.4fr) 80px 110px 130px;--w:640px' },
+      h('div', { class: 'tr head' }, ...['Interface', 'Querier', 'Version', 'Query interval', 'Querier for'].map(t => h('span', null, t))),
+      list.map(i => h('div', { key: i.name, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, i.name),
+        h('span', { class: 'mono', style: 'font-size:12px' }, i.querier ? h('span', null, i.querier, ' ', i.self ? chip('this router', 'ok') : i.who ? chip(i.who, 'default') : null) : chip('none', i.hosts ? 'bad' : 'default', i.hosts ? 'Hosts joined here but no querier is reported, so their memberships are not refreshed' : 'No querier is reported on this interface')),
+        h('span', { class: 'mono', style: 'font-size:12px' }, i.version ? 'v' + i.version : '—'),
+        h('span', { class: 'mono', style: 'font-size:12px' }, i.intervalSec ? sec(i.intervalSec) : '—'),
+        h('span', { class: 'mono dim', style: 'font-size:12px' }, i.querier && i.upSec !== null ? ageText(i.upSec).replace(' ago', '') : '—'))))));
+}
+
+/** The rendezvous points the router knows and the group ranges they serve. */
+function rpTable(rps: NonNullable<Detail['rps']>): VNode {
+  return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Rendezvous points'),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'SNMP does not say whether a mapping is configured by hand or learned from Auto-RP or a bootstrap router')),
+    rps.inUse?.length && !rps.map.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(200px,1.4fr) 90px 80px minmax(220px,2.4fr);--w:640px' },
+      h('div', { class: 'tr head' }, ...['Rendezvous point in use', 'State', 'Groups', 'Example groups'].map(t => h('span', null, t))),
+      rps.inUse.map(x => h('div', { key: x.rp, class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.rp, ' ', x.self ? chip('this router', 'ok') : x.who ? chip(x.who, 'default') : null),
+        h('span', null, x.up ? chip('up', 'ok') : chip('down', 'bad')), h('span', { class: 'mono', style: 'font-size:12px' }, num(x.groups.length)),
+        h('span', { class: 'mono dim', style: 'font-size:12px' }, x.groups.slice(0, 3).join(', ') + (x.groups.length > 3 ? ` +${x.groups.length - 3}` : '')))))) : null,
+    rps.map.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(150px,1fr) minmax(200px,1.6fr) 110px 110px;--w:600px' },
+      h('div', { class: 'tr head' }, ...['Group range', 'Rendezvous point', 'Hold time', 'Expires in'].map(t => h('span', null, t))),
+      rps.map.map(x => h('div', { key: x.range + x.rp, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.range),
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.rp, ' ', x.self ? chip('this router', 'ok') : x.who ? chip(x.who, 'default') : null),
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.holdSec !== null ? sec(x.holdSec) : '—'),
+        h('span', { class: 'mono dim', style: 'font-size:12px' }, x.expirySec ? sec(x.expirySec) : '—'))))) : null,
+    rps.candidate.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'This router is a candidate rendezvous point for ', rps.candidate.map(x => `${x.range} (${x.rp})`).join(', ')) : null);
 }
 
 /** Multicast bytes through each interface: replication multiplies it, so an interface can carry far more multicast out than came in. */
-function loadTable(list: NonNullable<Detail['load']>): VNode {
-  const shown = list.slice(0, 20);
+function loadTable(list: NonNullable<Detail['load']>, routes: Route[], truncated: boolean, ifVrf: Record<string, string> = {}): VNode {
+  const mono = 'font-size:12px';
+  /** The rate of every route arriving on / sent out of an interface, added up. The router measures each route itself, which is closer to the truth than the interface counter on a Catalyst. */
+  const sums = new Map<string, { inB: number; outB: number; any: boolean }>();
+  for (const r of routes) {
+    if (r.bps === null) continue;
+    if (r.inIf) { const e = sums.get(r.inIf) ?? { inB: 0, outB: 0, any: true }; e.inB += r.bps; sums.set(r.inIf, e); }
+    for (const o of r.out) if (o.forwarding) { const e = sums.get(o.name) ?? { inB: 0, outB: 0, any: true }; e.outB += r.bps; sums.set(o.name, e); }
+  }
+  const view = list.map(x => ({ ...x, sum: sums.get(x.name) ?? null })).sort((a, b) => ((b.sum?.inB ?? b.inBps ?? 0) + (b.sum?.outB ?? b.outBps ?? 0)) - ((a.sum?.inB ?? a.inBps ?? 0) + (a.sum?.outB ?? a.outBps ?? 0)));
+  const shown = view.slice(0, 20);
+  const rateCell = (fromRoutes: number | undefined, counter: number | null, what: string): VNode => fromRoutes !== undefined
+    ? h('span', { class: 'mono', style: mono, title: `Added up from the rate of each route ${what}. The interface's own counter gave ${counter === null ? 'no figure' : bps(counter)} over the last read.` }, bps(fromRoutes))
+    : h('span', { class: 'mono', style: mono, title: 'From the interface counter, since no route here reports a rate' }, counter === null ? '—' : bps(counter));
+  /** The groups this interface carries: arriving on it (it is the route's incoming interface) or sent out of it (forwarding outgoing interface). */
+  const groupsOn = (name: string): { r: Route; dir: 'in' | 'out' }[] => {
+    const out: { r: Route; dir: 'in' | 'out' }[] = [];
+    for (const r of routes) {
+      if (r.inIf === name) out.push({ r, dir: 'in' });
+      if (r.out.some(o => o.forwarding && o.name === name)) out.push({ r, dir: 'out' });
+    }
+    return out.sort((a, b) => Number(b.r.sharedTree) - Number(a.r.sharedTree) || (b.r.bps ?? -1) - (a.r.bps ?? -1) || a.r.group.localeCompare(b.r.group, undefined, { numeric: true }));
+  };
+  const sub = (name: string): VNode => {
+    const all = groupsOn(name), cap = 50;
+    // one row per group and direction. Groups sent out of the interface open to the hosts that joined them there, like an IGMP snooping table with each host's address.
+    const by = new Map<string, { group: string; vrf: string; dir: 'in' | 'out'; routes: Route[] }>();
+    for (const x of all) { const k = `${x.r.vrf}|${x.r.group}|${x.dir}`; const e = by.get(k); if (e) e.routes.push(x.r); else by.set(k, { group: x.r.group, vrf: x.r.vrf, dir: x.dir, routes: [x.r] }); }
+    const gs = [...by.values()].sort((x, y) => (x.dir === y.dir ? 0 : x.dir === 'out' ? -1 : 1) || x.group.localeCompare(y.group, undefined, { numeric: true }));
+    const total = (rs: Route[]): number | null => rs.some(r => r.bps !== null) ? rs.reduce((n, r) => n + (r.bps ?? 0), 0) : null;
+    const hostsOf = (g: { group: string; routes: Route[] }): { members: Member[]; viaNeighbor: boolean } => {
+      const seen = new Map<string, Member>(); let viaNeighbor = false;
+      for (const r of g.routes) for (const o of r.out) if (o.forwarding && o.name === name) { if (o.neighbor) viaNeighbor = true; for (const m of o.members ?? []) { const p = seen.get(m.ip); if (!p || m.ageSec < p.ageSec) seen.set(m.ip, m); } }
+      return { members: [...seen.values()].sort((x, y) => x.ageSec - y.ageSec), viaNeighbor };
+    };
+    if (!gs.length) return h('div', { class: 'dim', style: 'padding:6px 16px 10px 34px;font-size:12px' }, 'No route in this list arrives on or is sent out of this interface.' + (truncated ? ' The route list was cut off, so some may be missing.' : ''));
+    return h('div', { style: 'padding:2px 16px 10px 34px' }, h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) minmax(130px,1fr) 80px 110px;--w:620px' },
+      h('div', { class: 'tr head' }, ...['Group', 'Underlay group', 'Joined by', 'Direction', 'Rate'].map(t => h('span', { title: t === 'Underlay group' ? UNDERLAY_WHY : undefined }, t))),
+      gs.slice(0, cap).map(g => {
+        const t = total(g.routes), k = `${name}|${g.vrf}|${g.group}|${g.dir}`, out = g.dir === 'out', hs = out ? hostsOf(g) : null, on = out && openLoad.has(k);
+        const can = !!hs && hs.members.length > 0;
+        return h('div', { key: k },
+          h('div', { class: 'tr', role: can ? 'button' : undefined, tabindex: can ? 0 : undefined, 'aria-expanded': can ? on : undefined, style: can ? 'cursor:pointer' : undefined,
+            onclick: can ? () => toggleSet(openLoad, k) : undefined, onkeydown: can ? keyDown(() => toggleSet(openLoad, k)) : undefined },
+            h('span', { class: 'mono', style: mono }, can ? h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾ ' : '▸ ') : null, grpLabel(g.group), g.vrf ? h('span', { class: 'dim', style: 'font-size:11px' }, `  VRF ${g.vrf}`) : null),
+            underlayCell(g.routes.find(r => r.underlay || r.overlay?.length)),
+            out ? (can ? h('span', { class: 'mono', style: mono }, `${num(hs!.members.length)} ${hs!.members.length === 1 ? 'host' : 'hosts'}`) : h('span', { class: 'dim', style: mono }, hs!.viaNeighbor ? 'via the neighbour' : 'none seen'))
+              : h('span', { class: 'mono dim', style: mono, title: 'The group arrives on this interface from its source' }, g.routes.length === 1 ? (g.routes[0]!.sharedTree ? 'any source' : g.routes[0]!.source) : `${num(g.routes.length)} sources`),
+            h('span', { class: 'dim', style: mono, title: out ? 'The group is sent out of this interface' : 'The group arrives on this interface' }, out ? 'sent out' : 'arrives'),
+            h('span', { class: 'mono', style: mono }, t === null ? '—' : t === 0 ? '0' : bps(t))),
+          on && hs ? hostList(hs.members, name, g.group, hs.viaNeighbor) : null); }))),
+      gs.length > cap ? h('div', { class: 'dim', style: 'font-size:12px;padding-top:4px' }, `${num(gs.length - cap)} more groups not shown; use the Routes tab to find one`) : null);
+  };
   return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Multicast load by interface'),
-    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'rate since the previous read, and the total since the counters started')),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'rate is the routes\' own rates added up (interface counter when no route reports one); bytes are the interface counter since it started; open an interface to see its groups')),
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(140px,1fr) 110px 110px 130px 130px 90px;--w:700px' },
       h('div', { class: 'tr head' }, ...['Interface', 'Rate in', 'Rate out', 'Bytes in', 'Bytes out', 'Limit'].map(t => h('span', null, t))),
-      shown.map(x => h('div', { key: x.name, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.name),
-        h('span', { class: 'mono', style: 'font-size:12px' }, x.inBps === null ? '—' : bps(x.inBps)), h('span', { class: 'mono', style: 'font-size:12px' }, x.outBps === null ? '—' : bps(x.outBps)),
-        h('span', { class: 'mono', style: 'font-size:12px' }, x.inOctets === null ? '—' : num(x.inOctets)), h('span', { class: 'mono', style: 'font-size:12px' }, x.outOctets === null ? '—' : num(x.outOctets)),
-        h('span', { class: 'dim', style: 'font-size:12px' }, x.rateLimit ? `${num(x.rateLimit)} kbps` : x.ttl ? `TTL ${x.ttl}` : 'none'))))),
+      shown.map(x => { const on = openLoad.has(x.name), n = new Set(groupsOn(x.name).map(g => g.r.group)).size; return h('div', { key: x.name },
+        h('div', { class: 'tr', role: 'button', tabindex: 0, 'aria-expanded': on, style: 'cursor:pointer', onclick: () => toggleSet(openLoad, x.name), onkeydown: keyDown(() => toggleSet(openLoad, x.name)) },
+          h('span', { class: 'mono', style: mono }, h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾ ' : '▸ '), x.name, ifVrf[x.name] ? h('span', { class: 'dim', style: 'font-size:11px', title: 'The VRF of this interface, or of the VLAN a port is in (the VRF belongs to the VLAN\'s SVI)' }, `  VRF ${ifVrf[x.name]}`) : null, h('span', { class: 'dim' }, `  ${num(n)} ${n === 1 ? 'group' : 'groups'}`)),
+          rateCell(x.sum?.inB, x.inBps, 'arriving on it'), rateCell(x.sum?.outB, x.outBps, 'sent out of it'),
+          h('span', { class: 'mono', style: mono }, x.inOctets === null ? '—' : num(x.inOctets)), h('span', { class: 'mono', style: mono }, x.outOctets === null ? '—' : num(x.outOctets)),
+          h('span', { class: 'dim', style: mono }, x.rateLimit ? `${num(x.rateLimit)} kbps` : x.ttl ? `TTL ${x.ttl}` : 'none')),
+        on ? sub(x.name) : null); }))),
     list.length > shown.length ? h('span', { class: 'dim', style: 'font-size:12px' }, `${list.length - shown.length} quieter interfaces not shown`) : null);
 }
 

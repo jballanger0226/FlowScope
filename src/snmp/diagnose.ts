@@ -8,7 +8,16 @@ import { juniperSource, diffservSource, type QosSource } from './qos_vendors.js'
 import { readResources } from './resources.js';
 import { readIfExtra, readSensors, readPoe, readStp, readOspf, readBgp, readEigrp, readBfd } from './health.js';
 import { readFib } from './fib.js';
+import { readEntity, modelText } from './entity.js';
 import { readDhcpBindings } from './dhcp_snooping.js';
+import { readAuthSessions } from './authsessions.js';
+import { readPae } from './dot1x.js';
+import { readSgt } from './sgt.js';
+import { readAaa } from './aaa.js';
+import { readLisp } from './lisp.js';
+import { readAuthSetup } from './authsetup.js';
+import { readConfigState } from './confighist.js';
+import { readVrfs, contextOf } from './vrf.js';
 import { readDai, readNbar, readProcesses, readStack } from './cisco_extra.js';
 import { readWlanFor, wlanVendor } from './wlan_vendors.js';
 
@@ -37,6 +46,20 @@ export function vendorOf(objectId = '', descr = '', cisco = false): Vendor {
   for (const [p, v] of VENDOR_PREFIX) if (id.startsWith(p)) return v;
   if (cisco) return 'cisco';
   return /freebsd|linux|opnsense|pfsense|net-snmp/i.test(descr) ? 'netsnmp' : 'other';
+}
+
+/**
+ * Where to see the full IGMP snooping membership on a switch, which SNMP does not give. Only commands known to be right are listed; any other
+ * vendor gets none, and the page then points at the switch's IGMP snooping table in general.
+ */
+export function igmpHint(vendor: Vendor, descr = ''): { vendor: Vendor; platform: string; command: string | null } {
+  switch (vendor) {
+    case 'cisco': return { vendor, platform: /nx-os/i.test(descr) ? 'NX-OS' : /ios[ -]?xe|iosxe/i.test(descr) ? 'IOS XE' : 'IOS', command: 'show ip igmp snooping groups' };
+    case 'juniper': return { vendor, platform: 'Junos', command: 'show igmp snooping membership' };
+    case 'arista': return { vendor, platform: 'EOS', command: 'show ip igmp snooping groups' };
+    case 'h3c': return { vendor, platform: 'Comware', command: 'display igmp-snooping group' };
+    default: return { vendor, platform: '', command: null };
+  }
 }
 
 /** Which MIBs this kind of device should be expected to publish. Everything else is not looked for, so a Cisco switch is never asked about Juniper's MIBs. */
@@ -107,7 +130,7 @@ const WIFI_HINT: Record<string, string> = {
   cisco: 'Cisco wireless controllers publish access points and clients in CISCO-LWAPP-AP-MIB (.1.3.6.1.4.1.9.9.513) and CISCO-LWAPP-DOT11-CLIENT-MIB (.1.3.6.1.4.1.9.9.599).'
 };
 const GROUP: Record<string, CheckGroup> = { interfaces: 'basics', counters: 'basics', resources: 'basics', lldp: 'neighbours', cdp: 'neighbours', mac: 'hosts', arp: 'hosts', vlans: 'hosts',
-  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', dai: 'hosts', stack: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
+  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', auth: 'hosts', sgt: 'hosts', aaa: 'hosts', lisp: 'routing', authsetup: 'hosts', config: 'hardware', dot1x: 'hosts', vrf: 'routing', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
 const GROUP_ORDER: CheckGroup[] = ['basics', 'neighbours', 'hosts', 'hardware', 'routing', 'quality', 'wifi'];
 
 async function attempt<T>(fn: () => Promise<T>, empty: T): Promise<{ v: T; error: string | null }> {
@@ -226,43 +249,93 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
   if (ex.mcast) {
     const m = mcast.v;
     const groups = m ? new Set(m.routes.map(r => r.group)).size : 0;
-    const missing = m ? [m.source === 'standard' ? 'the Cisco rate and flags table (CISCO-IPMROUTE-MIB), so no rates' : null, m.pimInterfaces.length ? null : 'PIM-MIB, so no rendezvous points or neighbours', m.receivers.length ? null : 'any IGMP cache entry, so no joined hosts'].filter(Boolean) as string[] : [];
+    const missing = m ? [m.routeSource === 'pim' ? 'IPMROUTE-STD-MIB (as on NX-OS), so routes come from PIM-MIB with no interfaces or RPF' : null, m.source === 'standard' ? 'the Cisco rate and flags table (CISCO-IPMROUTE-MIB), so no rates' : null, m.pimInterfaces.length ? null : 'PIM-MIB, so no rendezvous points or neighbours', m.receivers.length ? null : 'any IGMP cache entry, so no joined hosts', (m.igmpInterfaces?.length ?? 0) || !m.receivers.length ? null : 'the IGMP interface table (IGMP-STD-MIB), so no queriers', m.routes.some(r => r.inIfIndex || r.upstream || r.rpf) ? null : 'any RPF interface or neighbour, so no RPF information'].filter(Boolean) as string[] : [];
     out.push(m ? { id: 'mcast', title: 'Multicast routing', group: 'routing', state: missing.length ? 'warn' : 'ok', count: m.routes.length,
-      detail: `${plural(m.routes.length, 'route')} for ${plural(groups, 'group')}, ${plural(m.receivers.length, 'IGMP join')}${m.pimInterfaces.length ? `, ${plural(m.pimInterfaces.length, 'PIM interface')}` : ''}.${missing.length ? ` Missing: ${missing.join('; ')}.` : ''}`,
-      hint: missing.length ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83), IGMP-STD-MIB (.1.3.6.1.2.1.85), PIM-MIB (.1.3.6.1.3.61) and Cisco CISCO-IPMROUTE-MIB (.1.3.6.1.4.1.9.10.2). Check the SNMP view of this credential includes them.' : undefined }
+      detail: `${plural(m.routes.length, 'route')} for ${plural(groups, 'group')}, ${plural(m.receivers.length, 'IGMP join')}${m.pimInterfaces.length ? `, ${plural(m.pimInterfaces.length, 'PIM interface')}` : ''}${m.igmpInterfaces?.length ? `, ${plural(m.igmpInterfaces.filter(i => i.querier).length, 'IGMP querier')} on ${plural(m.igmpInterfaces.length, 'interface')}` : ''}${(m.rpGroups?.length ?? 0) + (m.rpSet?.length ?? 0) ? `, ${plural(new Set([...(m.rpGroups ?? []).map(r => r.rp), ...(m.rpSet ?? []).map(r => r.rp)]).size, 'rendezvous point')}` : ''}${m.routes.some(r => r.rpf) ? `, RPF for ${plural(m.routes.filter(r => r.rpf).length, 'route')}` : ''}.${missing.length ? ` Missing: ${missing.join('; ')}.` : ''}`,
+      hint: missing.length ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83), IGMP-STD-MIB (.1.3.6.1.2.1.85, queriers in igmpInterfaceTable), PIM-MIB (.1.3.6.1.3.61) and Cisco CISCO-IPMROUTE-MIB (.1.3.6.1.4.1.9.10.2). Check the SNMP view of this credential includes them.' : undefined }
       : { id: 'mcast', title: 'Multicast routing', group: 'routing', state: 'na', count: 0, detail: mcast.error ?? 'No multicast routes (IPMROUTE-STD-MIB). Normal when this device does not route multicast.',
         hint: mcast.error ? 'Multicast tables are IPMROUTE-STD-MIB (.1.3.6.1.2.1.83). Check the SNMP view of this credential includes them.' : undefined });
   }
 
   // Cisco-only tables, read with the readers the poller uses. Each is "not applicable" when empty: a table appears only when the feature is in use.
   if (ex.cAny) {
-    const [fib, eigrp, bfd, dhcp, stack, dai, procs, nbar] = await Promise.all([
+    const [fib, eigrp, bfd, dhcp, auth, sgt, vrfs, stack, dai, procs, nbar, aaa, setup, cfg, lisp] = await Promise.all([
       ex.cRouting ? attempt(() => readFib(cl), null) : none(null as Awaited<ReturnType<typeof readFib>>),
       ex.cRouting ? attempt(() => readEigrp(cl), []) : none([] as Awaited<ReturnType<typeof readEigrp>>),
       ex.cRouting ? attempt(() => readBfd(cl), []) : none([] as Awaited<ReturnType<typeof readBfd>>),
       ex.cSwitch ? attempt(() => readDhcpBindings(cl), []) : none([] as Awaited<ReturnType<typeof readDhcpBindings>>),
+      ex.cSwitch ? attempt(() => readAuthSessions(cl), []) : none([] as Awaited<ReturnType<typeof readAuthSessions>>),
+      ex.cSwitch ? attempt(() => readSgt(cl), { bindings: [], names: new Map<number, string>() }) : none({ bindings: [], names: new Map<number, string>() }),
+      ex.cRouting || ex.cSwitch ? attempt(() => readVrfs(cl), null) : none(null as Awaited<ReturnType<typeof readVrfs>>),
       ex.cSwitch ? attempt(() => readStack(cl), null) : none(null as Awaited<ReturnType<typeof readStack>>),
       ex.cSwitch ? attempt(() => readDai(cl, null), null) : none(null as Awaited<ReturnType<typeof readDai>>),
       attempt(() => readProcesses(cl), null),
-      attempt(() => readNbar(cl), null)
+      attempt(() => readNbar(cl), null),
+      ex.cSwitch ? attempt(() => readAaa(cl, null), null) : none(null as Awaited<ReturnType<typeof readAaa>>),
+      ex.cSwitch ? attempt(() => readAuthSetup(cl), []) : none([] as Awaited<ReturnType<typeof readAuthSetup>>),
+      attempt(() => readConfigState(cl), null),
+      ex.cRouting || ex.cSwitch ? attempt(() => readLisp(cl, null), null) : none(null as Awaited<ReturnType<typeof readLisp>>)
     ]);
     const view = 'Check the SNMP view of this credential includes it.';
     const row = (id: string, title: string, count: number, okText: string, naText: string, error: string | null, hint: string): void => {
       out.push(count ? { id, title, group: GROUP[id], state: 'ok', count, detail: okText } : { id, title, group: GROUP[id], state: 'na', count: 0, detail: error ?? naText, hint: error ? `${hint} ${view}` : undefined });
     };
+    row('config', 'Configuration changes', cfg.v ? 1 : 0, `The running configuration was last changed ${cfg.v?.changedAt ? new Date(cfg.v.changedAt).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : 'before the device started'} and is ${cfg.v?.unsaved ? 'not saved to startup' : 'saved'}.`, 'No configuration change history (CISCO-CONFIG-MAN-MIB).', cfg.error, 'CISCO-CONFIG-MAN-MIB is .1.3.6.1.4.1.9.9.43.');
+    if (ex.cRouting || ex.cSwitch) {
+      const lv = lisp.v;
+      row('lisp', 'LISP fabric (SD-Access)', lv?.cacheTotal ?? 0, `${plural(lv?.instances.filter(i => i.cacheSize > 0 || lv.registered.some(r => r.iid === i.iid)).length ?? 0, 'instance')} in use: ${plural(lv?.cacheTotal ?? 0, 'map cache entry', 'map cache entries')} (${lv?.cache.filter(e => e.active).length ?? 0} in use), ${plural(lv?.registered.length ?? 0, 'registered address', 'registered addresses')}, ${lv?.mapServers.total ?? 0} map servers and ${lv?.mapResolvers.total ?? 0} map resolvers${lv?.problems.length ? '. ' + lv.problems[0] : ''}. Shown on the Network tab: endpoints in use, the registration check and cache churn. The cache's own traffic counters are not used (a Catalyst forwards in hardware and leaves them at zero).`,
+        'No LISP data (LISP-MIB). Normal when the device is not part of an SD-Access fabric.', lisp.error, 'LISP-MIB is .1.3.6.1.2.1.220.');
+    }
     if (ex.cRouting) {
-      row('fib', 'Forwarding table (CEF)', fib.v?.entries.length ?? 0, `${plural(fib.v?.entries.length ?? 0, 'prefix', 'prefixes')} with their outgoing interfaces${fib.v?.truncated ? ' (cut off at the most that FlowScope keeps)' : ''}. Used to check that a flow left the interface the routing table says it should.`,
+      row('fib', 'Forwarding table (CEF)', fib.v?.entries.length ?? 0, `${plural(fib.v?.entries.length ?? 0, 'prefix', 'prefixes')} with their outgoing interfaces${fib.v?.truncated ? ' (cut off at the most that FlowScope keeps)' : ''}. ${(() => { const n = fib.v?.entries.filter(e => e.paths.filter(p => p.kind !== 'receive').length > 1).length ?? 0; return n ? ` ${plural(n, 'prefix', 'prefixes')} have equal-cost paths, which the multicast page uses to read RPF drops.` : ''; })()} Used to check that a flow left the interface the routing table says it should.`,
         'No forwarding table (CISCO-CEF-MIB). It needs CEF, which is on by default on routers and Layer 3 switches.', fib.error, 'CISCO-CEF-MIB is .1.3.6.1.4.1.9.9.492.');
       row('eigrp', 'EIGRP neighbours', eigrp.v.length, `${plural(eigrp.v.length, 'neighbour')}, ${eigrp.v.filter(p => p.level === 'ok').length} without retransmissions.`, 'No EIGRP neighbours (CISCO-EIGRP-MIB). Normal when this device does not run EIGRP.', eigrp.error, 'CISCO-EIGRP-MIB is .1.3.6.1.4.1.9.9.449.');
       row('bfd', 'BFD sessions', bfd.v.length, `${plural(bfd.v.length, 'session')}, ${bfd.v.filter(b => b.level === 'ok').length} up.`, 'No BFD sessions (CISCO-IETF-BFD-MIB). Normal when BFD is not configured.', bfd.error, 'CISCO-IETF-BFD-MIB is .1.3.6.1.4.1.9.10.137.');
     }
+    // VRFs, and whether each can be read in its own SNMP context (multicast, PIM and IGMP are scoped per context)
+    if (ex.cRouting || ex.cSwitch) {
+      const names = vrfs.v ?? [];
+      const ctx: { name: string; routes: number; ok: boolean }[] = [];
+      if (ex.mcast) for (const v of names.slice(0, 12)) {
+        const cc = cl.forContext(contextOf(v.name));
+        try { const m = await readMulticast(cc, Date.now(), true); ctx.push({ name: v.name, routes: m?.routes.length ?? 0, ok: !!m && m.routes.length > 0 }); } catch { ctx.push({ name: v.name, routes: 0, ok: false }); } finally { cc.close(); }
+      }
+      const bad = ctx.filter(x => !x.ok).map(x => x.name);
+      out.push(names.length ? { id: 'vrf', title: 'VRFs and SNMP contexts', group: 'routing', state: ctx.length && bad.length ? 'warn' : 'ok', count: names.length,
+        detail: `${plural(names.length, 'VRF')}: ${names.map(v => v.name).join(', ')}.${ctx.length ? ` Multicast is read in each VRF's own context (${contextOf('<NAME>')}): ${plural(ctx.length - bad.length, 'VRF')} answered with routes${bad.length ? `, ${bad.join(', ')} gave nothing (no multicast there, or the context is not set up)` : ''}.` : ''}`,
+        hint: bad.length ? 'Needs "snmp-server context vrf-<NAME>" and "snmp context vrf-<NAME>" under the VRF address family, and for SNMPv3 a group that may read the context (context vrf- match prefix). VRFs are listed from MPLS-L3VPN-STD-MIB (.1.3.6.1.2.1.10.166.11).' : undefined }
+        : { id: 'vrf', title: 'VRFs and SNMP contexts', group: 'routing', state: 'na', count: 0, detail: vrfs.error ?? 'No VRFs (MPLS-L3VPN-STD-MIB). Normal when the device has only the default routing table.', hint: vrfs.error ? 'MPLS-L3VPN-STD-MIB is .1.3.6.1.2.1.10.166.11. Check the SNMP view of this credential includes it.' : undefined });
+    }
     if (ex.cSwitch) {
       row('dhcp', 'DHCP snooping bindings', dhcp.v.length, `${plural(dhcp.v.length, 'binding')}: each gives a host's MAC address, IP address, VLAN and port without needing an ARP entry.`, 'No DHCP snooping bindings (CISCO-DHCP-SNOOPING-MIB). Normal when DHCP snooping is off.', dhcp.error, 'CISCO-DHCP-SNOOPING-MIB is .1.3.6.1.4.1.9.9.380.');
+      row('auth', 'Authentication sessions (802.1X / MAB)', auth.v.length, `${plural(auth.v.length, 'session')}: ${auth.v.filter(a => a.status === 'authorized').length} authenticated (${auth.v.filter(a => a.vlan).length} with a VLAN assigned by the authentication server) and ${auth.v.filter(a => a.status !== 'authorized').length} clients seen that did not authenticate; ${auth.v.filter(a => a.ip).length} have an IP address. Ports that authenticate their clients are shown in the VLAN the clients are really in.`, 'No authentication sessions (CISCO-AUTH-FRAMEWORK-MIB). Normal when no port uses 802.1X, MAB or web authentication.', auth.error, 'CISCO-AUTH-FRAMEWORK-MIB is .1.3.6.1.4.1.9.9.656.');
+      const tagged = sgt.v.bindings.filter(b => b.source !== 'internal');
+      row('sgt', 'Security group tags (TrustSec)', tagged.length, `${plural(tagged.length, 'host address', 'host addresses')} with a tag, from ${plural(new Set(tagged.map(b => b.sgt)).size, 'distinct tag')}; ${plural(sgt.v.names.size, 'tag name')} known. Shown next to each host on its port.`, 'No security group tags on host addresses (CISCO-TRUSTSEC-POLICY-MIB). Normal when TrustSec or SD-Access is not in use.', sgt.error, 'CISCO-TRUSTSEC-POLICY-MIB is .1.3.6.1.4.1.9.9.713 and CISCO-TRUSTSEC-MIB .1.3.6.1.4.1.9.9.730.');
+      row('authsetup', 'Port authentication setup', setup.v.length, `${plural(setup.v.length, 'port')} set up to authenticate (${plural(setup.v.filter(p => p.dot1x && p.mab).length, 'port')} with 802.1X and MAB, ${setup.v.filter(p => p.mab && !p.dot1x).length} MAB only, ${setup.v.filter(p => p.dot1x && !p.mab).length} 802.1X only); host mode ${[...new Set(setup.v.map(p => p.mode))].join(', ')}${setup.v.some(p => p.open) ? `; ${plural(setup.v.filter(p => p.open).length, 'port')} in open mode` : ''}. Shown next to the VLAN of each port.`, 'No port authentication settings (CISCO-AUTH-FRAMEWORK-MIB, CISCO-PAE-MIB, CISCO-MAC-AUTH-BYPASS-MIB). Normal when no port uses 802.1X or MAB.', setup.error, 'CISCO-PAE-MIB is .1.3.6.1.4.1.9.9.220, CISCO-MAC-AUTH-BYPASS-MIB .1.3.6.1.4.1.9.9.654 and the port table of CISCO-AUTH-FRAMEWORK-MIB .1.3.6.1.4.1.9.9.656.1.2.');
+      row('aaa', 'RADIUS and TACACS+ servers', aaa.v?.servers.length ?? 0, `${plural(aaa.v?.servers.length ?? 0, 'server')}: ${(aaa.v?.servers ?? []).map(sv => `${sv.address} (${sv.kind === 'tacacs' ? 'TACACS+' : 'RADIUS'}, ${sv.up ? 'up' : 'dead'}, ${sv.authReq + sv.acctReq} requests, ${sv.authTimeouts + sv.acctTimeouts} timeouts)`).join('; ')}. Their health is shown on the hardware tab and in the attention list.`, 'No authentication servers (CISCO-AAA-SERVER-MIB). Normal when the device does not use RADIUS or TACACS+.', aaa.error, 'CISCO-AAA-SERVER-MIB is .1.3.6.1.4.1.9.10.56.');
       row('stack', 'Stack members and ports', stack.v?.members.length ?? 0, `${plural(stack.v?.members.length ?? 0, 'member')}, ${stack.v?.ports.filter(p => p.level === 'ok').length ?? 0} of ${stack.v?.ports.length ?? 0} stack ports up${stack.v?.problems.length ? '. ' + stack.v.problems[0] : ''}.`, 'No stack information (CISCO-STACKWISE-MIB). Normal for a switch that is not stacked.', stack.error, 'CISCO-STACKWISE-MIB is .1.3.6.1.4.1.9.9.500.');
       row('dai', 'ARP inspection drops', dai.v ? 1 : 0, dai.v && dai.v.vlans.length ? `ARP packets were dropped on ${plural(dai.v.vlans.length, 'VLAN')}.` : 'The statistics are published and no VLAN has dropped an ARP packet.', 'No ARP inspection statistics (CISCO-DYNAMIC-ARP-INSPECTION-MIB). Normal when it is not configured.', dai.error, 'CISCO-DYNAMIC-ARP-INSPECTION-MIB is .1.3.6.1.4.1.9.9.374.');
     }
+    {
+      const ent = await attempt(() => readEntity(cl, Date.now()), null);
+      const parts = (ent.v?.chassis.length ?? 0) + (ent.v?.modules.length ?? 0);
+      out.push(parts && modelText(ent.v) ? { id: 'entity', title: 'Hardware model', group: 'hardware', state: 'ok', count: parts, detail: `${modelText(ent.v)} (${plural(parts, 'chassis or module row')}).` }
+        : { id: 'entity', title: 'Hardware model', group: 'hardware', state: 'na', count: 0, detail: ent.error ?? 'No model name (ENTITY-MIB entPhysicalModelName). FlowScope shows the model next to the device name when this is published.', hint: ent.error ? 'ENTITY-MIB is .1.3.6.1.2.1.47. Check the SNMP view of this credential includes it.' : undefined });
+    }
     row('procs', 'Process CPU', procs.v?.top.length ?? 0, `The busiest of the device's processes${procs.v?.snmpOne !== null && procs.v?.snmpOne !== undefined ? `; the SNMP engine uses ${procs.v.snmpOne}% over a minute` : ''}.`, 'No per-process CPU (CISCO-PROCESS-MIB).', procs.error, 'CISCO-PROCESS-MIB is .1.3.6.1.4.1.9.9.109.');
     row('nbar', 'Application statistics (NBAR2)', nbar.v ? Object.keys(nbar.v.interfaces).length : 0, `Recognised applications on ${plural(Object.keys(nbar.v?.interfaces ?? {}).length, 'interface')}.`, 'No NBAR2 statistics (CISCO-NBAR-PROTOCOL-DISCOVERY-MIB). Normal when protocol discovery is not switched on.', nbar.error, 'CISCO-NBAR-PROTOCOL-DISCOVERY-MIB is .1.3.6.1.4.1.9.9.244.');
+  }
+
+  // Standard tables that any vendor's switch or router may publish, and that the Cisco-only block above does not cover
+  if (ex.vendor !== 'cisco' && (ex.l2 || ex.l3) && !ex.ap) {
+    const [pae, vrfs] = await Promise.all([ex.l2 ? attempt(() => readPae(cl), []) : none([] as Awaited<ReturnType<typeof readPae>>), attempt(() => readVrfs(cl), null)]);
+    if (ex.l2) {
+      const auto = pae.v.filter(p => p.control === 'auto');
+      out.push(auto.length ? { id: 'dot1x', title: '802.1X ports', group: 'hosts', state: 'ok', count: auto.length, detail: `${plural(auto.length, 'port')} authenticate their clients (IEEE8021-PAE-MIB), ${auto.filter(p => p.authorized).length} open (a port that lets several clients authenticate separately can show as closed while they are in). The standard MIB gives no client, address or VLAN, so hosts are placed from the MAC table (the standard bridge MIB reports it across all VLANs, unlike Cisco).` }
+        : { id: 'dot1x', title: '802.1X ports', group: 'hosts', state: 'na', count: 0, detail: pae.error ?? (pae.v.length ? 'The 802.1X table is published and no port is set to authenticate.' : 'No 802.1X table (IEEE8021-PAE-MIB). Normal when 802.1X is not configured, or when the vendor keeps session data in its own MIB.'), hint: pae.error ? 'IEEE8021-PAE-MIB is .1.0.8802.1.1.1, which lies outside .1.3.6.1 and is often cut off by a restricted SNMP view.' : undefined });
+    }
+    out.push(vrfs.v?.length ? { id: 'vrf', title: 'VRFs', group: 'routing', state: 'ok', count: vrfs.v.length, detail: `${plural(vrfs.v.length, 'VRF')}: ${vrfs.v.map(v => v.name).join(', ')} (MPLS-L3VPN-STD-MIB). Their interfaces are labelled. Reading each VRF's own multicast state needs an SNMP context, which FlowScope only knows the naming of on Cisco.` }
+      : { id: 'vrf', title: 'VRFs', group: 'routing', state: 'na', count: 0, detail: vrfs.error ?? 'No VRFs (MPLS-L3VPN-STD-MIB). Normal when the device has only the default routing table, or when the vendor does not implement this MIB.', hint: vrfs.error ? 'MPLS-L3VPN-STD-MIB is .1.3.6.1.2.1.10.166.11. Check the SNMP view of this credential includes it.' : undefined });
   }
 
   // Link quality: IF-MIB errors and discards, broadcast and multicast, and the EtherLike-MIB frame errors

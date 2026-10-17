@@ -1,3 +1,6 @@
+import { rpfSignificant } from '../snmp/multicast.js';
+import { contextOf } from '../snmp/vrf.js';
+import { ifaceVrf } from '../snmp/vrfmap.js';
 import { neighborViews } from '../analysis/path.js';
 import { pathEnv } from './pathenv.js';
 import type { App } from '../app.js';
@@ -8,6 +11,13 @@ import { streamView } from './flows.js';
 import { isVlanInterface } from '../snmp/ports.js';
 import { DEFAULTS } from '../settings.js';
 import { linkWarnings } from '../snmp/health.js';
+import { modelText, type Entity } from '../snmp/entity.js';
+import { authMethods, type AuthPort } from '../snmp/authsetup.js';
+import type { Aaa } from '../snmp/aaa.js';
+import type { Lisp } from '../snmp/lisp.js';
+import { byRloc, conversations, registrationCheck } from '../analysis/lispcheck.js';
+import { chooseTier } from './reports.js';
+import type { ConfigState } from '../snmp/confighist.js';
 import { daiReason, type Dai, type Nbar, type Processes, type Stack } from '../snmp/cisco_extra.js';
 
 export const MIBS = [
@@ -55,14 +65,21 @@ export async function linkDevices(app: App, minutes: number) {
   const mcastLoad = new Map<number, Map<number, { inBps: number | null; outBps: number | null }>>();
   for (const dv of app.devices.list()) { const m = app.devices.multicast(dv.id); if (m?.interfaces?.length) mcastLoad.set(dv.id, new Map(m.interfaces.map(x => [x.ifIndex, x]))); }
   const counts = app.hosts.portCounts();
+  const opVl = new Map(app.devices.list().map(d => [d.id, app.hosts.operatingVlans(d.id)] as const));
+  const vmaps = new Map(app.devices.list().map(d => [d.id, app.devices.vrfMaps(d.id)] as const));
+  const setups = new Map(app.devices.list().map(d => [d.id, new Map((app.devices.data<AuthPort[]>(d.id, 'authsetup') ?? []).map(p => [p.ifIndex, p]))] as const));
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
-    qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
+    rpfNow: (() => { const g = (app.devices.multicast(d.id)?.routes ?? []).filter(rpfSignificant); return g.length ? { routes: g.length, drops: g.reduce((a, r) => a + (r.rpfNew ?? 0), 0), top: g.sort((a, b) => (b.rpfNew ?? 0) - (a.rpfNew ?? 0))[0]!.group } : null; })(),
+    model: modelText(app.devices.data<Entity>(d.id, 'entity')), qosNote: d.qosNote, hostsAt: d.hostsAt, hostsNote: d.hostsNote, hasWlan: app.hosts.hasWlan(d.id), resources: d.resources,
     interfaces: app.devices.interfaces(d.id).map(i => {
       const mload = mcastLoad.get(d.id)?.get(i.ifIndex);
       const l = ifBy.get(`${d.id}/${i.ifIndex}`); const cls = clBy.get(`${d.id}/${i.ifIndex}`) ?? [];
       // VLAN and SVI interfaces carry routed traffic for a whole subnet and are never listed under "needs attention"
       const vlanIf = isVlanInterface(i);
+      // an access port whose hosts sit in other VLANs than the configured one authenticates them (802.1X / MAB): the VLANs they are in are the ones in effect
+      const seen = i.portMode === 'access' || i.portMode === 'pvid' ? (opVl.get(d.id)?.get(i.ifIndex) ?? []).filter(x => x.vlan !== i.voiceVlan) : [];
+      const dynamic = seen.filter(x => x.vlan !== i.vlan).map(x => x.vlan);
       // how full the busiest strict-priority queue is, and how much of the link multicast takes (the larger of in and out)
       let prioPct: number | null = null;
       for (const def of i.classes) { if (!def.priority || def.cls.startsWith('in:')) continue; const lim = limitBps(def.bw, i.speedMbps); const k = cls.find(x => x.cls === def.cls); if (lim && k) prioPct = Math.max(prioPct ?? 0, 100 * k.sentBps / lim); }
@@ -70,8 +87,9 @@ export async function linkDevices(app: App, minutes: number) {
       const mcastPct = mcastBps !== null && i.speedMbps > 0 ? 100 * mcastBps / (i.speedMbps * 1e6) : null;
       return {
         ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
-        portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList,
-        isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0,
+        portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList, ...(dynamic.length ? { opVlans: dynamic.map(v => ({ vlan: v, name: app.vlanName(v), hosts: seen.find(x => x.vlan === v)?.hosts ?? 0 })) } : {}),
+        ...((): { authSetup: { methods: string; mode: string; open: boolean; control: string } } | Record<string, never> => { const a = setups.get(d.id)?.get(i.ifIndex); return a && (a.dot1x || a.mab) ? { authSetup: { methods: authMethods(a), mode: a.mode, open: a.open, control: a.control } } : {}; })(),
+        isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0, ...((): { vrf: string; vrfVia: string } | Record<string, never> => { const vm = vmaps.get(d.id); const x = vm ? ifaceVrf(dynamic.length ? { ...i, vlan: dynamic[0]! } : i, vm.direct, vm.byVlan) : null; return x ? { vrf: x.vrf, vrfVia: x.via } : {}; })(),
         utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
         classes: i.classes.map(def => {
           const k = cls.find(x => x.cls === def.cls);
@@ -87,6 +105,15 @@ export async function linkDevices(app: App, minutes: number) {
   return { devices, thresholds: al };
 }
 
+/** What the health page keeps of the LISP read: the headline numbers and the problems. The tables are fetched when the fabric panel is opened. */
+export function lispSummary(l: Lisp | null) {
+  if (!l) return null;
+  const used = l.instances.filter(i => i.cacheSize > 0 || l.registered.some(r => r.iid === i.iid));
+  return { readAt: l.readAt, level: l.level, problems: l.problems, instances: used.length, cache: l.cacheTotal, active: l.cache.filter(e => e.active).length, registered: l.registered.length, servers: l.mapServers, resolvers: l.mapResolvers };
+}
+
+const ip32 = (s: string): number => s.split('.').reduce((t, o) => t * 256 + Number(o), 0);
+
 /** Sensors, PoE, spanning tree, routing neighbours and the link quality of each interface of one device, as last read. */
 export function linkHealth(app: App, dev: number) {
   const ifs = new Map(app.devices.interfaces(dev).map(i => [i.ifIndex, i]));
@@ -96,7 +123,7 @@ export function linkHealth(app: App, dev: number) {
   });
   const dai = app.devices.data<Dai>(dev, 'dai');
   const extras = {
-    procs: app.devices.data<Processes>(dev, 'procs'), stack: app.devices.data<Stack>(dev, 'stack'), nbar: app.devices.data<Nbar>(dev, 'nbar'),
+    procs: app.devices.data<Processes>(dev, 'procs'), stack: app.devices.data<Stack>(dev, 'stack'), nbar: app.devices.data<Nbar>(dev, 'nbar'), aaa: app.devices.data<Aaa>(dev, 'aaa'), lisp: lispSummary(app.devices.data<Lisp>(dev, 'lisp')), config: app.devices.data<ConfigState>(dev, 'config'),
     dai: dai ? { ...dai, vlans: dai.vlans.map(v => ({ ...v, why: daiReason(v) })) } : null
   };
   return { health: app.devices.health(dev), ifExtra: extra, extras };
@@ -120,6 +147,33 @@ export function registerLinks(app: App): void {
     c.json(linkHealth(app, dev));
   });
 
+  // The LISP fabric view of one node: endpoints it sends to (with the NetFlow volume towards each), the registration check, and how the map cache has moved
+  w.get('/api/links/lisp', 'ro', async c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9);
+    const row = app.devices.row(dev);
+    if (!row) throw new HttpError(404, 'No such device');
+    const l = app.devices.data<Lisp>(dev, 'lisp');
+    if (!l) { c.json({ lisp: null }); return; }
+    const names = new Map<string, string>();
+    for (const d of app.devices.list()) { names.set(d.ip, d.name); for (const a of d.addresses) names.set(a.split('/')[0]!, d.name); }
+    const rlocName = (r: string): string => names.get(r) ?? '';
+    const own = new Set(app.devices.interfaces(dev).flatMap(i => i.addresses.map(a => a.split('/')[0]!)));
+    // volumes towards the endpoints in use, from the flows this node exported in the last hour
+    const act = l.cache.filter(e => e.active && e.kind === 'ip' && e.prefix === 32).slice(0, 500);
+    let traffic: Map<string, { bytes: number; flows: number }> | null = null;
+    if (act.length) {
+      try {
+        const now = Date.now(), range = { from: now - 3600_000, to: now };
+        const rep = await app.store.report({ range, tier: chooseTier(app, range, undefined), dims: ['dstIp'], prefix: 32, bidir: false, sortBy: 'bytes', topN: 2000,
+          conds: [{ kind: 'dst', m: act.map(e => ({ lo: ip32(e.eid), hi: ip32(e.eid) })) }, { kind: 'exporter', ips: [row.ip, ...own] }] });
+        traffic = new Map(rep.rows.map(r => [String(r.dims.dstIp), { bytes: r.bytes, flows: r.flows }]));
+      } catch { traffic = null; }
+    }
+    c.json({ lisp: { readAt: l.readAt, level: l.level, problems: l.problems, instances: l.instances.filter(i => i.cacheSize > 0 || l.registered.some(r => r.iid === i.iid) || i.requestsOut > 0 && i.iid < 8000), history: l.history, cacheTotal: l.cacheTotal, truncated: l.truncated, mapServers: l.mapServers, mapResolvers: l.mapResolvers,
+      registration: (() => { const r = registrationCheck(l, app.hosts.fabricHosts(dev), own); return { ...r, missing: r.missing.slice(0, 200), stale: r.stale.slice(0, 200), missingTotal: r.missing.length, staleTotal: r.stale.length }; })(),
+      conversations: conversations(l, ip => app.hosts.whoIs(ip), rlocName, traffic), fabricNodes: byRloc(l, rlocName), flowsKnown: traffic !== null } });
+  });
+
   // Hosts learned on one port (from the switch's MAC address table, with IP addresses from ARP) and what LLDP/CDP says is at the other end
   w.get('/api/links/hosts', 'ro', c => {
     const dev = int(c.query.get('dev'), 0, 0, 1e9), ifx = int(c.query.get('if'), 0, 0, 1e9);
@@ -127,7 +181,7 @@ export function registerLinks(app: App): void {
     if (!d) throw new HttpError(404, 'No such device');
     const env = pathEnv(app);
     c.json({
-      hosts: app.hosts.portHosts(dev, ifx, 300).map(h => ({ ...h, vlanName: h.vlan ? app.vlanName(h.vlan) : '' })), neighbors: neighborViews(app.hosts.neighborsOf(dev, ifx).map(n => ({ ...n, ifIndex: ifx })), env, env.devices()),
+      hosts: app.hosts.portHosts(dev, ifx, 300).map(h => ({ ...h, vlanName: h.vlan ? app.vlanName(h.vlan) : '', vrf: app.devices.vrfMaps(dev).byVlan.get(h.vlan) ?? '' })), neighbors: neighborViews(app.hosts.neighborsOf(dev, ifx).map(n => ({ ...n, ifIndex: ifx })), env, env.devices()),
       readAt: d.hosts_at, note: d.hosts_note ?? '', tracking: app.settings.get('hosts').enabled
     });
   });
@@ -138,7 +192,34 @@ export function registerLinks(app: App): void {
     const d = app.devices.row(dev);
     if (!d) throw new HttpError(404, 'No such device');
     const names = new Map(app.devices.interfaces(dev).map(i => [i.ifIndex, i.name]));
-    c.json({ rows: app.hosts.arpOf(dev).map(r => ({ ...r, ifName: names.get(r.ifIndex) ?? '' })), readAt: d.hosts_at });
+    const direct = app.devices.vrfMaps(dev).direct;
+    c.json({ rows: app.hosts.arpOf(dev).map(r => ({ ...r, vrf: direct.get(r.ifIndex) ?? '', ifName: names.get(r.ifIndex) || app.devices.ifNameById(dev, r.ifIndex) || '' })), readAt: d.hosts_at });
+  });
+
+  // The VRFs of a device: their interfaces, the hosts in their ARP tables and their multicast state, each read in the VRF's own SNMP context
+  w.get('/api/links/vrfs', 'ro', c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9);
+    const d = app.devices.row(dev);
+    if (!d) throw new HttpError(404, 'No such device');
+    const mcNames = app.devices.multicast(dev)?.names ?? {};
+    const nameOf = (ix: number): string => app.devices.interfaces(dev).find(i => i.ifIndex === ix)?.name || app.devices.ifNameById(dev, ix) || mcNames[ix] || `if${ix}`;
+    const arp = app.hosts.arpOf(dev, 20_000), now = Date.now();
+    const vm = app.devices.vrfMaps(dev);
+    const ports = app.devices.interfaces(dev).flatMap(i => { const x = ifaceVrf(i, vm.direct, vm.byVlan); return x ? [{ ifIndex: i.ifIndex, name: i.name, vlan: i.vlan, vrf: x.vrf, via: x.via }] : []; });
+    c.json({
+      vrfs: app.devices.vrfs(dev).map(v => {
+        const mc = app.devices.vrfMulticast(dev, v.name);
+        const hosts = arp.filter(a => vm.direct.get(a.ifIndex) === v.name);
+        return {
+          name: v.name, context: contextOf(v.name),
+          interfaces: v.ifIndexes.map(ix => ({ ifIndex: ix, name: mc?.names?.[ix] ?? nameOf(ix) })),
+          // the access ports whose VLAN has its SVI in this VRF: the ports themselves have no VRF
+          ports: ports.filter(p => p.vrf.split(', ').includes(v.name) && p.via === 'vlan').map(p => ({ ifIndex: p.ifIndex, name: p.name, vlan: p.vlan })),
+          hosts: hosts.length, hostsReadAt: hosts.length ? Math.max(...hosts.map(h => h.lastSeen)) : null,
+          multicast: mc ? { routes: mc.routes.length, groups: new Set(mc.routes.map(r => r.group)).size, forwarding: mc.routes.filter(r => r.oifs.some(o => o.forwarding)).length, readAt: mc.readAt, stale: now - mc.readAt > 10 * 60_000 } : null
+        };
+      })
+    });
   });
 
   // Wi-Fi state of an access point: the AP itself, its radios, its SSIDs and the clients connected to it
