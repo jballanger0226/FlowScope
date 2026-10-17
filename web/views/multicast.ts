@@ -140,13 +140,17 @@ function commandBox(cmd: string): VNode {
 /** The sentence above the host lists: why the list is partial, and the command that gives the full one. */
 /** The warning above a host table, with the command in a copyable box. */
 /** The snooping command narrowed to the VLAN of an interface such as Vl1247 or Vlan1247; the plain command for any other interface. */
-const forVlan = (command: string, ifName?: string): string => { const v = /^vl(?:an)?\s*(\d{1,4})$/i.exec(ifName ?? ''); return v && / groups$/.test(command) ? `${command} vlan ${v[1]}` : command; };
-function incompleteNote(ifName?: string): VNode {
+const forVlan = (command: string, ifName?: string, group?: string, vendor?: string): string => {
+  const v = /^vl(?:an)?\s*(\d{1,4})$/i.exec(ifName ?? ''); if (!v || !/ groups$/.test(command)) return command;
+  const base = `${command} vlan ${v[1]}`;
+  return group && /^\d{1,3}(\.\d{1,3}){3}$/.test(group) ? `${base} | ${vendor === 'arista' ? 'grep' : 'section'} ${group}` : base;
+};
+function incompleteNote(ifName?: string, group?: string): VNode {
   const hint = detail?.igmpHint;
   const why = 'Not a complete list. The router keeps only the last host to report each group, so FlowScope collects reporters as they answer queries (and, where the flow export includes IGMP, from NetFlow) and can miss hosts that have not been the last to report. ';
   if (!hint?.command) return note(why + "For the full membership, check the switch's IGMP snooping table.", 'warn');
   const model = detail?.device.model ? ` (${detail.device.model})` : '';
-  return note(h('span', { style: 'display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center' }, `${why}For the full membership, check the switch${model}. On ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run:`, commandBox(forVlan(hint.command, ifName))), 'warn');
+  return note(h('span', { style: 'display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center' }, `${why}For the full membership, check the switch${model}. On ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run:`, commandBox(forVlan(hint.command, ifName, group, hint.vendor))), 'warn');
 }
 function fullListNote(): VNode {
   const hint = detail?.igmpHint;
@@ -176,7 +180,7 @@ function oilRow(r: Route, o: Out): VNode {
         h('span', { class: 'mono', style: 'font-size:12px' }, joined()),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts))),
     many && on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
-      o.neighbor ? null : incompleteNote(o.name),
+      o.neighbor ? null : incompleteNote(o.name, r.group),
       h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 150px 120px 110px;--w:700px' },
         h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Seen by', 'Last reported', 'Known for'].map(t => h('span', null, t))),
         members.map(m => h('div', { key: m.ip, class: 'tr' },
