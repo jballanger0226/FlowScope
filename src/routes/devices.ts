@@ -5,7 +5,6 @@ import { CredError, type CredInput } from '../snmp/creds.js';
 import { TargetPolicy } from '../snmp/allowed.js';
 import { attachment, int, str, stamp } from './util.js';
 import { readContexts } from '../snmp/contexts.js';
-import { contextOf } from '../snmp/vrf.js';
 import { runChecks, cleanOid, vendorOf } from '../snmp/diagnose.js';
 import { WalkJobs, WalkBusy, jobView, filterRows, exportRows, EXPORT_FORMATS, type ExportFormat } from '../snmp/walkjobs.js';
 
@@ -153,10 +152,7 @@ export function registerDevices(app: App): void {
     let live: Awaited<ReturnType<typeof readContexts>> = [], note = '';
     const cl = app.devices.open(d);
     try { live = await readContexts(cl); } catch (e) { note = (e as Error).message; } finally { cl.close(); }
-    // contexts implied by the VRFs FlowScope already knows, for a device that does not list its contexts
-    const known = new Set(live.map(x => x.name));
-    const implied = app.devices.vrfs(id).filter(v => !known.has(contextOf(v.name))).map(v => ({ name: contextOf(v.name), vrf: v.name }));
-    c.json({ contexts: [...live, ...implied].sort((a, b) => a.name.localeCompare(b.name)), fromDevice: live.length, note });
+    c.json({ contexts: live, note });
   });
 
   w.post('/api/devices/:id/walks', 'snmp', async c => {
