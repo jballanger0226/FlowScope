@@ -107,13 +107,18 @@ test('a walk in an SNMP context says so in its status and exports', async () => 
   assert.equal(jobView(d2).context, ''); assert.doesNotMatch(exportRows(d2, d2.rows, 'xml', '').body, /context=/);
 });
 
-test('a walk step that times out is repeated asking for fewer rows, and only a device that stays silent fails it', async () => {
-  const { bulkStep, SnmpError } = await import('../src/snmp/client.js');
+test('a walk step that times out is repeated asking for fewer rows, and the size that worked is kept instead of going back to full at once', async () => {
+  const { bulkStep, RowPacer, SnmpError } = await import('../src/snmp/client.js');
   const asked: number[] = [];
   const slow = async (rep: number) => { asked.push(rep); if (rep > 5) throw new SnmpError('timeout', 'timeout'); return 'rows'; };
   const r = await bulkStep(slow, 20, 20, async () => {});
-  assert.deepEqual(asked, [20, 10, 5]); assert.equal(r.rows, 'rows'); assert.equal(r.rep, 20, 'it is back at full size right after a success');
-  assert.equal((await bulkStep(async () => 'x', 1, 20, async () => {})).rep, 20, 'one good reply is enough to go back to full size');
+  assert.deepEqual(asked, [20, 10, 5]); assert.equal(r.rows, 'rows'); assert.equal(r.worked, 5); assert.equal(r.timedOut, true);
+  // a device that drops every reply over 5 rows: one ladder of timeouts, then no more
+  const p = new RowPacer(20, 4); const seen: number[] = [];
+  for (let i = 0; i < 8; i++) { const st = await bulkStep(async (n: number) => { seen.push(n); if (n > 5) throw new SnmpError('timeout', 'timeout'); return 'x'; }, p.ask, 20, async () => {}); p.done(st); }
+  assert.deepEqual(seen, [20, 10, 5, 5, 5, 5, 5, 10, 5, 5, 5], 'after the first ladder it stays at 5, and probes 10 once after a run of clean steps');
+  // a device that only had a moment of trouble is tried at double the size after a short run of clean steps
+  const q = new RowPacer(20, 2); q.done({ worked: 5, timedOut: true }); assert.equal(q.ask, 5); q.done({ worked: 5, timedOut: false }); assert.equal(q.ask, 5); q.done({ worked: 5, timedOut: false }); assert.equal(q.ask, 10); q.done({ worked: 10, timedOut: false }); q.done({ worked: 10, timedOut: false }); assert.equal(q.ask, 20);
   await assert.rejects(bulkStep(async () => { throw new SnmpError('timeout', 'timeout'); }, 20, 20, async () => {}, 4), /timeout/);
   await assert.rejects(bulkStep(async () => { throw new SnmpError('no access', 'auth'); }, 20, 20, async () => {}), /no access/);
 });
