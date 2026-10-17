@@ -11,6 +11,7 @@ import { readFib } from './fib.js';
 import { readEntity, modelText } from './entity.js';
 import { readDhcpBindings } from './dhcp_snooping.js';
 import { readAuthSessions } from './authsessions.js';
+import { readPae } from './dot1x.js';
 import { readVrfs, contextOf } from './vrf.js';
 import { readDai, readNbar, readProcesses, readStack } from './cisco_extra.js';
 import { readWlanFor, wlanVendor } from './wlan_vendors.js';
@@ -124,7 +125,7 @@ const WIFI_HINT: Record<string, string> = {
   cisco: 'Cisco wireless controllers publish access points and clients in CISCO-LWAPP-AP-MIB (.1.3.6.1.4.1.9.9.513) and CISCO-LWAPP-DOT11-CLIENT-MIB (.1.3.6.1.4.1.9.9.599).'
 };
 const GROUP: Record<string, CheckGroup> = { interfaces: 'basics', counters: 'basics', resources: 'basics', lldp: 'neighbours', cdp: 'neighbours', mac: 'hosts', arp: 'hosts', vlans: 'hosts',
-  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', auth: 'hosts', vrf: 'routing', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
+  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', auth: 'hosts', dot1x: 'hosts', vrf: 'routing', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
 const GROUP_ORDER: CheckGroup[] = ['basics', 'neighbours', 'hosts', 'hardware', 'routing', 'quality', 'wifi'];
 
 async function attempt<T>(fn: () => Promise<T>, empty: T): Promise<{ v: T; error: string | null }> {
@@ -303,6 +304,18 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
     }
     row('procs', 'Process CPU', procs.v?.top.length ?? 0, `The busiest of the device's processes${procs.v?.snmpOne !== null && procs.v?.snmpOne !== undefined ? `; the SNMP engine uses ${procs.v.snmpOne}% over a minute` : ''}.`, 'No per-process CPU (CISCO-PROCESS-MIB).', procs.error, 'CISCO-PROCESS-MIB is .1.3.6.1.4.1.9.9.109.');
     row('nbar', 'Application statistics (NBAR2)', nbar.v ? Object.keys(nbar.v.interfaces).length : 0, `Recognised applications on ${plural(Object.keys(nbar.v?.interfaces ?? {}).length, 'interface')}.`, 'No NBAR2 statistics (CISCO-NBAR-PROTOCOL-DISCOVERY-MIB). Normal when protocol discovery is not switched on.', nbar.error, 'CISCO-NBAR-PROTOCOL-DISCOVERY-MIB is .1.3.6.1.4.1.9.9.244.');
+  }
+
+  // Standard tables that any vendor's switch or router may publish, and that the Cisco-only block above does not cover
+  if (ex.vendor !== 'cisco' && (ex.l2 || ex.l3) && !ex.ap) {
+    const [pae, vrfs] = await Promise.all([ex.l2 ? attempt(() => readPae(cl), []) : none([] as Awaited<ReturnType<typeof readPae>>), attempt(() => readVrfs(cl), null)]);
+    if (ex.l2) {
+      const auto = pae.v.filter(p => p.control === 'auto');
+      out.push(auto.length ? { id: 'dot1x', title: '802.1X ports', group: 'hosts', state: 'ok', count: auto.length, detail: `${plural(auto.length, 'port')} authenticate their clients (IEEE8021-PAE-MIB), ${auto.filter(p => p.authorized).length} open. The standard MIB gives no client, address or VLAN, so hosts are placed from the MAC table (the standard bridge MIB reports it across all VLANs, unlike Cisco).` }
+        : { id: 'dot1x', title: '802.1X ports', group: 'hosts', state: 'na', count: 0, detail: pae.error ?? (pae.v.length ? 'The 802.1X table is published and no port is set to authenticate.' : 'No 802.1X table (IEEE8021-PAE-MIB). Normal when 802.1X is not configured, or when the vendor keeps session data in its own MIB.'), hint: pae.error ? 'IEEE8021-PAE-MIB is .1.0.8802.1.1.1, which lies outside .1.3.6.1 and is often cut off by a restricted SNMP view.' : undefined });
+    }
+    out.push(vrfs.v?.length ? { id: 'vrf', title: 'VRFs', group: 'routing', state: 'ok', count: vrfs.v.length, detail: `${plural(vrfs.v.length, 'VRF')}: ${vrfs.v.map(v => v.name).join(', ')} (MPLS-L3VPN-STD-MIB). Their interfaces are labelled. Reading each VRF's own multicast state needs an SNMP context, which FlowScope only knows the naming of on Cisco.` }
+      : { id: 'vrf', title: 'VRFs', group: 'routing', state: 'na', count: 0, detail: vrfs.error ?? 'No VRFs (MPLS-L3VPN-STD-MIB). Normal when the device has only the default routing table, or when the vendor does not implement this MIB.', hint: vrfs.error ? 'MPLS-L3VPN-STD-MIB is .1.3.6.1.2.1.10.166.11. Check the SNMP view of this credential includes it.' : undefined });
   }
 
   // Link quality: IF-MIB errors and discards, broadcast and multicast, and the EtherLike-MIB frame errors

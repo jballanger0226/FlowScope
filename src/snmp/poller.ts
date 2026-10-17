@@ -21,7 +21,7 @@ const SLOW: SlowReader[] = [
   // the hardware model (chassis and modules) hardly ever changes
   { name: 'entity', cisco: false, every: 6 * 3600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readEntity(c, now); devs.saveData(d.id, 'entity', x, now); return !!x; } },
   // The VRFs a device has (MPLS-L3VPN-STD-MIB). Each is read for multicast in its own SNMP context, below.
-  { name: 'vrfs', cisco: true, every: 3600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => {
+  { name: 'vrfs', cisco: false, every: 3600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => {
     const v = await readVrfs(c);
     for (const old of devs.vrfs(d.id)) if (!v?.some(x => x.name === old.name)) devs.saveVrfMulticast(d.id, old.name, null);
     devs.saveData(d.id, 'vrfs', v, now); return !!v;

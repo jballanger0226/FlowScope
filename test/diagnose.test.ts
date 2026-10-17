@@ -220,3 +220,10 @@ test('where to find the full IGMP snooping membership depends on the vendor', as
   assert.equal(igmpHint('h3c', '').command, 'display igmp-snooping group');
   assert.equal(igmpHint('mikrotik', 'RouterOS').command, null, 'a vendor with no known command gets none, not a guess');
 });
+
+test('other vendors: a switch is asked for 802.1X ports and VRFs from the standard MIBs, an access point is not, and Cisco has its own rows', async () => {
+  const c = byId(await runChecks(fake({}, [], {}, []), { role: 'switch', cisco: false, objectId: '1.3.6.1.4.1.2636.1.1', descr: 'Juniper' }));
+  assert.equal(c.dot1x!.state, 'na'); assert.equal(c.dot1x!.group, 'hosts'); assert.equal(c.vrf!.state, 'na'); assert.equal(c.vrf!.group, 'routing');
+  const ap = await runChecks(fake({}, [], {}, []), { role: 'ap', cisco: false, objectId: '1.3.6.1.4.1.14823.1', descr: 'Aruba Instant' });
+  assert.ok(!ap.some(k => k.id === 'dot1x' || k.id === 'vrf'));
+});
