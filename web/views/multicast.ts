@@ -45,6 +45,7 @@ let devs: DevSummary[] | null = null; let devError = '';
 let devId = 0; let detail: Detail | null = null; let detailError = ''; let loading = false;
 let query = ''; let onlyForwarding = false; let hideIdle = false;
 const open = new Set<string>();            // routes whose details are shown (group|source)
+const openLoad = new Set<string>();        // interfaces in the load table whose groups are shown
 const openHosts = new Set<string>();       // outgoing interfaces whose host list is open
 const openGroups = new Set<string>();      // groups whose sources are listed
 const closedWhileSearching = new Set<string>();
@@ -345,7 +346,7 @@ export function render(): VNode {
       detailError ? note(detailError, 'warn', true) : null,
       detail ? table(detail) : null,
       detail ? rpfSection(detail) : null,
-      detail?.load?.length ? loadTable(detail.load) : null,
+      detail?.load?.length ? loadTable(detail.load, detail.routes, !!detail.truncated) : null,
       detail?.igmp?.length ? igmpTable(detail.igmp) : null,
       detail?.rps && (detail.rps.map.length || detail.rps.candidate.length || detail.rps.inUse?.length) ? rpTable(detail.rps) : null,
       detail && detail.pim.neighbors.length ? h('div', { class: 'dim', style: 'font-size:12.5px' }, 'PIM neighbours: ', detail.pim.neighbors.map(n => `${n.address} on ${n.ifName}`).join(', ')) : null) : null);
@@ -413,16 +414,45 @@ function rpTable(rps: NonNullable<Detail['rps']>): VNode {
 }
 
 /** Multicast bytes through each interface: replication multiplies it, so an interface can carry far more multicast out than came in. */
-function loadTable(list: NonNullable<Detail['load']>): VNode {
+function loadTable(list: NonNullable<Detail['load']>, routes: Route[], truncated: boolean): VNode {
   const shown = list.slice(0, 20);
+  const mono = 'font-size:12px';
+  /** The groups this interface carries: arriving on it (it is the route's incoming interface) or sent out of it (forwarding outgoing interface). */
+  const groupsOn = (name: string): { r: Route; dir: 'in' | 'out' }[] => {
+    const out: { r: Route; dir: 'in' | 'out' }[] = [];
+    for (const r of routes) {
+      if (r.inIf === name) out.push({ r, dir: 'in' });
+      if (r.out.some(o => o.forwarding && o.name === name)) out.push({ r, dir: 'out' });
+    }
+    return out.sort((a, b) => Number(b.r.sharedTree) - Number(a.r.sharedTree) || (b.r.bps ?? -1) - (a.r.bps ?? -1) || a.r.group.localeCompare(b.r.group, undefined, { numeric: true }));
+  };
+  const sub = (name: string): VNode => {
+    const all = groupsOn(name), cap = 50;
+    // one row per group and direction: the sources behind a group are added up, and the group's own row lists them when it is opened in the table above
+    const by = new Map<string, { group: string; dir: 'in' | 'out'; routes: Route[] }>();
+    for (const x of all) { const k = `${x.r.group}|${x.dir}`; const e = by.get(k); if (e) e.routes.push(x.r); else by.set(k, { group: x.r.group, dir: x.dir, routes: [x.r] }); }
+    const gs = [...by.values()];
+    const total = (rs: Route[]): number | null => rs.some(r => r.bps !== null) ? rs.reduce((n, r) => n + (r.bps ?? 0), 0) : null;
+    if (!gs.length) return h('div', { class: 'dim', style: 'padding:6px 16px 10px 34px;font-size:12px' }, 'No route in this list arrives on or is sent out of this interface.' + (truncated ? ' The route list was cut off, so some may be missing.' : ''));
+    return h('div', { style: 'padding:2px 16px 10px 34px' }, h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) 80px 110px;--w:480px' },
+      h('div', { class: 'tr head' }, ...['Group', 'Source', 'Direction', 'Rate'].map(t => h('span', null, t))),
+      gs.slice(0, cap).map(g => { const t = total(g.routes); return h('div', { key: `${g.group}|${g.dir}`, class: 'tr' },
+        h('span', { class: 'mono', style: mono }, g.group), g.routes.length === 1 ? sourceCell(g.routes[0]!) : h('span', { class: 'mono dim', style: mono }, `${num(g.routes.length)} sources`),
+        h('span', { class: 'dim', style: mono, title: g.dir === 'in' ? 'The group arrives on this interface' : 'The group is sent out of this interface' }, g.dir === 'in' ? 'arrives' : 'sent out'),
+        h('span', { class: 'mono', style: mono }, t === null ? '—' : t === 0 ? '0' : bps(t))); }))),
+      gs.length > cap ? h('div', { class: 'dim', style: 'font-size:12px;padding-top:4px' }, `${num(gs.length - cap)} more groups not shown; use the search above to find one`) : null);
+  };
   return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Multicast load by interface'),
-    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'rate since the previous read, and the total since the counters started')),
+    h('span', { class: 'dim', style: 'font-size:11.5px' }, 'rate since the previous read, and the total since the counters started; open an interface to see its groups')),
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(140px,1fr) 110px 110px 130px 130px 90px;--w:700px' },
       h('div', { class: 'tr head' }, ...['Interface', 'Rate in', 'Rate out', 'Bytes in', 'Bytes out', 'Limit'].map(t => h('span', null, t))),
-      shown.map(x => h('div', { key: x.name, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.name),
-        h('span', { class: 'mono', style: 'font-size:12px' }, x.inBps === null ? '—' : bps(x.inBps)), h('span', { class: 'mono', style: 'font-size:12px' }, x.outBps === null ? '—' : bps(x.outBps)),
-        h('span', { class: 'mono', style: 'font-size:12px' }, x.inOctets === null ? '—' : num(x.inOctets)), h('span', { class: 'mono', style: 'font-size:12px' }, x.outOctets === null ? '—' : num(x.outOctets)),
-        h('span', { class: 'dim', style: 'font-size:12px' }, x.rateLimit ? `${num(x.rateLimit)} kbps` : x.ttl ? `TTL ${x.ttl}` : 'none'))))),
+      shown.map(x => { const on = openLoad.has(x.name), n = new Set(groupsOn(x.name).map(g => g.r.group)).size; return h('div', { key: x.name },
+        h('div', { class: 'tr', role: 'button', tabindex: 0, 'aria-expanded': on, style: 'cursor:pointer', onclick: () => toggleSet(openLoad, x.name), onkeydown: keyDown(() => toggleSet(openLoad, x.name)) },
+          h('span', { class: 'mono', style: mono }, h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾ ' : '▸ '), x.name, h('span', { class: 'dim' }, `  ${num(n)} ${n === 1 ? 'group' : 'groups'}`)),
+          h('span', { class: 'mono', style: mono }, x.inBps === null ? '—' : bps(x.inBps)), h('span', { class: 'mono', style: mono }, x.outBps === null ? '—' : bps(x.outBps)),
+          h('span', { class: 'mono', style: mono }, x.inOctets === null ? '—' : num(x.inOctets)), h('span', { class: 'mono', style: mono }, x.outOctets === null ? '—' : num(x.outOctets)),
+          h('span', { class: 'dim', style: mono }, x.rateLimit ? `${num(x.rateLimit)} kbps` : x.ttl ? `TTL ${x.ttl}` : 'none')),
+        on ? sub(x.name) : null); }))),
     list.length > shown.length ? h('span', { class: 'dim', style: 'font-size:12px' }, `${list.length - shown.length} quieter interfaces not shown`) : null);
 }
 
