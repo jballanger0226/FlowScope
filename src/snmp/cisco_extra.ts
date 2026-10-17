@@ -109,23 +109,26 @@ export function daiReason(v: DaiVlan): string {
 
 /* ------------------------------------------------------------------ NBAR2 */
 
-export interface NbarProto { name: string; inBps: number; outBps: number; inBytes: number; outBytes: number }
+/** `inBps`/`outBps` come from the byte counters between two reads (null on the first read of a protocol): the device's own rate column was not in bits per second on the Catalyst 9300 it was checked on. */
+export interface NbarProto { name: string; inBps: number | null; outBps: number | null; inBytes: number; outBytes: number }
 export interface Nbar { readAt: number; /** Per interface: the protocols with the most traffic */ interfaces: Record<number, NbarProto[]> }
 const NB = '1.3.6.1.4.1.9.9.244.1.2.1.1';
 
 /** Application protocols NBAR2 recognised, per interface (indexed ifIndex.protocolId). Only the busiest few of each interface are kept. */
-export async function readNbar(c: SnmpClient, now = Date.now()): Promise<Nbar | null> {
-  const [name, inB, outB, inR, outR] = await Promise.all([col(c, `${NB}.2`, 50), col(c, `${NB}.9`, 50), col(c, `${NB}.10`, 50), col(c, `${NB}.11`, 50), col(c, `${NB}.12`, 50)]);
+export async function readNbar(c: SnmpClient, now = Date.now(), prev: Nbar | null = null): Promise<Nbar | null> {
+  const [name, inB, outB] = await Promise.all([col(c, `${NB}.2`, 50), col(c, `${NB}.9`, 50), col(c, `${NB}.10`, 50)]);
   if (!name.size) return null;
   const by = new Map<number, NbarProto[]>();
   const big = (m: Map<string, SnmpValue>, k: string) => { const v = m.get(k); const b = v === undefined || v === null ? null : toBigInt(v); return b === null ? 0 : Number(b); };
   for (const [k, v] of name) {
     const ifx = Number(k.split('.')[0]); if (!Number.isInteger(ifx) || ifx <= 0) continue;
-    const p: NbarProto = { name: toStr(v), inBps: big(inR, k), outBps: big(outR, k), inBytes: big(inB, k), outBytes: big(outB, k) };
+    const p: NbarProto = { name: toStr(v), inBps: null, outBps: null, inBytes: big(inB, k), outBytes: big(outB, k) };
     if (!p.name || (!p.inBytes && !p.outBytes)) continue;
+    const was = prev?.interfaces[ifx]?.find(x => x.name === p.name), dt = prev ? (now - prev.readAt) / 1000 : 0;
+    if (was && dt >= 5) { if (p.inBytes >= was.inBytes) p.inBps = Math.round((p.inBytes - was.inBytes) * 8 / dt); if (p.outBytes >= was.outBytes) p.outBps = Math.round((p.outBytes - was.outBytes) * 8 / dt); }
     (by.get(ifx) ?? by.set(ifx, []).get(ifx)!).push(p);
   }
   const interfaces: Record<number, NbarProto[]> = {};
-  for (const [ifx, list] of by) interfaces[ifx] = list.sort((a, b) => b.inBps + b.outBps - (a.inBps + a.outBps) || b.inBytes + b.outBytes - (a.inBytes + a.outBytes)).slice(0, 8);
+  for (const [ifx, list] of by) interfaces[ifx] = list.sort((a, b) => (b.inBps ?? 0) + (b.outBps ?? 0) - ((a.inBps ?? 0) + (a.outBps ?? 0)) || b.inBytes + b.outBytes - (a.inBytes + a.outBytes)).slice(0, 8);
   return Object.keys(interfaces).length ? { readAt: now, interfaces } : null;
 }

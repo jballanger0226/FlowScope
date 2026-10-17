@@ -23,7 +23,7 @@ export interface StackPort { ifIndex: number; status: string; level: Level; neig
 export interface Stack { readAt: number; members: StackMember[]; ports: StackPort[]; problems: string[] }
 export interface DaiVlan { vlan: number; forwarded: number; dropped: number; dhcpDenied: number; aclDenied: number; srcMac: number; dstMac: number; ip: number; invalid: number; droppedNow: number | null; why: string }
 export interface Dai { readAt: number; vlans: DaiVlan[]; dtSec: number | null }
-export interface NbarProto { name: string; inBps: number; outBps: number; inBytes: number; outBytes: number }
+export interface NbarProto { name: string; inBps: number | null; outBps: number | null; inBytes: number; outBytes: number }
 export interface Nbar { readAt: number; interfaces: Record<number, NbarProto[]> }
 /** Cisco-only reads, each null when the device does not publish the table */
 export interface Extras { procs: Processes | null; stack: Stack | null; dai: Dai | null; nbar: Nbar | null }
@@ -171,10 +171,10 @@ function daiSection(d: Dai): VNode {
 /** Applications NBAR2 recognised on one interface. */
 export function nbarPanel(nbar: Nbar | null | undefined, ifIndex: number): VNode | null {
   const list = nbar?.interfaces[ifIndex]; if (!list?.length) return null;
-  return h('div', { class: 'col', style: 'gap:6px' }, sub('Applications on this port', 'recognised by NBAR2 since it was switched on'),
+  return h('div', { class: 'col', style: 'gap:6px' }, sub('Applications on this port', 'recognised by NBAR2 since it was switched on; rates are worked out from the byte counters between reads'),
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(140px,1fr) 110px 110px 110px 110px;--w:600px' },
       h('div', { class: 'tr head' }, ...['Application', 'Rate in', 'Rate out', 'Bytes in', 'Bytes out'].map(t => h('span', null, t))),
-      list.map(x => h('div', { key: x.name, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.name), h('span', { class: 'mono', style: 'font-size:12px' }, bps(x.inBps)), h('span', { class: 'mono', style: 'font-size:12px' }, bps(x.outBps)),
+      list.map(x => h('div', { key: x.name, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.name), h('span', { class: 'mono', style: 'font-size:12px', title: x.inBps === null ? 'Needs two reads of the counters (they are read every five minutes)' : undefined }, x.inBps === null ? '—' : bps(x.inBps)), h('span', { class: 'mono', style: 'font-size:12px' }, x.outBps === null ? '—' : bps(x.outBps)),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(x.inBytes)), h('span', { class: 'mono', style: 'font-size:12px' }, num(x.outBytes)))))));
 }
 

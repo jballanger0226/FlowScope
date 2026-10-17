@@ -71,8 +71,23 @@ test('NBAR2 gives the applications seen on an interface, busiest first, without 
   const list = n.interfaces[9]!;
   assert.ok(list.length > 1 && list.length <= 8);
   assert.ok(list.every(x => x.inBytes + x.outBytes > 0));
-  const rate = list.map(x => x.inBps + x.outBps);
-  assert.deepEqual(rate, [...rate].sort((a, b) => b - a));
+  assert.ok(list.every(x => x.inBps === null && x.outBps === null), 'no rate from a single read');
   assert.ok(list.some(x => x.name === 'http'));
   assert.equal(await readNbar(agent({}), 5), null);
+});
+
+test('NBAR2 rates come from the byte counters between two reads, not the device rate column', async () => {
+  const first = (await readNbar(agent(FIX), 1_000))!;
+  const ssl = first.interfaces[9]!.find(x => x.name === 'ssl')!;
+  // 300 seconds later 3,750,000 more bytes arrived and 750,000 left: 100 kbps in, 20 kbps out. The device's own rate column says 0 here.
+  const later: Record<string, SnmpValue> = { ...FIX };
+  for (const k of Object.keys(FIX)) if (k.startsWith('1.3.6.1.4.1.9.9.244.1.2.1.1.2.9.') && FIX[k] === 'ssl') {
+    const id = k.split('.').pop();
+    later[`1.3.6.1.4.1.9.9.244.1.2.1.1.9.9.${id}`] = ssl.inBytes + 3_750_000; later[`1.3.6.1.4.1.9.9.244.1.2.1.1.10.9.${id}`] = ssl.outBytes + 750_000;
+  }
+  const n = (await readNbar(agent(later), 301_000, first))!;
+  const x = n.interfaces[9]!.find(y => y.name === 'ssl')!;
+  assert.equal(x.inBps, 100_000);
+  assert.equal(x.outBps, 20_000);
+  assert.equal(n.interfaces[9]![0]!.name, 'ssl', 'the busiest by rate comes first');
 });

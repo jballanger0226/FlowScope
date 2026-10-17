@@ -1,6 +1,6 @@
 import type { DeviceRow, DeviceService } from './devices.js';
 import { hottest, readHealth, readIfExtra } from './health.js';
-import { readDai, readNbar, readProcesses, readStack, type Dai } from './cisco_extra.js';
+import { readDai, readNbar, readProcesses, readStack, type Dai, type Nbar } from './cisco_extra.js';
 import { classLabel, delta, perInterface, pollIfCounters, QOS_SOURCES, type ClassCounters, type IfCounters, type QosPolicy } from './collect.js';
 import type { HostOpts, HostTracker } from './hosts.js';
 import type { ClsPoint, IfPoint, TsStore } from '../store/types.js';
@@ -48,7 +48,7 @@ const SLOW: SlowReader[] = [
   { name: 'procs', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readProcesses(c, now); devs.saveData(d.id, 'procs', x, now); return !!x; } },
   { name: 'stack', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readStack(c, now); devs.saveData(d.id, 'stack', x, now); return !!x; } },
   { name: 'dai', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readDai(c, devs.data<Dai>(d.id, 'dai'), now); devs.saveData(d.id, 'dai', x, now); return !!x; } },
-  { name: 'nbar', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readNbar(c, now); devs.saveData(d.id, 'nbar', x, now); return !!x; } }
+  { name: 'nbar', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readNbar(c, now, devs.data<Nbar>(d.id, 'nbar')); devs.saveData(d.id, 'nbar', x, now); return !!x; } }
 ];
 
 interface PrevIf { t: number; c: IfCounters }
