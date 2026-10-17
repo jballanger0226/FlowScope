@@ -3,7 +3,7 @@
  * (.1.2.1.1.<col>.<port>) with col 5 dot1xAuthAuthControlledPortStatus (1 authorized, 2 unauthorized) and col 6 dot1xAuthAuthControlledPortControl
  * (1 force-unauthorized, 2 auto, 3 force-authorized). A port in `auto` is one that authenticates its clients.
  *
- * Written from the MIB definition, NOT checked against a real device (see docs/verification.md). The port number is taken as the ifIndex, as the MIB asks.
+ * Columns and index checked against a full walk of a Catalyst 9300 (151 ports, all `auto`, all `unauthorized` because it runs multi-auth host mode: the status is per port, so with several clients authenticating separately it is not a measure of who is in). Not yet seen on any other vendor (see docs/verification.md). The port number is the ifIndex.
  * Unlike the Cisco session table this gives no client, address or VLAN, only which ports authenticate and whether they are open.
  */
 import { toNum, type SnmpClient, type SnmpValue } from './client.js';

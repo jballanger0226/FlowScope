@@ -5,9 +5,8 @@
  *
  * Layout, checked against a walk of a Catalyst 9500 SDA edge (69 sessions): index is <ifIndex>.<session id as ASCII bytes>, with
  * col 2 client MAC, 6 domain (1 unknown, 2 data, 3 voice, as the CLI's Domain column: UNKNOWN is a client the switch saw that did not authenticate), 4 client IP (4 raw bytes), 14 VLAN assigned by the server (0 when it assigned none), 10 the user name (what
- * `show authentication sessions ... details` calls User-Name, e.g. IT-Camera), 22 the name of the VLAN the server assigned (DEVICE_CAMERA is the
- * VTP name of VLAN 3074, which `show authentication sessions interface Te1/0/7 details` shows as Vlan Group: Vlan: 3074; empty when none was assigned).
- * The security group tag number the CLI prints (SGT Value: 74) is not in this table.
+ * `show authentication sessions ... details` calls User-Name, e.g. IT-Camera), 22 a name the server gave (DEVICE_CAMERA, which is both the name of VLAN 3074
+ * and of security group tag 74 here, so which of the two it is cannot be told; empty when none was assigned). The tag number is not in this table: see sgt.ts.
  */
 import { toNum, type SnmpClient, type SnmpValue } from './client.js';
 import { ipOf } from './multicast.js';

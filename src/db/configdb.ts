@@ -283,7 +283,11 @@ const MIGRATIONS: string[] = [
   `CREATE TABLE auth_sessions (dev_id INTEGER NOT NULL, mac TEXT NOT NULL, if_index INTEGER NOT NULL, vlan INTEGER NOT NULL, ip TEXT NOT NULL, policy TEXT NOT NULL /* the user name */, profile TEXT NOT NULL /* the name of the VLAN the server assigned */, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, mac, if_index));
    CREATE INDEX auth_mac ON auth_sessions(mac);`,
   // whether the session authenticated: its domain (data, voice) or 'unknown' for a client seen that did not
-  `ALTER TABLE auth_sessions ADD COLUMN domain TEXT NOT NULL DEFAULT '';`
+  `ALTER TABLE auth_sessions ADD COLUMN domain TEXT NOT NULL DEFAULT '';`,
+  // security group tags (TrustSec) per host address and their names, replaced as a whole at each read of a device
+  `CREATE TABLE ip_sgt (dev_id INTEGER NOT NULL, vrf TEXT NOT NULL, ip TEXT NOT NULL, sgt INTEGER NOT NULL, source TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY (dev_id, vrf, ip));
+   CREATE INDEX ip_sgt_ip ON ip_sgt(ip);
+   CREATE TABLE sgt_names (dev_id INTEGER NOT NULL, sgt INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (dev_id, sgt));`
 ];
 
 export class ConfigDb {

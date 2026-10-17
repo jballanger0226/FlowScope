@@ -2,6 +2,7 @@ import type { ConfigDb } from '../db/configdb.js';
 import type { AppLog } from '../logger.js';
 import type { DeviceRow, DeviceService } from './devices.js';
 import type { SnmpClient } from './client.js';
+import { readSgt, type SgtData } from './sgt.js';
 import { readAuthSessions, type AuthSession } from './authsessions.js';
 import { readDhcpBindings, type DhcpBinding } from './dhcp_snooping.js';
 import { readArp, readFdb, readNeighbors, readPortVlans, type Neighbor } from './ports.js';
@@ -37,7 +38,7 @@ export interface HostLocation {
 }
 /** What an access point knows about a wireless client. */
 export interface WifiInfo { name: string; os: string; ssid: string; ap: string; radio: number | null; band: string; channel: string; snr: number; txRate: number; rxRate: number; txBytes: number; rxBytes: number; uptimeSec: number; readAt: number }
-export interface PortHost { auth: { user: string; vlan: number; authenticated: boolean } | null; mac: string; vlan: number; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean; wifi: WifiInfo | null }
+export interface PortHost { sgt: { value: number; name: string } | null; auth: { user: string; vlan: number; authenticated: boolean } | null; mac: string; vlan: number; ips: string[]; firstSeen: number; lastSeen: number; since: number; active: boolean; wifi: WifiInfo | null }
 
 /** A port that has learned more than this many addresses is treated as leading to another switch when nothing else says otherwise. */
 const UPLINK_MAC_COUNT = 30;
@@ -79,6 +80,8 @@ export class HostTracker {
     const cisco = (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.');
     let binds: DhcpBinding[] = [];
     if (cisco) { try { binds = await readDhcpBindings(c); } catch (e) { notes.push(`DHCP snooping not read: ${(e as Error).message}`); } }
+    let sgt: SgtData = { bindings: [], names: new Map() };
+    if (cisco) { try { sgt = await readSgt(c); } catch (e) { notes.push(`Security group tags not read: ${(e as Error).message}`); } }
     // 802.1X / MAB sessions: the VLAN the authentication server gave each client, and its address
     let auth: AuthSession[] = [];
     if (cisco) { try { auth = await readAuthSessions(c); } catch (e) { notes.push(`Authentication sessions not read: ${(e as Error).message}`); } }
@@ -116,6 +119,11 @@ export class HostTracker {
       this.db.prepare('DELETE FROM dhcp_bindings WHERE dev_id = ?').run(d.id);
       const ub = this.db.prepare('INSERT OR REPLACE INTO dhcp_bindings(dev_id, mac, vlan, ip, if_index, lease_sec, last_seen) VALUES (?,?,?,?,?,?,?)');
       for (const b of binds) { ub.run(d.id, b.mac, b.vlan, b.ip, b.ifIndex, b.leaseSec, now); ua.run(d.id, b.ip, b.mac, b.ifIndex, now, ''); }
+      this.db.prepare('DELETE FROM ip_sgt WHERE dev_id = ?').run(d.id); this.db.prepare('DELETE FROM sgt_names WHERE dev_id = ?').run(d.id);
+      const ig = this.db.prepare('INSERT OR REPLACE INTO ip_sgt(dev_id, vrf, ip, sgt, source, last_seen) VALUES (?,?,?,?,?,?)');
+      for (const b of sgt.bindings) ig.run(d.id, b.vrf, b.ip, b.sgt, b.source, now);
+      const sn = this.db.prepare('INSERT OR REPLACE INTO sgt_names(dev_id, sgt, name) VALUES (?,?,?)');
+      for (const [k, n] of sgt.names) sn.run(d.id, k, n);
       this.db.prepare('DELETE FROM auth_sessions WHERE dev_id = ?').run(d.id);
       const byVlanVrf = this.devs.vrfMaps(d.id).byVlan;
       const us = this.db.prepare('INSERT OR REPLACE INTO auth_sessions(dev_id, mac, if_index, vlan, ip, policy, profile, domain, last_seen) VALUES (?,?,?,?,?,?,?,?,?)');
@@ -126,7 +134,7 @@ export class HostTracker {
       this.db.prepare('DELETE FROM neighbors WHERE dev_id = ?').run(d.id);
       const un = this.db.prepare('INSERT OR REPLACE INTO neighbors(dev_id, if_index, proto, rem_key, rem_name, rem_port, rem_ip, kind, caps, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
       for (const n of nbs) un.run(d.id, n.ifIndex, n.proto, n.key, n.name, n.port, n.ip, n.kind, n.caps.join(','), now);
-      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries${vrfArp ? ` (${vrfArp} in VRFs)` : ''}`, ...(binds.length ? [`${binds.length} DHCP snooping bindings`] : []), ...(auth.length ? [`${auth.length} authentication sessions (${auth.filter(a => a.domain !== 'unknown').length} authenticated, ${auth.filter(a => a.vlan).length} with a VLAN from the server)`] : []), `${nbs.length} neighbours`, ...(wlan ? [`${wlan.clients.length} wireless clients`] : []), ...notes];
+      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries${vrfArp ? ` (${vrfArp} in VRFs)` : ''}`, ...(binds.length ? [`${binds.length} DHCP snooping bindings`] : []), ...(sgt.bindings.some(b => b.source !== 'internal') ? [`${sgt.bindings.filter(b => b.source !== 'internal').length} security group tag bindings`] : []), ...(auth.length ? [`${auth.length} authentication sessions (${auth.filter(a => a.domain !== 'unknown').length} authenticated, ${auth.filter(a => a.vlan).length} with a VLAN from the server)`] : []), `${nbs.length} neighbours`, ...(wlan ? [`${wlan.clients.length} wireless clients`] : []), ...notes];
       this.db.prepare('UPDATE devices SET hosts_at = ?, hosts_note = ? WHERE id = ?').run(now, parts.join('; '), d.id);
     });
     return { macs: fdb.entries.length, arp: arpRows, neighbors: nbs.length, wifiClients: wlan?.clients.length ?? 0, note: notes.join('; ') };
@@ -226,12 +234,14 @@ export class HostTracker {
     const rows = this.db.prepare('SELECT mac, vlan, first_seen AS firstSeen, last_seen AS lastSeen, since FROM fdb WHERE dev_id = ? AND if_index = ? ORDER BY last_seen DESC, mac LIMIT ?').all(devId, ifIndex, limit) as unknown as { mac: string; vlan: number; firstSeen: number; lastSeen: number; since: number }[];
     const arp = this.db.prepare('SELECT ip FROM arp WHERE mac = ? ORDER BY last_seen DESC LIMIT 4');
     const wip = this.db.prepare('SELECT ip FROM wlan_client WHERE mac = ? AND ip != \'\' ORDER BY last_seen DESC LIMIT 1');
+    const tg = this.db.prepare('SELECT g.sgt AS value, COALESCE(n.name, \'\') AS name FROM ip_sgt g LEFT JOIN sgt_names n ON n.dev_id = g.dev_id AND n.sgt = g.sgt WHERE g.dev_id = ? AND g.ip = ? AND g.source != \'internal\' ORDER BY g.last_seen DESC LIMIT 1');
     const au = this.db.prepare("SELECT policy AS user, vlan, domain NOT IN ('unknown', '') AS authenticated FROM auth_sessions WHERE dev_id = ? AND mac = ? AND if_index = ?");
     return rows.map(r => {
       const ips = [...new Set((arp.all(r.mac) as unknown as { ip: string }[]).map(x => x.ip))];
       // an access point knows its clients' addresses even when no polled router has them in its ARP table
       if (!ips.length) { const w = wip.get(r.mac) as { ip: string } | undefined; if (w) ips.push(w.ip); }
-      return { ...r, ips, active: r.lastSeen >= since, wifi: this.wifiFor(r.mac), auth: ((): PortHost['auth'] => { const a = au.get(devId, r.mac, ifIndex) as { user: string; vlan: number; authenticated: number } | undefined; return a ? { ...a, authenticated: !!a.authenticated } : null; })() };
+      const sg = ips.map(ip => tg.get(devId, ip) as { value: number; name: string } | undefined).find(Boolean) ?? null;
+      return { ...r, sgt: sg, ips, active: r.lastSeen >= since, wifi: this.wifiFor(r.mac), auth: ((): PortHost['auth'] => { const a = au.get(devId, r.mac, ifIndex) as { user: string; vlan: number; authenticated: number } | undefined; return a ? { ...a, authenticated: !!a.authenticated } : null; })() };
     });
   }
 

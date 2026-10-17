@@ -11,12 +11,12 @@ test('upgrading a database that is one migration behind runs only the newest mig
     const a = new ConfigDb(dir);
     const latest = (a.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
     // what a database deployed before the newest migration looks like
-    a.db.exec('ALTER TABLE auth_sessions DROP COLUMN domain');   // undo the newest migration: update this line when a newer one is added
+    a.db.exec('DROP TABLE ip_sgt'); a.db.exec('DROP TABLE sgt_names');   // undo the newest migration: update this line when a newer one is added
     a.db.exec(`PRAGMA user_version = ${latest - 1}`);
     a.db.close();
     const b = new ConfigDb(dir);   // would throw "table ... already exists" if an older migration ran again
     assert.equal((b.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, latest);
-    assert.ok((b.db.prepare('PRAGMA table_info(auth_sessions)').all() as { name: string }[]).some(c => c.name === 'domain'));
+    assert.ok((b.db.prepare('PRAGMA table_info(ip_sgt)').all() as { name: string }[]).some(c => c.name === 'sgt'));
     b.db.close();
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
