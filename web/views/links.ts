@@ -353,8 +353,7 @@ const vrfNote = (i: Iface): VNode | null => (i.vrf ? h('span', { class: 'dim', s
 function vlanCell(i: Iface): VNode {
   const base = vlanCellBase(i), v = vrfNote(i), a = i.authSetup;
   const au = a ? h('span', { class: 'dim', style: 'font-size:11px', title: `This port authenticates its clients: ${a.methods}, host mode ${a.mode}, port control ${a.control}${a.open ? '. Open mode: clients get network access before they authenticate.' : ''}` }, `${a.methods} · ${a.mode}${a.open ? ' · open' : ''}`) : null;
-  const pw = i.poe && i.poe.detected ? h('span', { class: 'dim', style: 'font-size:11px', title: `Power over Ethernet. Drawn is what the device uses now; reserved is what the switch has set aside for it and counts against the PoE budget${i.poe.maxW ? `. Port limit ${i.poe.maxW} W` : ''}` }, `PoE ${i.poe.drawnW} W drawn · ${i.poe.allocW} W reserved`) : null;
-  return v || au || pw ? h('span', { class: 'col', style: 'gap:1px' }, base, v, au, pw) : base;
+  return v || au ? h('span', { class: 'col', style: 'gap:1px' }, base, v, au) : base;
 }
 function vlanCellBase(i: Iface): VNode {
   if (i.isVlanIf || i.portMode === 'svi') return h('span', { class: 'muted' }, i.vlan ? `SVI for VLAN ${vlanLabel(i.vlan, i.vlanName)}` : 'SVI');
