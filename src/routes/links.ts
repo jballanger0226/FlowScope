@@ -14,6 +14,10 @@ import { linkWarnings } from '../snmp/health.js';
 import { modelText, type Entity } from '../snmp/entity.js';
 import { authMethods, type AuthPort } from '../snmp/authsetup.js';
 import type { PoePort } from '../snmp/poeports.js';
+import { judgeRedundancy, supervisorCount, type Redundancy } from '../snmp/redundancy.js';
+import type { Ntp } from '../snmp/clock.js';
+import type { Channel } from '../snmp/lag.js';
+import type { UdldPort } from '../snmp/udld.js';
 import type { Aaa } from '../snmp/aaa.js';
 import type { Lisp } from '../snmp/lisp.js';
 import { byRloc, conversations, registrationCheck } from '../analysis/lispcheck.js';
@@ -69,6 +73,9 @@ export async function linkDevices(app: App, minutes: number) {
   const opVl = new Map(app.devices.list().map(d => [d.id, app.hosts.operatingVlans(d.id)] as const));
   const vmaps = new Map(app.devices.list().map(d => [d.id, app.devices.vrfMaps(d.id)] as const));
   const poeBy = new Map(app.devices.list().map(d => [d.id, new Map((app.devices.data<PoePort[]>(d.id, 'poeports') ?? []).map(p => [p.ifIndex, p]))] as const));
+  const udldBy = new Map(app.devices.list().map(d => [d.id, new Map((app.devices.data<UdldPort[]>(d.id, 'udld') ?? []).map(p => [p.ifIndex, p]))] as const));
+  // port-channel membership: which channel a member port is in, and whether the channel (or the port) has a problem
+  const lagBy = new Map(app.devices.list().map(d => { const m = new Map<number, { channel: number; level: string; why: string }>(); for (const ch of app.devices.data<Channel[]>(d.id, 'lag') ?? []) for (const mb of ch.members) m.set(mb.ifIndex, { channel: ch.ifIndex, level: mb.level, why: mb.why }); return [d.id, m] as const; }));
   const setups = new Map(app.devices.list().map(d => [d.id, new Map((app.devices.data<AuthPort[]>(d.id, 'authsetup') ?? []).map(p => [p.ifIndex, p]))] as const));
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
@@ -92,6 +99,8 @@ export async function linkDevices(app: App, minutes: number) {
         portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList, ...(dynamic.length ? { opVlans: dynamic.map(v => ({ vlan: v, name: app.vlanName(v), hosts: seen.find(x => x.vlan === v)?.hosts ?? 0 })) } : {}),
         ...((): { authSetup: { methods: string; mode: string; open: boolean; control: string } } | Record<string, never> => { const a = setups.get(d.id)?.get(i.ifIndex); return a && (a.dot1x || a.mab) ? { authSetup: { methods: authMethods(a), mode: a.mode, open: a.open, control: a.control } } : {}; })(),
         ...((): { poe: PoePort } | Record<string, never> => { const x = poeBy.get(d.id)?.get(i.ifIndex); return x && (x.detected || x.drawnW > 0 || x.allocW > 0) ? { poe: x } : {}; })(),
+        ...((): { udld: UdldPort } | Record<string, never> => { const x = udldBy.get(d.id)?.get(i.ifIndex); return x ? { udld: x } : {}; })(),
+        ...((): { lag: { channel: number; level: string; why: string } } | Record<string, never> => { const x = lagBy.get(d.id)?.get(i.ifIndex); return x ? { lag: x } : {}; })(),
         isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0, ...((): { vrf: string; vrfVia: string } | Record<string, never> => { const vm = vmaps.get(d.id); const x = vm ? ifaceVrf(dynamic.length ? { ...i, vlan: dynamic[0]! } : i, vm.direct, vm.byVlan) : null; return x ? { vrf: x.vrf, vrfVia: x.via } : {}; })(),
         utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
         classes: i.classes.map(def => {
@@ -127,6 +136,12 @@ export function linkHealth(app: App, dev: number) {
   const dai = app.devices.data<Dai>(dev, 'dai');
   const extras = {
     procs: app.devices.data<Processes>(dev, 'procs'), stack: app.devices.data<Stack>(dev, 'stack'), nbar: app.devices.data<Nbar>(dev, 'nbar'), aaa: app.devices.data<Aaa>(dev, 'aaa'), lisp: lispSummary(app.devices.data<Lisp>(dev, 'lisp')), config: app.devices.data<ConfigState>(dev, 'config'),
+    rf: ((): Redundancy | null => {
+      const r = app.devices.data<Redundancy>(dev, 'rf'); if (!r) return null;
+      const e = app.devices.data<Entity>(dev, 'entity'), st = app.devices.data<Stack>(dev, 'stack');
+      return judgeRedundancy(r, supervisorCount([...(e?.modules ?? [])].map(m => `${m.model} ${m.descr}`), st?.members.length ?? 0, !!st?.svl));
+    })(),
+    ntp: app.devices.data<Ntp>(dev, 'ntp'), lag: app.devices.data<Channel[]>(dev, 'lag'),
     dai: dai ? { ...dai, vlans: dai.vlans.map(v => ({ ...v, why: daiReason(v) })) } : null
   };
   return { health: app.devices.health(dev), ifExtra: extra, extras };

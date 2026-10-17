@@ -8,7 +8,8 @@ export interface Sensor { id: string; kind: string; name: string; value: number 
 export interface Poe { group: number; budgetW: number | null; usedW: number | null; usedPct: number | null; allocW?: number | null; remainingW?: number | null; allocPct?: number | null; status: string; portsDelivering: number; portsFault: number; portsTotal: number }
 export interface Stp { rootId: string; isRoot: boolean; rootPort: number; rootCost: number; topChanges: number | null; sinceChangeSec: number | null; blockingPorts: number; ports: number }
 export interface OspfNeighbor { id: string; address: string; state: string; level: Level }
-export interface BgpPeer { address: string; as: number | null; state: string; level: Level; admin: string; upSec: number | null; updatesIn: number | null; updatesOut: number | null }
+export interface BgpFamily { name: string; accepted: number | null; denied: number | null; advertised: number | null }
+export interface BgpPeer { families?: BgpFamily[]; address: string; as: number | null; state: string; level: Level; admin: string; upSec: number | null; updatesIn: number | null; updatesOut: number | null }
 export interface EigrpPeer { as: number; address: string; ifIndex: number; holdSec: number | null; upText: string; srttMs: number | null; retrans: number | null; retries: number | null; level: Level }
 export interface BfdSession { id: number; address: string; local?: string; peerKnown?: boolean; ifIndex: number | null; state: string; level: Level; upSec: number | null; upCount: number | null; diag: string | null; detectMs: number | null }
 export interface Health { readAt: number; sensors: Sensor[]; poe: Poe[]; stp: Stp | null; ospf: OspfNeighbor[]; bgp: BgpPeer[]; bgpLocalAs: number | null; eigrp?: EigrpPeer[]; bfd?: BfdSession[] }
@@ -19,8 +20,14 @@ export interface IfExtra {
 export interface ProcessCpu { name: string; pid: number; five: number; one: number; fiveMin: number }
 export interface Processes { readAt: number; top: ProcessCpu[]; snmpFive: number | null; snmpOne: number | null }
 export interface StackMember { index: number; number: number | null; role: string; state: string; level: Level; mac: string }
-export interface StackPort { ifIndex: number; status: string; level: Level; neighbor: number | null }
-export interface Stack { readAt: number; members: StackMember[]; ports: StackPort[]; problems: string[] }
+export interface StackPort { ifIndex: number; status: string; level: Level; neighbor: number | null; name?: string; neighborName?: string }
+export interface SvlBundle { switch: number; bundle: number; status: string; level: Level }
+export interface Stack { readAt: number; members: StackMember[]; ports: StackPort[]; bundles?: SvlBundle[]; svl?: boolean; problems: string[] }
+export interface Redundancy { readAt: number; unitState: string; peerState: string; configured: string; operating: string; lastSwitchover: string | null; sinceFailoverSec: number | null; level: Level; problems: string[] }
+export interface NtpSource { id: number; address: string; stratum: number | null; offsetMs: number | null; jitterMs: number | null; delayMs: number | null; reach: number | null; refId: string; active: boolean; level: Level }
+export interface Ntp { readAt: number; mode: string; synced: boolean; stratum: number | null; offsetMs: number | null; dispersionMs: number | null; sources: NtpSource[]; level: Level; problems: string[] }
+export interface LagMember { ifIndex: number; bundled: boolean; collecting: boolean; distributing: boolean; level: Level; why: string }
+export interface Channel { ifIndex: number; key: number; partnerMac: string; members: LagMember[]; level: Level; problems: string[] }
 export interface DaiVlan { vlan: number; forwarded: number; dropped: number; dhcpDenied: number; aclDenied: number; srcMac: number; dstMac: number; ip: number; invalid: number; droppedNow: number | null; why: string }
 export interface Dai { readAt: number; vlans: DaiVlan[]; dtSec: number | null }
 export interface NbarProto { name: string; inBps: number | null; outBps: number | null; inBytes: number; outBytes: number }
@@ -30,7 +37,7 @@ export interface Aaa { readAt: number; dtSec: number; servers: AaaServer[] }
 export interface ConfigEvent { at: number; what: string; user: string; via: string }
 export interface ConfigState { readAt: number; changedAt: number | null; savedAt: number | null; unsaved: boolean; unsavedSec: number; events: ConfigEvent[] }
 /** Cisco-only reads, each null when the device does not publish the table */
-export interface Extras { procs: Processes | null; stack: Stack | null; dai: Dai | null; nbar: Nbar | null; aaa?: Aaa | null; config?: ConfigState | null; lisp?: { readAt: number; level: 'ok' | 'warn' | 'bad'; problems: string[]; instances: number; cache: number; active: number; registered: number } | null }
+export interface Extras { procs: Processes | null; stack: Stack | null; dai: Dai | null; nbar: Nbar | null; aaa?: Aaa | null; rf?: Redundancy | null; ntp?: Ntp | null; lag?: Channel[] | null; config?: ConfigState | null; lisp?: { readAt: number; level: 'ok' | 'warn' | 'bad'; problems: string[]; instances: number; cache: number; active: number; registered: number } | null }
 /** A configuration that has differed from the saved one for this long is worth a mention; a change a minute ago is just a change being made. */
 const UNSAVED_WARN_MS = 3600_000;
 export const unsavedFor = (c: ConfigState | null | undefined, now = Date.now()): number => (c?.unsaved && c.changedAt ? now - c.changedAt : 0);
@@ -92,6 +99,9 @@ export function extrasAttention(ex: Extras | undefined): { level: Level; text: s
   const out: { level: Level; text: string }[] = [];
   if (!ex) return out;
   if (ex.stack?.problems.length) out.push({ level: 'warn', text: ex.stack.problems.length === 1 ? 'Stack problem' : `${ex.stack.problems.length} stack problems` });
+  if (ex.rf && ex.rf.level !== 'ok') out.push({ level: ex.rf.level, text: ex.rf.problems.length === 1 ? 'Supervisor redundancy problem' : `${ex.rf.problems.length} redundancy problems` });
+  if (ex.ntp && ex.ntp.level !== 'ok') out.push({ level: ex.ntp.level === 'bad' ? 'warn' : ex.ntp.level, text: ex.ntp.synced ? 'Time source problem' : 'Clock not synchronised' });
+  const badCh = (ex.lag ?? []).filter(c => c.level !== 'ok'); if (badCh.length) out.push({ level: badCh.some(c => c.level === 'bad') ? 'bad' : 'warn', text: `${badCh.length} port-channel${badCh.length === 1 ? '' : 's'} with a problem` });
   const dai = (ex.dai?.vlans ?? []).filter(v => (v.droppedNow ?? 0) > 0); if (dai.length) out.push({ level: 'warn', text: `ARP packets dropped on ${dai.length} VLAN${dai.length === 1 ? '' : 's'}` });
   if ((ex.procs?.snmpOne ?? 0) >= 10) out.push({ level: 'warn', text: `SNMP engine using ${ex.procs!.snmpOne}% of the CPU` });
   for (const a of ex.aaa?.servers ?? []) if (a.level !== 'ok') out.push({ level: a.level, text: `${a.kind === 'tacacs' ? 'TACACS+' : 'RADIUS'} ${a.address}: ${a.up ? 'slow or dropping requests' : 'dead'}` });
@@ -102,8 +112,8 @@ export function extrasAttention(ex: Extras | undefined): { level: Level; text: s
 
 export function healthSummary(data: HealthRes | null): VNode | null {
   const hl0 = data?.health ?? null;
-  const hl = hl0 ?? (data?.extras && (data.extras.stack || data.extras.procs || data.extras.dai?.vlans.length || data.extras.aaa?.servers.length || data.extras.config) ? NO_HEALTH : null);
-  if (!hl || (!hl.sensors.length && !hl.poe.length && !hl.stp && !hl.ospf.length && !hl.bgp.length && !hl.eigrp?.length && !hl.bfd?.length && !data?.extras?.stack && !data?.extras?.procs && !data?.extras?.aaa?.servers.length && !data?.extras?.config)) return null;
+  const hl = hl0 ?? (data?.extras && (data.extras.stack || data.extras.rf || data.extras.ntp || data.extras.lag?.length || data.extras.procs || data.extras.dai?.vlans.length || data.extras.aaa?.servers.length || data.extras.config) ? NO_HEALTH : null);
+  if (!hl || (!hl.sensors.length && !hl.poe.length && !hl.stp && !hl.ospf.length && !hl.bgp.length && !hl.eigrp?.length && !hl.bfd?.length && !data?.extras?.stack && !data?.extras?.rf && !data?.extras?.ntp && !data?.extras?.lag?.length && !data?.extras?.procs && !data?.extras?.aaa?.servers.length && !data?.extras?.config)) return null;
   const att = [...attention(hl), ...extrasAttention(data?.extras)];
   const parts: string[] = [];
   const others = hl.sensors.filter(s => s.kind !== 'optic'), optics = hl.sensors.filter(s => s.kind === 'optic');
@@ -120,12 +130,12 @@ export function healthSummary(data: HealthRes | null): VNode | null {
     att.length ? h('div', { class: 'row', style: 'gap:6px;flex-wrap:wrap' }, att.slice(0, 8).map(a => chip(a.text, a.level === 'bad' ? 'bad' : 'warn')), att.length > 8 ? chip(`+${att.length - 8} more`, 'default') : null)
       : h('div', { class: 'row', style: 'gap:6px' }, chip('Nothing outside its limits', 'ok')));
 }
-export const hasHardware = (data: HealthRes | null): boolean => (!!data?.health && (data.health.sensors.some(s => s.kind !== 'optic') || data.health.poe.length > 0)) || !!data?.extras?.procs || !!data?.extras?.stack || !!data?.extras?.aaa?.servers.length || !!data?.extras?.config;
+export const hasHardware = (data: HealthRes | null): boolean => (!!data?.health && (data.health.sensors.some(s => s.kind !== 'optic') || data.health.poe.length > 0)) || !!data?.extras?.procs || !!data?.extras?.stack || !!data?.extras?.rf || !!data?.extras?.ntp || !!data?.extras?.lag?.length || !!data?.extras?.aaa?.servers.length || !!data?.extras?.config;
 export const hasOptics = (data: HealthRes | null): boolean => !!data?.health && data.health.sensors.some(s => s.kind === 'optic' && s.ifIndex !== undefined);
 export const hasProtocols = (data: HealthRes | null): boolean => !!data?.extras?.dai?.vlans.length || !!data?.health && (!!data.health.stp || data.health.ospf.length > 0 || data.health.bgp.length > 0 || !!data.health.eigrp?.length || !!data.health.bfd?.length);
 
 /** Sensors and PoE: the physical state of the device. The light levels of optics are with their interfaces. */
-export function hardwarePanel(o: { data: HealthRes | null }): VNode | null {
+export function hardwarePanel(o: { data: HealthRes | null; ifName?: (ifIndex: number) => string }): VNode | null {
   const hl = o.data?.health ?? NO_HEALTH;
   if (!hasHardware(o.data)) return null;
   const others = hl.sensors.filter(s => s.kind !== 'optic');
@@ -141,6 +151,9 @@ export function hardwarePanel(o: { data: HealthRes | null }): VNode | null {
     hl.poe.some(p => p.allocW != null) ? h('span', { class: 'dim', style: 'font-size:12px' }, 'Drawn is what the devices use now. Reserved is the power the switch has set aside for them (their class or negotiated maximum): a new device is refused when the reserved power reaches the budget, even if little is being drawn.') : null));
   const ex = o.data?.extras;
   if (ex?.stack) sections.push(stackSection(ex.stack));
+  if (ex?.rf) sections.push(redundancySection(ex.rf));
+  if (ex?.lag?.length) sections.push(lagSection(ex.lag, o.ifName));
+  if (ex?.ntp) sections.push(ntpSection(ex.ntp));
   if (ex?.aaa?.servers.length) sections.push(aaaSection(ex.aaa));
   if (ex?.config) sections.push(configSection(ex.config));
   if (ex?.procs) sections.push(processSection(ex.procs));
@@ -164,7 +177,7 @@ function poeTile(p: Poe, many: boolean): VNode {
 
 const w1 = (n: number): string => String(Math.round(n * 10) / 10);
 /** One port's PoE as a box, like the whole-switch one: what the device draws, against what the switch has reserved for it. */
-export function poePortBox(x: { allocW: number; drawnW: number; maxW: number | null; detected: boolean }, denied: string | null = null): VNode {
+export function poePortBox(x: { allocW: number; drawnW: number; maxW: number | null; detected: boolean; askedW?: number | null; grantedW?: number | null }, denied: string | null = null): VNode {
   // both layers are drawn against the port limit, as the whole-switch tile draws them against the budget: reserved behind, drawn in front
   const scale = x.maxW && x.maxW > 0 ? x.maxW : Math.max(x.allocW, x.drawnW, 1);
   const pc = (w: number) => Math.min(100, (w / scale) * 100);
@@ -177,16 +190,49 @@ export function poePortBox(x: { allocW: number; drawnW: number; maxW: number | n
       bar ? h('div', { style: 'position:relative;height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:6px 0 4px', role: 'img', 'aria-label': `${w1(x.drawnW)} W drawn, ${w1(x.allocW)} W reserved${x.maxW ? ` of a ${w1(x.maxW)} W port limit` : ''}` },
         h('span', { style: `position:absolute;inset:0 auto 0 0;width:${pc(x.allocW)}%;background:var(--warn);opacity:.45` }),
         h('span', { style: `position:absolute;inset:0 auto 0 0;width:${pc(x.drawnW)}%;background:var(--accent)` })) : null,
-      h('div', { class: 'ssub' }, `${w1(x.allocW)} W reserved${x.maxW ? ` of ${w1(x.maxW)} W` : ''}`)));
+      h('div', { class: 'ssub' }, `${w1(x.allocW)} W reserved${x.maxW ? ` of ${w1(x.maxW)} W` : ''}`),
+      x.askedW != null ? h('div', { class: 'ssub', style: x.grantedW != null && x.grantedW < x.askedW ? 'color:var(--warn)' : undefined, title: 'LLDP-MED power negotiation: what the device asked the switch for, and what the switch gave it' }, `Asked for ${w1(x.askedW)} W, granted ${x.grantedW == null ? '—' : w1(x.grantedW) + ' W'}${x.grantedW != null && x.grantedW < x.askedW ? ': the device got less than it wanted' : ''}`) : null));
 }
 
 const sub = (t: string, hint?: string) => h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, t), hint ? h('span', { class: 'dim', style: 'font-size:11.5px' }, hint) : null);
 
 /** Stack members and stack ports (Catalyst StackWise): a broken ring link is the thing to see. */
+function redundancySection(r: Redundancy): VNode {
+  return h('div', { key: 'rf', class: 'col', style: 'gap:6px' }, sub('Supervisor redundancy', `This unit is ${r.unitState}; the peer is ${r.peerState}`),
+    ...r.problems.map(t => note(t, r.level === 'bad' ? 'bad' : 'warn', true)),
+    h('div', { class: 'row', style: 'gap:16px;flex-wrap:wrap' }, stat('Configured', r.configured), stat('Running', r.operating), r.lastSwitchover ? stat('Last switchover', r.lastSwitchover) : null));
+}
+
+/** Port-channels: one row each, with the members that are not carrying traffic. */
+function lagSection(chs: Channel[], ifName?: (i: number) => string): VNode {
+  const nm = (i: number) => ifName?.(i) || `interface ${i}`;
+  const bad = chs.filter(c => c.level !== 'ok');
+  return h('div', { class: 'col', style: 'gap:6px' }, sub('Port-channels (LACP)', `${chs.length} channel${chs.length === 1 ? '' : 's'}, ${bad.length ? bad.length + ' with a problem' : 'all members working'}`),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(120px,1fr) 80px minmax(220px,2fr) 100px;--w:620px' },
+      h('div', { class: 'tr head' }, ...['Channel', 'Members', 'Member ports', 'State'].map(t => h('span', null, t))),
+      [...bad, ...chs.filter(c => c.level === 'ok')].map(c => h('div', { key: c.ifIndex, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, nm(c.ifIndex)), h('span', { class: 'mono' }, `${c.members.filter(m => m.level === 'ok').length} of ${c.members.length}`),
+        h('span', { class: 'mono', style: 'font-size:12px;overflow-wrap:anywhere', title: c.members.filter(m => m.why).map(m => `${nm(m.ifIndex)}: ${m.why}`).join('\n') }, c.members.map(m => nm(m.ifIndex) + (m.level === 'ok' ? '' : ' ⚠')).join(', ') || '—'),
+        statusEl(c.level, c.level === 'ok' ? 'working' : c.problems[0] ?? 'problem'))))));
+}
+
+/** Time sources: a clock that drifts breaks logs, certificates and Kerberos long before anyone looks at NTP. */
+function ntpSection(n: Ntp): VNode {
+  return h('div', { class: 'col', style: 'gap:6px' }, sub('Time (NTP)', n.synced ? `Synchronised${n.stratum !== null ? ` at stratum ${n.stratum}` : ''}${n.offsetMs !== null ? `, ${Math.round(n.offsetMs * 10) / 10} ms off` : ''}` : 'Not synchronised'),
+    ...n.problems.map(t => note(t, n.level === 'bad' ? 'bad' : 'warn', true)),
+    n.sources.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(140px,1fr) 80px 100px 100px 80px 100px;--w:620px' },
+      h('div', { class: 'tr head' }, ...['Source', 'Stratum', 'Offset', 'Delay', 'Reach', 'State'].map(t => h('span', null, t))),
+      n.sources.map(x => h('div', { key: x.id, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, x.address + (x.active ? ' ◀' : '')), h('span', { class: 'mono' }, x.stratum === null ? '—' : String(x.stratum)),
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.offsetMs === null ? '—' : `${Math.round(x.offsetMs * 10) / 10} ms`), h('span', { class: 'mono', style: 'font-size:12px' }, x.delayMs === null ? '—' : `${Math.round(x.delayMs * 10) / 10} ms`),
+        h('span', { class: 'mono', style: 'font-size:12px' }, x.reach === null ? '—' : x.reach.toString(8)), statusEl(x.level, x.level === 'ok' ? (x.active ? 'in use' : 'ok') : 'no answer'))))) : null);
+}
+
 function stackSection(st: Stack): VNode {
   return h('div', { key: 'stack', class: 'col', style: 'gap:6px' }, sub('Stack', `${st.members.length} member${st.members.length === 1 ? '' : 's'}, ${st.ports.filter(p => p.level === 'ok').length} of ${st.ports.length} stack ports up`),
     ...st.problems.map(t => note(t, 'warn', true)),
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:80px 110px minmax(140px,1fr) 150px;--w:520px' },
+    st.svl ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:80px minmax(160px,1fr) minmax(160px,1fr) 90px;--w:520px' },
+      h('div', { class: 'tr head' }, ...['Chassis', 'Stack link port', 'Port at the other end', 'State'].map(t => h('span', null, t))),
+      st.ports.map(p => h('div', { key: `${p.neighbor}/${p.ifIndex}`, class: 'tr' }, h('span', { class: 'mono' }, String(st.members.find(m => m.index === p.neighbor)?.number ?? '—')), h('span', { class: 'mono', style: 'font-size:12px' }, p.name || `interface ${p.ifIndex}`), h('span', { class: 'mono', style: 'font-size:12px' }, p.neighborName || '—'), statusEl(p.level, p.status))))) : null,
+    st.svl ? null : h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:80px 110px minmax(140px,1fr) 150px;--w:520px' },
       h('div', { class: 'tr head' }, ...['Member', 'Role', 'State', 'MAC address'].map(t => h('span', null, t))),
       st.members.map(m => h('div', { key: m.index, class: 'tr' }, h('span', { class: 'mono' }, String(m.number ?? m.index)), h('span', null, m.role), statusEl(m.level, m.state), h('span', { class: 'mono', style: 'font-size:12px' }, m.mac || '—'))))));
 }
@@ -269,11 +315,12 @@ export function protocolsPanel(o: { data: HealthRes | null; ifName?: (ifIndex: n
       h('div', { class: 'tr head' }, ...['Neighbour address', 'Router ID', 'State'].map(t => h('span', null, t))),
       hl.ospf.map(n => h('div', { key: n.address, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, n.address), h('span', { class: 'mono', style: 'font-size:12px' }, n.id || '—'), statusEl(n.level === 'off' ? 'off' : n.level, n.state)))))));
   if (hl.bgp.length) sections.push(h('div', { key: 'bgp', class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, `BGP peers${hl.bgpLocalAs ? ` (local AS ${hl.bgpLocalAs})` : ''}`),
-    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) 90px 130px 110px 100px 100px;--w:720px' },
-      h('div', { class: 'tr head' }, ...['Peer', 'AS', 'State', 'Up for', 'Updates in', 'Updates out'].map(t => h('span', null, t))),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) 90px 130px 110px 100px 100px minmax(160px,1fr);--w:900px' },
+      h('div', { class: 'tr head' }, ...['Peer', 'AS', 'State', 'Up for', 'Updates in', 'Updates out', 'Prefixes accepted'].map(t => h('span', null, t))),
       hl.bgp.map(p => h('div', { key: p.address, class: 'tr' }, h('span', { class: 'mono', style: 'font-size:12px' }, p.address), h('span', { class: 'mono', style: 'font-size:12px' }, p.as === null ? '—' : String(p.as)),
         statusEl(p.level === 'off' ? 'off' : p.level, p.admin === 'stop' && p.level !== 'ok' ? `${p.state} (shut down)` : p.state),
-        h('span', { class: 'muted' }, p.upSec !== null ? dur(p.upSec * 1000) : '—'), h('span', { class: 'mono', style: 'font-size:12px' }, p.updatesIn === null ? '—' : num(p.updatesIn)), h('span', { class: 'mono', style: 'font-size:12px' }, p.updatesOut === null ? '—' : num(p.updatesOut))))))));
+        h('span', { class: 'muted' }, p.upSec !== null ? dur(p.upSec * 1000) : '—'), h('span', { class: 'mono', style: 'font-size:12px' }, p.updatesIn === null ? '—' : num(p.updatesIn)), h('span', { class: 'mono', style: 'font-size:12px' }, p.updatesOut === null ? '—' : num(p.updatesOut)),
+        h('span', { class: 'mono', style: 'font-size:12px;overflow-wrap:anywhere' }, (p.families ?? []).length ? p.families!.map(f => h('span', { key: f.name, style: p.level === 'ok' && f.accepted === 0 ? 'color:var(--warn)' : undefined, title: `${f.name}: ${f.accepted ?? '?'} accepted, ${f.denied ?? '?'} denied, ${f.advertised ?? '?'} advertised${p.level === 'ok' && f.accepted === 0 ? '. The session is up but no routes are being learned.' : ''}` }, `${f.name} ${f.accepted ?? '?'}  `)) : '—')))))));
   const nm = (i: number | null) => (i ? o.ifName?.(i) || `interface ${i}` : '—');
   if (hl.eigrp?.length) sections.push(h('div', { key: 'eigrp', class: 'col', style: 'gap:6px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, `EIGRP neighbours (AS ${[...new Set(hl.eigrp.map(p => p.as))].join(', ')})`),
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) 90px 90px 90px 110px;--w:700px' },

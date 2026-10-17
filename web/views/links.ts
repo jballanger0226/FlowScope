@@ -17,7 +17,7 @@ interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: nu
 interface Iface {
   mac: string; addresses: string[];
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
-  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[]; authSetup?: { methods: string; mode: string; open: boolean; control: string }; poe?: { allocW: number; drawnW: number; maxW: number | null; detected: boolean; denied: number | null; deniedAt: number | null };
+  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[]; authSetup?: { methods: string; mode: string; open: boolean; control: string }; poe?: { allocW: number; drawnW: number; maxW: number | null; detected: boolean; denied: number | null; deniedAt: number | null; askedW?: number | null; grantedW?: number | null }; udld?: { mode: string; state: string; level: 'ok' | 'warn' | 'bad' | 'off' }; lag?: { channel: number; level: string; why: string };
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
@@ -417,7 +417,7 @@ function ifTable(dev: Dev): VNode {
     h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:${light ? 1545 : 1430}px` },
       h('div', { class: 'tr head' }, ...['Interface', 'Description', 'IP address', 'Neighbour (CDP/LLDP)', 'VLAN', 'Speed', 'State', ...(light ? [h('span', { title: 'Optic light levels in dBm: receive / transmit' }, 'Light Rx / Tx')] : []), 'In', 'Out', 'Discards', 'Service policy', 'Flows'].map(t => (typeof t === 'string' ? h('span', null, t) : t))),
       h('div', { class: 'scroll' }, rows.map(i => h('div', { key: i.ifIndex, class: 'tr pick', 'aria-current': i.ifIndex === ifIndex ? 'true' : undefined, onclick: () => select_(dev.id, i.ifIndex, 'interfaces') },
-        h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex, 'interfaces'); } }, i.name), poeDenied(i) ? h('span', { class: 'tag bad', style: 'margin-left:6px;white-space:nowrap;font-size:11px', title: poeDenied(i)! }, 'PoE denied') : null, i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
+        h('span', { style: 'font-weight:600' }, h('button', { type: 'button', class: 'rowbtn', 'aria-pressed': i.ifIndex === ifIndex, title: `Show ${i.name}`, onclick: (e: Event) => { e.stopPropagation(); select_(dev.id, i.ifIndex, 'interfaces'); } }, i.name), poeDenied(i) ? h('span', { class: 'tag bad', style: 'margin-left:6px;white-space:nowrap;font-size:11px', title: poeDenied(i)! }, 'PoE denied') : null, i.lag ? h('span', { class: `tag${i.lag.level === 'ok' ? '' : ' ' + i.lag.level}`, style: 'margin-left:6px;white-space:nowrap;font-size:11px', title: i.lag.level === 'ok' ? 'Member of a port-channel' : `Port-channel member: ${i.lag.why}` }, `${dev.interfaces.find(x => x.ifIndex === i.lag!.channel)?.name.replace(/^Port-channel/i, 'Po') ?? 'Po'}${i.lag.level === 'ok' ? '' : ' ⚠'}`) : null, i.udld?.level === 'bad' ? h('span', { class: 'tag bad', style: 'margin-left:6px;white-space:nowrap;font-size:11px', title: `UDLD (${i.udld.mode}): ${i.udld.state}` }, 'UDLD fault') : null, i.flagged ? h('span', { style: 'color:var(--warn);margin-left:6px', title: 'Needs attention' }, '●') : null),
         h('span', { class: 'muted' }, i.alias || '—'),
         ipCell(i),
         nbCell(nbOf(i.ifIndex)),
@@ -955,7 +955,7 @@ function overviewPanel(dev: Dev): VNode {
 }
 /** Resources with their history, then sensors and PoE where the device publishes them. Every device has this tab. */
 function hardwareTab(dev: Dev): VNode {
-  const sensors = hardwarePanel({ data: healthRes });
+  const sensors = hardwarePanel({ data: healthRes, ifName: i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? '' });
   return h('div', { class: 'col', style: 'gap:18px' }, resourcesPanel(dev, true),
     sensors ?? (healthRes ? h('span', { class: 'dim', style: 'font-size:12px' }, 'This device does not publish temperature, fan, power supply or PoE sensors that FlowScope reads.') : null));
 }

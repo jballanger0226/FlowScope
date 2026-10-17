@@ -13,7 +13,7 @@ test('per-port PoE: reserved and drawn power mapped to the ifIndex through ENTIT
   const make = (cc: Record<string, [string, SnmpValue][]>) => ({ column: async (oid: string) => new Map(cc[oid] ?? []) }) as unknown as SnmpClient;
   const c = make(cols);
   const r = await readPoePorts(c);
-  assert.deepEqual(r, [{ ifIndex: 9, allocW: 30, drawnW: 6.3, maxW: 90, detected: true, denied: 0, deniedAt: null }, { ifIndex: 10, allocW: 15.4, drawnW: 0, maxW: 90, detected: false, denied: 3, deniedAt: null }]);
+  assert.deepEqual(r, [{ ifIndex: 9, allocW: 30, drawnW: 6.3, maxW: 90, detected: true, denied: 0, deniedAt: null, askedW: null, grantedW: null }, { ifIndex: 10, allocW: 15.4, drawnW: 0, maxW: 90, detected: false, denied: 3, deniedAt: null, askedW: null, grantedW: null }]);
   // a counter that went up since the previous read marks the port as refused now; one that did not keeps the earlier time
   const again = await readPoePorts(make({ ...cols, '1.3.6.1.2.1.105.1.1.1.12': [['1.1', 0], ['1.2', 5]] }), r, 1234);
   assert.deepEqual(again.map(p => [p.ifIndex, p.denied, p.deniedAt]), [[9, 0, null], [10, 5, 1234]]);

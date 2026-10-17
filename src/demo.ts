@@ -99,7 +99,7 @@ function demoHealth(d: Dev, now: number): Health {
     h.ospf = [{ id: '10.255.0.1', address: '10.0.0.9', state: 'full', level: 'ok' }];
     h.bgpLocalAs = 65010;
     h.bgp = [
-      { address: '203.0.113.1', as: 64500, state: 'established', level: 'ok', admin: 'start', upSec: 12 * 86400, updatesIn: 912_440, updatesOut: 4_120 },
+      { address: '203.0.113.1', as: 64500, state: 'established', level: 'ok', admin: 'start', upSec: 12 * 86400, updatesIn: 912_440, updatesOut: 4_120, families: [{ name: 'IPv4 unicast', accepted: 941_220, denied: 12, advertised: 4 }, { name: 'IPv6 unicast', accepted: 0, denied: 0, advertised: 1 }] },
       { address: '198.51.100.1', as: 64501, state: 'active', level: 'warn', admin: 'start', upSec: null, updatesIn: 88_120, updatesOut: 3_904 }
     ];
   }
@@ -157,7 +157,8 @@ const DEVS: Dev[] = [
     ['Vl140', 'VLAN 140 CAMPUS-USERS (SVI)', 10000, null, 12, 9], ['Vl150', 'VLAN 150 CAMPUS-WIFI (SVI)', 10000, null, 7, 6],
     ['Te1/0/1', 'Uplink to core-rtr-01', 10000, 'CORE-OUT', 31, 28], ['Te1/0/2', 'Uplink to core-rtr-01 (DC path)', 10000, 'CORE-OUT', 22, 35],
     ['Gi1/0/12', 'Desk 4-21 (PC and phone)', 1000, null, 4, 2], ['Gi1/0/14', 'Desk 4-33', 1000, null, 3, 1], ['Gi1/0/15', 'Lab bench 60', 1000, null, 2, 1],
-    ['Gi1/0/16', 'Printer room', 1000, null, 1, 1], ['Gi1/0/20', 'Wireless AP, floor 4', 1000, null, 9, 6], ['Gi1/0/24', 'Meeting room 4B (video)', 1000, null, 6, 1]] },
+    ['Gi1/0/16', 'Printer room', 1000, null, 1, 1], ['Gi1/0/20', 'Wireless AP, floor 4', 1000, null, 9, 6], ['Gi1/0/24', 'Meeting room 4B (video)', 1000, null, 6, 1],
+    ['Po1', 'Channel to lab switch', 2000, null, 3, 2]] },
   { name: 'core-rtr-01', ip: '10.255.0.1', role: 'router', descr: 'Core router', secs: 60, mac: '00:1c:73:00:00:01', ifs: [
     ['Te0/0/0', 'Downlink to dist-sw-01', 10000, 'CORE-OUT', 38, 33], ['Te0/0/1', 'Link to DC fabric', 10000, 'CORE-OUT', 44, 41],
     ['Te0/0/2', 'Link to fw-edge-01', 10000, 'CORE-OUT', 27, 30], ['Te0/0/3', 'Link to wan-rtr-01', 1000, 'WAN-OUT', 71, 64], ['Lo0', 'Loopback', 0, null, 0, 0]] },
@@ -590,7 +591,19 @@ function seedFabric(app: App, id: number, net: Net, now: number): void {
   app.devices.saveData(id, 'config', { readAt: now, changedAt: now - 4_600, savedAt: now - 23_700, unsaved: true, unsavedSec: 4.6, events: [{ at: now - 86_400_000, what: 'saved', user: 'netops', via: 'remote session' }] }, now);
   const ports = ['Gi1/0/12', 'Gi1/0/14', 'Gi1/0/15', 'Gi1/0/16', 'Gi1/0/20', 'Gi1/0/24'].map(n => net.ifIdx.get('dist-sw-01|' + n)).filter((x): x is number => !!x);
   app.devices.saveData(id, 'authsetup', ports.map(ifIndex => ({ ifIndex, dot1x: true, mab: true, mode: 'multi-auth', control: 'auto', open: ifIndex !== ports[5], reauth: false })), now);
-  app.devices.saveData(id, 'poeports', ports.map((ifIndex, n) => ({ ifIndex, allocW: n % 2 ? 15.4 : 30, drawnW: n % 2 ? 4.1 : 6.3 + n, maxW: 90, detected: true, denied: n === 2 ? 4 : 0, deniedAt: n === 2 ? now - 300_000 : null })), now);
+  app.devices.saveData(id, 'poeports', ports.map((ifIndex, n) => ({ ifIndex, allocW: n % 2 ? 15.4 : 30, drawnW: n % 2 ? 4.1 : 6.3 + n, maxW: 90, detected: true, denied: n === 2 ? 4 : 0, deniedAt: n === 2 ? now - 300_000 : null, askedW: n === 0 ? 25.5 : n % 2 ? 15.4 : 30, grantedW: n === 0 ? 15.4 : n % 2 ? 15.4 : 30 })), now);
+  // chassis health: a supervisor pair that has lost its standby, a time source that does not answer, a port-channel with one member out, UDLD, and PoE negotiation
+  app.devices.saveData(id, 'rf', { readAt: now, unitState: 'active', peerState: 'disabled', peerId: null, duplex: false, configured: 'SSO (hot standby)', operating: 'non-redundant', configuredSso: true, operatingSso: false, lastSwitchover: null, sinceFailoverSec: null, level: 'ok', problems: [] }, now);
+  app.devices.saveData(id, 'ntp', { readAt: now, mode: 'client', synced: true, stratum: 3, offsetMs: 2.4, dispersionMs: 11, level: 'warn', problems: ['A time source does not answer: 10.253.128.8.'], sources: [
+    { id: 1, address: '10.253.128.5', stratum: 2, offsetMs: 2.4, jitterMs: 0.8, delayMs: 14.2, reach: 255, refId: '192.5.41.40', active: true, level: 'ok' },
+    { id: 2, address: '10.253.128.6', stratum: 2, offsetMs: 3.1, jitterMs: 1.1, delayMs: 15.0, reach: 255, refId: '192.5.41.41', active: false, level: 'ok' },
+    { id: 3, address: '10.253.128.8', stratum: null, offsetMs: null, jitterMs: null, delayMs: null, reach: 0, refId: '', active: false, level: 'warn' }] }, now);
+  const po = net.ifIdx.get('dist-sw-01|Po1'), m14 = net.ifIdx.get('dist-sw-01|Gi1/0/14'), m15 = net.ifIdx.get('dist-sw-01|Gi1/0/15');
+  if (po && m14 && m15) {
+    const mem = (ifIndex: number, ok: boolean) => ({ ifIndex, bundled: ok, collecting: ok, distributing: ok, partnerInSync: ok, defaulted: false, expired: false, level: ok ? 'ok' : 'warn', why: ok ? '' : 'configured in the channel but not bundled: the port is down or the partner does not run LACP' });
+    app.devices.saveData(id, 'lag', [{ ifIndex: po, key: 1, partnerMac: '00:1c:73:00:00:41', members: [mem(m14, true), mem(m15, false)], level: 'warn', problems: ['1 of 2 member ports is not carrying traffic.'] }], now);
+    app.devices.saveData(id, 'udld', [{ ifIndex: m14, mode: 'aggressive', state: 'bidirectional', level: 'ok' }, { ifIndex: m15, mode: 'aggressive', state: 'state 5 (a UDLD fault)', level: 'bad' }], now);
+  }
   // LISP: endpoints the node resolved, what it registered, and a day of cache movement
   const rl = ['10.255.1.7', '10.255.1.11', '10.255.0.1'];
   const hostsIn = ['10.9.0.5', '10.9.0.12', '10.9.0.30', '10.9.2.30'];

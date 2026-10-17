@@ -19,6 +19,10 @@ import { readAuthSetup } from './authsetup.js';
 import { readConfigState } from './confighist.js';
 import { readVrfs, contextOf } from './vrf.js';
 import { readDai, readNbar, readProcesses, readStack } from './cisco_extra.js';
+import { readRedundancy } from './redundancy.js';
+import { readNtp } from './clock.js';
+import { readLag } from './lag.js';
+import { readUdld } from './udld.js';
 import { readWlanFor, wlanVendor } from './wlan_vendors.js';
 
 /*
@@ -130,7 +134,7 @@ const WIFI_HINT: Record<string, string> = {
   cisco: 'Cisco wireless controllers publish access points and clients in CISCO-LWAPP-AP-MIB (.1.3.6.1.4.1.9.9.513) and CISCO-LWAPP-DOT11-CLIENT-MIB (.1.3.6.1.4.1.9.9.599).'
 };
 const GROUP: Record<string, CheckGroup> = { interfaces: 'basics', counters: 'basics', resources: 'basics', lldp: 'neighbours', cdp: 'neighbours', mac: 'hosts', arp: 'hosts', vlans: 'hosts',
-  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', auth: 'hosts', sgt: 'hosts', aaa: 'hosts', lisp: 'routing', authsetup: 'hosts', config: 'hardware', dot1x: 'hosts', vrf: 'routing', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
+  sensors: 'hardware', optics: 'hardware', poe: 'hardware', stp: 'routing', ospf: 'routing', bgp: 'routing', mcast: 'routing', fib: 'routing', eigrp: 'routing', bfd: 'routing', dhcp: 'hosts', auth: 'hosts', sgt: 'hosts', aaa: 'hosts', lisp: 'routing', rf: 'hardware', ntp: 'hardware', lag: 'basics', udld: 'basics', authsetup: 'hosts', config: 'hardware', dot1x: 'hosts', vrf: 'routing', dai: 'hosts', stack: 'hardware', entity: 'hardware', procs: 'hardware', nbar: 'quality', quality: 'quality', qos: 'quality', wifi: 'wifi' };
 const GROUP_ORDER: CheckGroup[] = ['basics', 'neighbours', 'hosts', 'hardware', 'routing', 'quality', 'wifi'];
 
 async function attempt<T>(fn: () => Promise<T>, empty: T): Promise<{ v: T; error: string | null }> {
@@ -214,7 +218,7 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
     ex.poe ? attempt(() => readPoe(cl), []) : none([] as Awaited<ReturnType<typeof readPoe>>),
     ex.stp ? attempt(() => readStp(cl), null) : none(null as Awaited<ReturnType<typeof readStp>>),
     ex.ospf ? attempt(() => readOspf(cl), []) : none([] as Awaited<ReturnType<typeof readOspf>>),
-    ex.bgp ? attempt(() => readBgp(cl), { peers: [], localAs: null }) : none({ peers: [], localAs: null as number | null }),
+    ex.bgp ? attempt(() => readBgp(cl, ex.vendor === 'cisco'), { peers: [], localAs: null }) : none({ peers: [], localAs: null as number | null }),
     ex.mcast ? attempt(() => readMulticast(cl, Date.now(), ex.vendor === 'cisco'), null) : none(null as Awaited<ReturnType<typeof readMulticast>>),
     attempt(() => readIfExtra(cl, Date.now(), ex.vendor === 'cisco'), new Map<number, never>() as unknown as Awaited<ReturnType<typeof readIfExtra>>),
     ex.wifi ? attempt(() => readWlanFor(c, f.ifaces ?? [], oid, descr), null) : none(null as Awaited<ReturnType<typeof readWlanFor>>)
@@ -244,6 +248,11 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
     : { id: 'stp', title: 'Spanning tree', group: 'routing', state: 'na', count: 0, detail: stp.error ?? 'No BRIDGE-MIB spanning tree information. It is normal when spanning tree is off or the switch keeps it per VLAN.' });
   if (ex.ospf) out.push(ospf.v.length ? { id: 'ospf', title: 'OSPF neighbours', group: 'routing', state: ospf.v.some(n => n.level === 'bad') ? 'warn' : 'ok', count: ospf.v.length, detail: `${plural(ospf.v.length, 'neighbour')}, ${ospf.v.filter(n => n.level === 'ok').length} fully adjacent.` }
     : { id: 'ospf', title: 'OSPF neighbours', group: 'routing', state: 'na', count: 0, detail: ospf.error ?? 'No OSPF neighbours (OSPF-MIB). Normal when this device does not run OSPF.' });
+  {
+    const ntp = await attempt(() => readNtp(cl, Date.now(), ex.vendor === 'cisco'), null);
+    out.push(ntp.v ? { id: 'ntp', title: 'Time synchronisation (NTP)', group: GROUP.ntp, state: ntp.v.level === 'bad' ? 'warn' : 'ok', count: ntp.v.sources.length, detail: `${ntp.v.synced ? 'Synchronised' : 'Not synchronised'}${ntp.v.stratum !== null ? ` at stratum ${ntp.v.stratum}` : ''} with ${plural(ntp.v.sources.length, 'time source')}${ntp.v.problems.length ? '. ' + ntp.v.problems[0] : ''}.` }
+      : { id: 'ntp', title: 'Time synchronisation (NTP)', group: GROUP.ntp, state: 'na', count: 0, detail: ntp.error ?? 'No NTP data (NTPv4-MIB, CISCO-NTP-MIB). Normal when the device does not publish them.', hint: ntp.error ? 'NTPv4-MIB is .1.3.6.1.2.1.197 and CISCO-NTP-MIB is .1.3.6.1.4.1.9.9.168.' : undefined });
+  }
   if (ex.bgp) out.push(bgp.v.peers.length ? { id: 'bgp', title: 'BGP peers', group: 'routing', state: bgp.v.peers.some(p => p.level === 'bad') ? 'warn' : 'ok', count: bgp.v.peers.length, detail: `${plural(bgp.v.peers.length, 'peer')}, ${bgp.v.peers.filter(p => p.level === 'ok').length} established.` }
     : { id: 'bgp', title: 'BGP peers', group: 'routing', state: 'na', count: 0, detail: bgp.error ?? 'No BGP peers (BGP4-MIB). Normal when this device does not run BGP.' });
   if (ex.mcast) {
@@ -314,6 +323,10 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
       row('authsetup', 'Port authentication setup', setup.v.length, `${plural(setup.v.length, 'port')} set up to authenticate (${plural(setup.v.filter(p => p.dot1x && p.mab).length, 'port')} with 802.1X and MAB, ${setup.v.filter(p => p.mab && !p.dot1x).length} MAB only, ${setup.v.filter(p => p.dot1x && !p.mab).length} 802.1X only); host mode ${[...new Set(setup.v.map(p => p.mode))].join(', ')}${setup.v.some(p => p.open) ? `; ${plural(setup.v.filter(p => p.open).length, 'port')} in open mode` : ''}. Shown next to the VLAN of each port.`, 'No port authentication settings (CISCO-AUTH-FRAMEWORK-MIB, CISCO-PAE-MIB, CISCO-MAC-AUTH-BYPASS-MIB). Normal when no port uses 802.1X or MAB.', setup.error, 'CISCO-PAE-MIB is .1.3.6.1.4.1.9.9.220, CISCO-MAC-AUTH-BYPASS-MIB .1.3.6.1.4.1.9.9.654 and the port table of CISCO-AUTH-FRAMEWORK-MIB .1.3.6.1.4.1.9.9.656.1.2.');
       row('aaa', 'RADIUS and TACACS+ servers', aaa.v?.servers.length ?? 0, `${plural(aaa.v?.servers.length ?? 0, 'server')}: ${(aaa.v?.servers ?? []).map(sv => `${sv.address} (${sv.kind === 'tacacs' ? 'TACACS+' : 'RADIUS'}, ${sv.up ? 'up' : 'dead'}, ${sv.authReq + sv.acctReq} requests, ${sv.authTimeouts + sv.acctTimeouts} timeouts)`).join('; ')}. Their health is shown on the hardware tab and in the attention list.`, 'No authentication servers (CISCO-AAA-SERVER-MIB). Normal when the device does not use RADIUS or TACACS+.', aaa.error, 'CISCO-AAA-SERVER-MIB is .1.3.6.1.4.1.9.10.56.');
       row('stack', 'Stack members and ports', stack.v?.members.length ?? 0, `${plural(stack.v?.members.length ?? 0, 'member')}, ${stack.v?.ports.filter(p => p.level === 'ok').length ?? 0} of ${stack.v?.ports.length ?? 0} stack ports up${stack.v?.problems.length ? '. ' + stack.v.problems[0] : ''}.`, 'No stack information (CISCO-STACKWISE-MIB). Normal for a switch that is not stacked.', stack.error, 'CISCO-STACKWISE-MIB is .1.3.6.1.4.1.9.9.500.');
+      const [rf, lag, udld] = await Promise.all([attempt(() => readRedundancy(cl), null), attempt(() => readLag(cl), []), attempt(() => readUdld(cl), [])]);
+      row('rf', 'Supervisor redundancy', rf.v ? 1 : 0, `This unit is ${rf.v?.unitState}, the peer is ${rf.v?.peerState}; configured ${rf.v?.configured}, running ${rf.v?.operating}.`, 'No redundancy information (CISCO-RF-MIB). Normal for a fixed switch.', rf.error, 'CISCO-RF-MIB is .1.3.6.1.4.1.9.9.176.');
+      row('lag', 'Port-channels (LACP)', lag.v.length, `${plural(lag.v.length, 'port-channel')} with ${plural(lag.v.reduce((a, c) => a + c.members.length, 0), 'member port')}; ${lag.v.filter(c => c.level !== 'ok').length} with a problem.`, 'No LACP port-channels (IEEE8023-LAG-MIB). Normal when none is configured, or when channels are static or PAgP.', lag.error, 'IEEE8023-LAG-MIB is .1.2.840.10006.300.43.');
+      row('udld', 'UDLD', udld.v.length, `UDLD runs on ${plural(udld.v.length, 'port')}: ${udld.v.filter(p => p.level === 'ok').length} bidirectional, ${udld.v.filter(p => p.level === 'bad').length} faulted.`, 'No UDLD data (CISCO-UDLDP-MIB). Normal when UDLD is not enabled.', udld.error, 'CISCO-UDLDP-MIB is .1.3.6.1.4.1.9.9.118.');
       row('dai', 'ARP inspection drops', dai.v ? 1 : 0, dai.v && dai.v.vlans.length ? `ARP packets were dropped on ${plural(dai.v.vlans.length, 'VLAN')}.` : 'The statistics are published and no VLAN has dropped an ARP packet.', 'No ARP inspection statistics (CISCO-DYNAMIC-ARP-INSPECTION-MIB). Normal when it is not configured.', dai.error, 'CISCO-DYNAMIC-ARP-INSPECTION-MIB is .1.3.6.1.4.1.9.9.374.');
     }
     {
