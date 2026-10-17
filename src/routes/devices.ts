@@ -144,7 +144,9 @@ export function registerDevices(app: App): void {
   };
 
   w.post('/api/devices/:id/walks', 'snmp', async c => {
-    const b = await c.body<{ oid?: string }>(1000);
+    const b = await c.body<{ oid?: string; context?: string }>(1000);
+    const context = str(b.context, 64).trim();
+    if (context && !/^[A-Za-z0-9._:-]{1,64}$/.test(context)) throw new HttpError(400, 'A context name may contain letters, digits and . _ : - only.');
     const text = str(b.oid, 300).trim();
     const oid = text === '' ? '' : cleanOid(text);
     if (oid === null) throw new HttpError(400, 'Enter a numeric OID such as 1.0.8802.1.1.2.1.4 (a leading dot is fine), or leave it blank to walk everything.');
@@ -153,9 +155,9 @@ export function registerDevices(app: App): void {
     checkTarget(c, d.ip);
     if (busy.has(id)) throw new HttpError(429, 'A check is running on this device. Wait for it to finish.');
     let j;
-    try { j = walks.start({ id, name: d.name, ip: d.ip }, app.devices.open(d), oid, who(c)); }
+    try { const base = app.devices.open(d); let cl = base; if (context) { cl = base.forContext(context); base.close(); } j = walks.start({ id, name: d.name, ip: d.ip }, cl, oid, who(c)); }
     catch (e) { if (e instanceof WalkBusy) throw new HttpError(429, e.message); throw e; }
-    app.log.audit(who(c), `Started an SNMP walk of ${oid ? oid : 'the whole tree'} on ${d.name}`);
+    app.log.audit(who(c), `Started an SNMP walk of ${oid ? oid : 'the whole tree'} on ${d.name}${context ? ` in context ${context}` : ''}`);
     c.json({ job: jobView(j) }, 202);
   });
 

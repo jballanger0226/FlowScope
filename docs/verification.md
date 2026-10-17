@@ -70,3 +70,6 @@ Rate in and out are the routes' own rates added up for each interface (routes ar
 
 ### Multicast page sections
 The page keeps the device picker, counts, PIM summary and warnings on top, and splits the rest into tabs: Routes (search, filters and the route table), Interface load (open an interface for its groups; a group sent out of the interface opens to the hosts that joined it there, with their ports and the snooping command for that VLAN and group), RPF drops (graph and the routes dropping now) and IGMP and rendezvous points (queriers, RP mappings, PIM neighbours). `#/multicast?dev=<id>&t=rpf|load|igmp|routes` opens a tab; the Needs-attention entry for RPF drops opens the RPF tab, and picking a group from the drop list returns to Routes.
+
+### Walking an SNMP context
+The walk box on the SNMP devices page has an optional SNMP context. SNMPv3 sends it as the context name; v1/v2c sends `community@name`. Use it to read one VRF of an IOS XE switch with the device's own credential (for example context `vrf-PCI` after `snmp context vrf-PCI` is set under the VRF's address family and the SNMP group allows it). Check: walk `1.3.6.1.2.1.83` with the context and compare the groups with `show ip mroute vrf <name>`.

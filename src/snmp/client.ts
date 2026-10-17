@@ -179,5 +179,12 @@ export class SnmpClient {
     return new SnmpClient(this.target, cred);
   }
 
+  /** A second session that reads one SNMP context (a VRF on IOS XE): the SNMPv3 context, or community@name for v1/v2c. The caller closes the session. */
+  forContext(name: string): SnmpClient {
+    const c = this.cred;
+    const cred: SnmpCredential = c.version === 'v3' ? { ...c, context: name } : { ...c, community: `${c.community || 'public'}@${name}` };
+    return new SnmpClient(this.target, cred);
+  }
+
   close(): void { if (!this.closed) { this.closed = true; try { this.s.close(); } catch { /* ignore */ } } }
 }

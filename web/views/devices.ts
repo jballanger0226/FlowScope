@@ -26,7 +26,7 @@ let diagFor = 0; let chk: { checkedAt: number; checks: Check[]; vendor: string; 
 interface WalkRow { oid: string; type: string; text: string }
 interface WalkJob { id: string; device: string; startOid: string; state: 'running' | 'done' | 'cancelled' | 'error'; error: string | null; truncated: boolean; rows: number; startedAt: number; finishedAt: number | null; maxRows: number }
 const PAGE = 100;
-let wOid = ''; let wJob: WalkJob | null = null; let wRows: WalkRow[] = []; let wMatched = 0; let wOff = 0; let wQ = ''; let wBusy = false; let wErr = ''; let wOpen = false; let wTimer: number | undefined;
+let wCtx = ''; let wOid = ''; let wJob: WalkJob | null = null; let wRows: WalkRow[] = []; let wMatched = 0; let wOff = 0; let wQ = ''; let wBusy = false; let wErr = ''; let wOpen = false; let wTimer: number | undefined;
 // scan
 let dRange = '', dCred = '', dSec = '60', dTryOthers = false; let job: Job | null = null; let dMsg = ''; let picked = new Set<string>(); let scanTimer: number | undefined; let addFoundBusy = false;
 
@@ -161,7 +161,7 @@ async function pollWalk(d: Dev): Promise<void> {
 }
 async function startWalk(d: Dev): Promise<void> {
   wBusy = true; wErr = ''; wJob = null; wRows = []; wMatched = 0; wOff = 0; redraw();
-  try { const r = await post<{ job: WalkJob }>(`/api/devices/${d.id}/walks`, { oid: wOid.trim() }); wJob = r.job; wBusy = false; await pollWalk(d); }
+  try { const r = await post<{ job: WalkJob }>(`/api/devices/${d.id}/walks`, { oid: wOid.trim(), context: wCtx.trim() || undefined }); wJob = r.job; wBusy = false; await pollWalk(d); }
   catch (e) { wErr = (e as Error).message; wBusy = false; redraw(); }
 }
 async function cancelWalk(d: Dev): Promise<void> { if (!wJob) return; try { await post(`/api/devices/${d.id}/walks/${wJob.id}/cancel`, {}); } catch { /* the poll shows the state */ } await pollWalk(d); }
@@ -181,6 +181,7 @@ function walkPanel(d: Dev): VNode {
   return h('div', { class: 'col', style: 'gap:10px' },
     h('div', { class: 'row', style: 'align-items:end' },
       field('Starting OID (blank walks everything)', textInput(wOid, v => { wOid = v; }, { placeholder: 'blank = everything', aria: 'OID to walk', mono: true, width: '300px', onenter: () => { if (!running && !wBusy) void startWalk(d); } })),
+      field('SNMP context (optional)', textInput(wCtx, v => { wCtx = v; }, { placeholder: 'a VRF context, blank = default', aria: 'SNMP context to walk', mono: true, width: '200px', onenter: () => { if (!running && !wBusy) void startWalk(d); } })),
       field('Common starting points', select('', [['', 'Pick one…'], ...WALK_PRESETS], v => { if (v) { wOid = v === '*' ? '' : v; redraw(); } }, { aria: 'Common OIDs' })),
       running ? btn('Cancel walk', { kind: 'danger', onclick: () => void cancelWalk(d) }) : btn(wBusy ? 'Starting…' : wOid.trim() ? 'Walk' : 'Walk everything', { kind: 'primary', disabled: wBusy, onclick: () => void startWalk(d) })),
     !wOid.trim() && !wJob ? h('span', { class: 'dim', style: 'font-size:12px' }, 'A full walk reads every value the device will give this credential. A large switch can take a few minutes and return tens of thousands of rows; it runs in the background and you can filter and export it when it finishes.') : null,
