@@ -1,4 +1,5 @@
 import type { Multicast } from '../snmp/multicast.js';
+import { lookupFib, type Fib } from '../snmp/fib.js';
 import { rpfSignificant } from '../snmp/multicast.js';
 import { multicastLoss, pimIssues, type PimPeer } from '../snmp/pimcheck.js';
 import type { App } from '../app.js';
@@ -125,6 +126,8 @@ export function registerMulticast(app: App): void {
     const lossIf = new Set(multicastLoss(m, peers).map(l => l.ifIndex));
     const peerRoutes = new Map<number, Map<string, Multicast['routes'][number]>>();
     const routesOf = (pid: number, pm: Multicast): Map<string, Multicast['routes'][number]> => { let x = peerRoutes.get(pid); if (!x) { x = new Map(pm.routes.map(r => [r.group + '|' + r.source, r] as const)); peerRoutes.set(pid, x); } return x; };
+    const fib = app.devices.data<Fib>(id, 'fib');
+    const ecmpPaths = (f: Fib | null, ip: string | null): number | null => { if (!f || !ip) return null; const e = lookupFib(f, ip); return e ? e.paths.filter(p => p.kind !== 'receive').length : null; };
     const rpfPeer = (r: Multicast['routes'][number]): { peer: { id: number; name: string; ifIndex: number; ifName: string; forwarding: boolean | null } | null; loss: boolean } => {
       const loss = r.inIfIndex !== null && lossIf.has(r.inIfIndex);
       const pid = r.upstream ? peerId.get(r.upstream) : undefined, pm = pid ? app.devices.multicast(pid) : null, pif = pid && r.upstream ? ipsOf.get(pid)?.get(r.upstream) : undefined;
@@ -136,7 +139,7 @@ export function registerMulticast(app: App): void {
     c.json({
       device: { id: d.id, name: d.name, ip: d.ip, role: d.role ?? 'device', model: modelText(app.devices.data<Entity>(id, 'entity')) }, readAt: m.readAt, stale: now - m.readAt > STALE_MS, source: m.source, truncated: m.truncated,
       routes: m.routes.map(r => ({
-        group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', rpf: r.inIfIndex || r.upstream || r.rpf ? { ...rpfPeer(r), inIf: r.inIfIndex ? name(r.inIfIndex) : null, inIfIndex: r.inIfIndex, neighbor: r.upstream, who: who(r.upstream), route: r.rpf ? `${r.rpf.prefix}/${maskLen(r.rpf.mask)}` : null, proto: r.rpf?.proto ? RT_PROTO[r.rpf.proto] ?? null : null, failures: r.rpfFail ?? null, failuresNew: r.rpfNew ?? null, failuresShare: r.rpfNew && r.pktsNew != null ? Math.round((r.rpfNew / (r.rpfNew + Math.max(0, r.pktsNew))) * 1000) / 10 : null, failuresMajor: rpfSignificant(r) } : null, mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
+        group: r.group, source: r.source, sharedTree: r.source === '0.0.0.0', rpf: r.inIfIndex || r.upstream || r.rpf ? { ...rpfPeer(r), inIf: r.inIfIndex ? name(r.inIfIndex) : null, inIfIndex: r.inIfIndex, neighbor: r.upstream, who: who(r.upstream), route: r.rpf ? `${r.rpf.prefix}/${maskLen(r.rpf.mask)}` : null, proto: r.rpf?.proto ? RT_PROTO[r.rpf.proto] ?? null : null, failures: r.rpfFail ?? null, failuresNew: r.rpfNew ?? null, failuresShare: r.rpfNew && r.pktsNew != null ? Math.round((r.rpfNew / (r.rpfNew + Math.max(0, r.pktsNew))) * 1000) / 10 : null, failuresMajor: rpfSignificant(r), paths: ecmpPaths(fib, r.source !== '0.0.0.0' ? r.source : r.rp) } : null, mode: r.protocol === 8 ? 'sparse' : r.protocol === 9 ? 'dense' : null, inIf: r.inIfIndex ? name(r.inIfIndex) : null, upstream: r.upstream, rp: r.rp, bps: r.bps, pkts: r.pkts, flags: r.flags, protocol: r.protocol, expirySec: r.expirySec,
         out: r.oifs.map(o => ({
           ifIndex: o.ifIndex, name: name(o.ifIndex), forwarding: o.forwarding, linkDown: isDown(o.ifIndex), loopback: /^(lo|loopback)\d+$/i.test(name(o.ifIndex)), pkts: o.pkts, neighbor: nbr.get(o.ifIndex) ?? null, pimMode: pimMode.get(o.ifIndex) ?? null,
           members: (members.get(r.group + '|' + o.ifIndex) ?? []).map(x => ({ ip: x.ip, via: x.via, ageSec: x.lastSeen !== null ? Math.max(0, Math.round((now - x.lastSeen) / 1000)) : x.recent ? 300 : 1800, sinceSec: x.firstSeen !== null ? Math.round((now - x.firstSeen) / 1000) : null, approx: x.lastSeen === null })),

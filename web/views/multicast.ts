@@ -20,7 +20,7 @@ const VIA_WHY = { snmp: "From the router's IGMP cache over SNMP: the last host t
 const viaChip = (v: Member['via']): VNode => chip(VIA_TEXT[v ?? 'snmp'], v === 'both' ? 'ok' : 'default', VIA_WHY[v ?? 'snmp']);
 interface Out { ifIndex: number; name: string; pimMode?: string | null; members?: Member[]; forwarding: boolean; linkDown?: boolean; loopback?: boolean; pkts: number | null; neighbor: string | null; joins: Join[] }
 interface RpfPeer { id: number; name: string; ifIndex: number; ifName: string; forwarding: boolean | null }
-interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null; failuresNew?: number | null; failuresShare?: number | null; failuresMajor?: boolean }
+interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null; failuresNew?: number | null; failuresShare?: number | null; failuresMajor?: boolean; paths?: number | null }
 interface IgmpIf { name: string; querier: string | null; who: string | null; self: boolean; version: number | null; intervalSec: number | null; upSec: number | null; expirySec: number | null; hosts: number }
 interface RpMap { range: string; rp: string; who: string | null; self: boolean; holdSec: number | null; expirySec: number | null }
 interface Route {
@@ -242,7 +242,8 @@ function rpfLine(x: Rpf, group: string): VNode | null {
       linkBtn(`${x.peer.ifName} on ${x.peer.name}`, `Open ${x.peer.ifName} on ${x.peer.name} in Interfaces`, () => go('links', { dev: x.peer!.id, if: x.peer!.ifName }))
     ] : null,
     x.route ? h('span', { title: 'Reverse path forwarding: the unicast route back to the source (or to the rendezvous point for a shared tree) decides which interface the router accepts this group on. Traffic on any other interface is dropped.' }, 'via route ', h('b', { class: 'mono' }, x.route), x.proto ? ` (${x.proto})` : '') : null,
-    x.failures && !(x.failuresNew && x.failuresMajor) ? h('span', { class: 'dim', title: 'A counter kept by the router since this route was created. A small amount is typical when two equal-cost paths lead to the source and multicast multipath is on.' }, `${num(x.failures)} packets dropped on the wrong interface since the route was created${x.failuresNew ? `; ${num(x.failuresNew)} in the last read${x.failuresShare != null ? ` (${x.failuresShare}% of its packets)` : ''}, minor` : ''}`) : null,
+    x.paths && x.paths > 1 ? h('span', { class: 'dim', title: 'From the router\'s forwarding table (CISCO-CEF-MIB): more than one next hop for the route to the source' }, `${x.paths} equal-cost paths to the source`) : null,
+    x.failures && !(x.failuresNew && x.failuresMajor) ? h('span', { class: 'dim', title: 'A counter kept by the router since this route was created. ' + (x.paths && x.paths > 1 ? `The router has ${x.paths} equal-cost paths to this source, so a small amount is expected.` : 'A small amount is typical when two equal-cost paths lead to the source and multicast multipath is on.') }, `${num(x.failures)} packets dropped on the wrong interface since the route was created${x.failuresNew ? `; ${num(x.failuresNew)} in the last read${x.failuresShare != null ? ` (${x.failuresShare}% of its packets)` : ''}, minor` : ''}`) : null,
     ...rpfFlags(x));
 }
 /** One line per distinct RPF interface and neighbour in a group. */

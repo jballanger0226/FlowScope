@@ -315,3 +315,9 @@ test('wrong-interface drops are kept per read for a week and listed from a given
     cdb.close();
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('equal-cost paths are counted from the forwarding table, ignoring receive entries', async () => {
+  const { lookupFib } = await import('../src/snmp/fib.js');
+  const f = { readAt: 0, truncated: false, entries: [{ prefix: '10.94.7.0', len: 24, paths: [{ ifIndex: 1, nextHop: '10.0.0.1', weight: 1, kind: 'attached' as const }, { ifIndex: 2, nextHop: '10.0.0.5', weight: 1, kind: 'attached' as const }] }] };
+  assert.equal(lookupFib(f, '10.94.7.11')!.paths.filter(p => p.kind !== 'receive').length, 2);
+});
