@@ -128,7 +128,7 @@ export class HostTracker {
       const byVlanVrf = this.devs.vrfMaps(d.id).byVlan;
       const us = this.db.prepare('INSERT OR REPLACE INTO auth_sessions(dev_id, mac, if_index, vlan, ip, policy, profile, domain, last_seen) VALUES (?,?,?,?,?,?,?,?,?)');
       for (const a of auth) {
-        us.run(d.id, a.mac, a.ifIndex, a.vlan, a.ip, a.user, a.vlanName, a.domain, now);
+        us.run(d.id, a.mac, a.ifIndex, a.vlan, a.ip, a.user, a.vlanGroup, a.domain, now);
         if (a.ip) { const vl = a.vlan || ports.get(a.ifIndex)?.vlan || 0; ua.run(d.id, a.ip, a.mac, a.ifIndex, now, vl ? byVlanVrf.get(vl) ?? '' : ''); }
       }
       this.db.prepare('DELETE FROM neighbors WHERE dev_id = ?').run(d.id);

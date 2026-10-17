@@ -18,6 +18,6 @@ const client = { column: async (oid: string) => new Map(Object.entries(tables[oi
 test('authentication sessions give each client its port, address and the VLAN the server assigned (0 when none), and a malformed MAC is skipped', async () => {
   const s = await readAuthSessions(client);
   assert.equal(s.length, 2);
-  assert.deepEqual(s.find(x => x.ifIndex === 9), { ifIndex: 9, mac: '00:18:85:5d:2b:c9', ip: '10.135.159.187', vlan: 3074, domain: 'data', user: 'IT-Camera', vlanName: 'DEVICE_CAMERA' });
-  assert.deepEqual(s.find(x => x.ifIndex === 90), { ifIndex: 90, mac: '24:78:23:69:d7:1e', ip: '', vlan: 0, domain: 'unknown', user: '', vlanName: '' });
+  assert.deepEqual(s.find(x => x.ifIndex === 9), { ifIndex: 9, mac: '00:18:85:5d:2b:c9', ip: '10.135.159.187', vlan: 3074, domain: 'data', user: 'IT-Camera', vlanGroup: 'DEVICE_CAMERA' });
+  assert.deepEqual(s.find(x => x.ifIndex === 90), { ifIndex: 90, mac: '24:78:23:69:d7:1e', ip: '', vlan: 0, domain: 'unknown', user: '', vlanGroup: '' });
 });
