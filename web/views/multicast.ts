@@ -176,6 +176,20 @@ const incomplete = (): string => `Not a complete list. The router keeps only the
 
 const ageText = (s: number): string => (s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129_600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`);
 
+/** The hosts that joined a group on one interface: the notice with the switch command for that VLAN and group, and each host with its port. */
+function hostList(members: Member[], ifName: string, group: string, viaNeighbor: boolean): VNode {
+  return h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
+    viaNeighbor ? null : incompleteNote(ifName, group),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 150px 120px 110px;--w:700px' },
+      h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Seen by', 'Last reported', 'Known for'].map(t => h('span', null, t))),
+      members.map(m => h('div', { key: m.ip, class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12px' }, m.ip),
+        portCell(m.ip),
+        h('span', null, viaChip(m.via)),
+        h('span', { style: 'font-size:12px' }, m.approx ? h('span', { class: 'dim', title: 'NetFlow gives a window, not a time' }, m.ageSec <= 300 ? 'within 5 min' : 'within 30 min') : m.ageSec < 150 ? chip('now', 'ok', 'Reported in the last two minutes') : h('span', { class: 'dim' }, ageText(m.ageSec))),
+        h('span', { class: 'dim', style: 'font-size:12px' }, m.sinceSec === null ? '—' : ageText(m.sinceSec).replace(' ago', '')))))));
+}
+
 /** One outgoing interface. The hosts that joined are every reporter seen over time, so a VLAN with many receivers is a collapsible list. */
 function oilRow(r: Route, o: Out): VNode {
   const hk = `${keyOf(r)}|${o.ifIndex}`, members = o.members ?? [], many = members.length > 1 || members.some(m => m.via === 'netflow' || m.via === 'both'), on = openHosts.has(hk);
@@ -192,16 +206,7 @@ function oilRow(r: Route, o: Out): VNode {
         h('span', { class: 'mono dim', style: 'font-size:12px' }, o.neighbor ? `PIM neighbour ${o.neighbor}` : o.loopback ? 'this router (loopback)' : o.joins.length ? 'hosts on this segment' : '—', ' ', pimChip(o.pimMode)),
         h('span', { class: 'mono', style: 'font-size:12px' }, joined()),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts))),
-    many && on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
-      o.neighbor ? null : incompleteNote(o.name, r.group),
-      h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 150px 120px 110px;--w:700px' },
-        h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Seen by', 'Last reported', 'Known for'].map(t => h('span', null, t))),
-        members.map(m => h('div', { key: m.ip, class: 'tr' },
-          h('span', { class: 'mono', style: 'font-size:12px' }, m.ip),
-          portCell(m.ip),
-          h('span', null, viaChip(m.via)),
-          h('span', { style: 'font-size:12px' }, m.approx ? h('span', { class: 'dim', title: 'NetFlow gives a window, not a time' }, m.ageSec <= 300 ? 'within 5 min' : 'within 30 min') : m.ageSec < 150 ? chip('now', 'ok', 'Reported in the last two minutes') : h('span', { class: 'dim' }, ageText(m.ageSec))),
-          h('span', { class: 'dim', style: 'font-size:12px' }, m.sinceSec === null ? '—' : ageText(m.sinceSec).replace(' ago', ''))))))) : null);
+    many && on ? hostList(members, o.name, r.group, !!o.neighbor) : null);
 }
 
 function expanded(r: Route): VNode {
@@ -474,30 +479,32 @@ function loadTable(list: NonNullable<Detail['load']>, routes: Route[], truncated
   };
   const sub = (name: string): VNode => {
     const all = groupsOn(name), cap = 50;
-    // one row per group and direction: the sources behind a group are added up, and the group's own row lists them when it is opened in the table above
+    // one row per group and direction. Groups sent out of the interface open to the hosts that joined them there, like an IGMP snooping table with each host's address.
     const by = new Map<string, { group: string; dir: 'in' | 'out'; routes: Route[] }>();
     for (const x of all) { const k = `${x.r.group}|${x.dir}`; const e = by.get(k); if (e) e.routes.push(x.r); else by.set(k, { group: x.r.group, dir: x.dir, routes: [x.r] }); }
-    const gs = [...by.values()];
+    const gs = [...by.values()].sort((x, y) => (x.dir === y.dir ? 0 : x.dir === 'out' ? -1 : 1) || x.group.localeCompare(y.group, undefined, { numeric: true }));
     const total = (rs: Route[]): number | null => rs.some(r => r.bps !== null) ? rs.reduce((n, r) => n + (r.bps ?? 0), 0) : null;
+    const hostsOf = (g: { group: string; routes: Route[] }): { members: Member[]; viaNeighbor: boolean } => {
+      const seen = new Map<string, Member>(); let viaNeighbor = false;
+      for (const r of g.routes) for (const o of r.out) if (o.forwarding && o.name === name) { if (o.neighbor) viaNeighbor = true; for (const m of o.members ?? []) { const p = seen.get(m.ip); if (!p || m.ageSec < p.ageSec) seen.set(m.ip, m); } }
+      return { members: [...seen.values()].sort((x, y) => x.ageSec - y.ageSec), viaNeighbor };
+    };
     if (!gs.length) return h('div', { class: 'dim', style: 'padding:6px 16px 10px 34px;font-size:12px' }, 'No route in this list arrives on or is sent out of this interface.' + (truncated ? ' The route list was cut off, so some may be missing.' : ''));
     return h('div', { style: 'padding:2px 16px 10px 34px' }, h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(130px,1fr) 80px 110px;--w:480px' },
-      h('div', { class: 'tr head' }, ...['Group', 'Source', 'Direction', 'Rate'].map(t => h('span', null, t))),
+      h('div', { class: 'tr head' }, ...['Group', 'Joined by', 'Direction', 'Rate'].map(t => h('span', null, t))),
       gs.slice(0, cap).map(g => {
-        const t = total(g.routes), k = `${name}|${g.group}|${g.dir}`, on = openLoad.has(k), many = g.routes.length > 1;
-        const srcs = [...g.routes].sort((x, y) => (y.bps ?? -1) - (x.bps ?? -1));
+        const t = total(g.routes), k = `${name}|${g.group}|${g.dir}`, out = g.dir === 'out', hs = out ? hostsOf(g) : null, on = out && openLoad.has(k);
+        const can = !!hs && hs.members.length > 0;
         return h('div', { key: k },
-          h('div', { class: 'tr', role: many ? 'button' : undefined, tabindex: many ? 0 : undefined, 'aria-expanded': many ? on : undefined, style: many ? 'cursor:pointer' : undefined,
-            onclick: many ? () => toggleSet(openLoad, k) : undefined, onkeydown: many ? keyDown(() => toggleSet(openLoad, k)) : undefined },
-            h('span', { class: 'mono', style: mono }, many ? h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾ ' : '▸ ') : null, g.group),
-            many ? h('span', { class: 'mono dim', style: mono }, `${num(g.routes.length)} sources`) : sourceCell(g.routes[0]!),
-            h('span', { class: 'dim', style: mono, title: g.dir === 'in' ? 'The group arrives on this interface' : 'The group is sent out of this interface' }, g.dir === 'in' ? 'arrives' : 'sent out'),
+          h('div', { class: 'tr', role: can ? 'button' : undefined, tabindex: can ? 0 : undefined, 'aria-expanded': can ? on : undefined, style: can ? 'cursor:pointer' : undefined,
+            onclick: can ? () => toggleSet(openLoad, k) : undefined, onkeydown: can ? keyDown(() => toggleSet(openLoad, k)) : undefined },
+            h('span', { class: 'mono', style: mono }, can ? h('span', { class: 'dim', 'aria-hidden': 'true' }, on ? '▾ ' : '▸ ') : null, g.group),
+            out ? (can ? h('span', { class: 'mono', style: mono }, `${num(hs!.members.length)} ${hs!.members.length === 1 ? 'host' : 'hosts'}`) : h('span', { class: 'dim', style: mono }, hs!.viaNeighbor ? 'via the neighbour' : 'none seen'))
+              : h('span', { class: 'mono dim', style: mono, title: 'The group arrives on this interface from its source' }, g.routes.length === 1 ? (g.routes[0]!.sharedTree ? 'any source' : g.routes[0]!.source) : `${num(g.routes.length)} sources`),
+            h('span', { class: 'dim', style: mono, title: out ? 'The group is sent out of this interface' : 'The group arrives on this interface' }, out ? 'sent out' : 'arrives'),
             h('span', { class: 'mono', style: mono }, t === null ? '—' : t === 0 ? '0' : bps(t))),
-          on ? h('div', { style: 'padding:2px 0 8px 22px' }, h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(160px,1fr) 110px 90px;--w:360px' },
-            h('div', { class: 'tr head' }, ...['Source', 'Rate', 'Share'].map(x => h('span', null, x))),
-            srcs.slice(0, 100).map(r => h('div', { key: r.source, class: 'tr' }, sourceCell(r), h('span', { class: 'mono', style: mono }, rate(r)),
-              h('span', { class: 'mono dim', style: mono }, t && r.bps !== null ? `${Math.round((r.bps / t) * 100)}%` : '—')))),
-            srcs.length > 100 ? h('div', { class: 'dim', style: 'font-size:12px;padding:4px 16px' }, `${num(srcs.length - 100)} more sources not shown`) : null)) : null); }))),
-      gs.length > cap ? h('div', { class: 'dim', style: 'font-size:12px;padding-top:4px' }, `${num(gs.length - cap)} more groups not shown; use the search above to find one`) : null);
+          on && hs ? hostList(hs.members, name, g.group, hs.viaNeighbor) : null); }))),
+      gs.length > cap ? h('div', { class: 'dim', style: 'font-size:12px;padding-top:4px' }, `${num(gs.length - cap)} more groups not shown; use the Routes tab to find one`) : null);
   };
   return h('div', { class: 'col', style: 'gap:6px' }, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'muted', style: 'font-size:12px;font-weight:600' }, 'Multicast load by interface'),
     h('span', { class: 'dim', style: 'font-size:11.5px' }, 'rate is the routes\' own rates added up (interface counter when no route reports one); bytes are the interface counter since it started; open an interface to see its groups')),
