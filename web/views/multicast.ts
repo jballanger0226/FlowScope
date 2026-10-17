@@ -123,6 +123,33 @@ function whereToLook(): string {
   const model = detail?.device.model ? ` (${detail.device.model})` : '';
   return `check the switch${model}: on ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run ${hint.command}`;
 }
+let copiedCmd = false;
+/** The command to run on the switch, in a box that selects whole on one click, with a Copy button. */
+function commandBox(cmd: string): VNode {
+  const copy = (): void => {
+    const done = (): void => { copiedCmd = true; redraw(); setTimeout(() => { copiedCmd = false; redraw(); }, 1800); };
+    if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(cmd).then(done, () => undefined); else done();
+  };
+  return h('span', { class: 'row', style: 'gap:6px;align-items:center;display:inline-flex' },
+    h('code', { class: 'code', style: 'user-select:all;cursor:text;font-size:12.5px;padding:3px 8px', title: 'Click to select the whole command' }, cmd),
+    btn(copiedCmd ? 'Copied' : 'Copy', { small: true, onclick: copy }));
+}
+/** The sentence above the host lists: why the list is partial, and the command that gives the full one. */
+/** The warning above a host table, with the command in a copyable box. */
+function incompleteNote(): VNode {
+  const hint = detail?.igmpHint;
+  const why = 'Not a complete list. The router keeps only the last host to report each group, so FlowScope collects reporters as they answer queries (and, where the flow export includes IGMP, from NetFlow) and can miss hosts that have not been the last to report. ';
+  if (!hint?.command) return note(why + "For the full membership, check the switch's IGMP snooping table.", 'warn');
+  const model = detail?.device.model ? ` (${detail.device.model})` : '';
+  return note(h('span', { style: 'display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center' }, `${why}For the full membership, check the switch${model}. On ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run:`, commandBox(hint.command)), 'warn');
+}
+function fullListNote(): VNode {
+  const hint = detail?.igmpHint;
+  const lead = "Hosts that joined come from the router's IGMP cache over SNMP and are not a complete list. For the full membership, ";
+  if (!hint?.command) return h('div', { class: 'dim', style: 'font-size:12.5px' }, lead + "check the switch's IGMP snooping table.");
+  const model = detail?.device.model ? ` (${detail.device.model})` : '';
+  return h('div', { class: 'dim row', style: 'font-size:12.5px;gap:6px;align-items:center;flex-wrap:wrap' }, `${lead}check the switch${model}. On ${VENDOR_NAME[hint.vendor] ?? hint.vendor} ${hint.platform}, run:`, commandBox(hint.command));
+}
 const incomplete = (): string => `Not a complete list. The router keeps only the last host to report each group, so FlowScope collects reporters as they answer queries (and, where the flow export includes IGMP, from NetFlow) and can miss hosts that have not been the last to report. For the full membership, ${whereToLook()}.`;
 
 const ageText = (s: number): string => (s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 129_600 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} d ago`);
@@ -144,7 +171,7 @@ function oilRow(r: Route, o: Out): VNode {
         h('span', { class: 'mono', style: 'font-size:12px' }, joined()),
         h('span', { class: 'mono', style: 'font-size:12px' }, num(o.pkts))),
     many && on ? h('div', { class: 'mcsub', style: 'margin:2px 0 10px 18px;border-left:2px solid var(--line);padding-left:10px' },
-      o.neighbor ? null : note(incomplete(), 'warn'),
+      o.neighbor ? null : incompleteNote(),
       h('div', { class: 'tbl' }, h('div', { class: 'inner', style: '--cols:minmax(130px,1fr) minmax(220px,2fr) 150px 120px 110px;--w:700px' },
         h('div', { class: 'tr head' }, ...['Host', 'Plugged in at', 'Seen by', 'Last reported', 'Known for'].map(t => h('span', null, t))),
         members.map(m => h('div', { key: m.ip, class: 'tr' },
@@ -302,7 +329,7 @@ export function render(): VNode {
       detail ? pimSummary(detail) : null,
       ...(detail?.pimIssues ?? []).map(i => note(i.text, i.level === 'warn' ? 'warn' : 'info')),
       detail?.netflowIgmp !== undefined ? netflowNote(detail.netflowIgmp) : null,
-      cur ? h('div', { class: 'dim', style: 'font-size:12.5px' }, `Hosts that joined come from the router's IGMP cache over SNMP and are not a complete list. For the full membership, ${whereToLook()}.`) : null,
+      cur ? fullListNote() : null,
       detail?.routeSource === 'pim' ? note('This device does not publish the standard multicast routing table (IPMROUTE-STD-MIB), as NX-OS does not. The groups and sources below come from PIM, so they have no incoming or outgoing interfaces, rates or RPF information. Use the device\'s CLI (show ip mroute) for those.', 'info') : null,
       cur?.truncated ? note('This device holds more routes than FlowScope keeps. The list is cut off.', 'warn') : null,
       h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },
