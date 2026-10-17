@@ -20,6 +20,8 @@ export interface McOif {
   /** The route is forwarding out of this interface. False means it is pruned: the interface is in the list but no receiver wants the group. */
   forwarding: boolean;
   pkts: number | null;
+  /** Set on an SD-Access (LISP) outgoing interface that encapsulates the stream: the underlay group (232.x) it is sent in. The next-hop address of such an entry is the underlay group where an ordinary one repeats the route's own group. */
+  underlay?: string;
 }
 export interface McRoute {
   group: string;
@@ -174,7 +176,9 @@ export async function readMulticast(c: SnmpClient, now = Date.now(), cisco = tru
     const p = idx.split('.'); if (p.length < 17) continue;
     const r = routes.get(keyOf(ip4(p, 0), ip4(p, 4))); if (!r) continue;
     const ifIndex = Number(p[12]); if (!Number.isFinite(ifIndex)) continue;
-    r.oifs.push({ ifIndex, forwarding: num(v) === 2, pkts: num(nhPkts.get(idx)) });
+    const nh = ip4(p, 13), oif: McOif = { ifIndex, forwarding: num(v) === 2, pkts: num(nhPkts.get(idx)) };
+    if (isIp(nh) && nh !== r.group && nh.startsWith('232.') && !r.group.startsWith('232.')) oif.underlay = nh;
+    r.oifs.push(oif);
   }
   for (const r of routes.values()) r.oifs.sort((a, b) => a.ifIndex - b.ifIndex);
 

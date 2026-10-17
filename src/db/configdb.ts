@@ -275,7 +275,10 @@ const MIGRATIONS: string[] = [
   -- packets dropped because they arrived on the wrong interface (the RPF check), as growth between two reads of a router's multicast table, so the trend can be graphed
   CREATE TABLE mcast_rpf (dev_id INTEGER NOT NULL, ts INTEGER NOT NULL, dt INTEGER NOT NULL, drops INTEGER NOT NULL, routes INTEGER NOT NULL, PRIMARY KEY (dev_id, ts)) WITHOUT ROWID;
   `
-
+,
+  // multicast hosts are kept per VRF; '' is the default VRF
+  `ALTER TABLE mcast_members ADD COLUMN vrf TEXT NOT NULL DEFAULT '';
+   ALTER TABLE arp ADD COLUMN vrf TEXT NOT NULL DEFAULT '';`
 ];
 
 export class ConfigDb {

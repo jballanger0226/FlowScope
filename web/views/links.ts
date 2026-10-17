@@ -48,7 +48,9 @@ let ifSearch = '';
 let hostsRes: HostsRes | null = null; let hostsLoading = false; let hostsError = '';
 let findQ = ''; let found: Located | null = null; let findError = ''; let finding = false;
 let readingHosts = false; let readMsg = '';
-interface ArpRow { ip: string; mac: string; ifIndex: number; ifName: string; lastSeen: number }
+interface ArpRow { ip: string; mac: string; ifIndex: number; ifName: string; lastSeen: number; vrf?: string }
+interface VrfView { name: string; context: string; interfaces: { ifIndex: number; name: string }[]; hosts: number; hostsReadAt: number | null; multicast: { routes: number; groups: number; forwarding: number; readAt: number; stale: boolean } | null }
+let vrfRes: VrfView[] | null = null;
 let arpRes: { rows: ArpRow[]; readAt: number | null } | null = null; let arpQ = '';
 let nbRes: NbRes | null = null; let nbError = ''; let nbLoading = false;
 let wlan: WlanRes | null = null; let wlanError = ''; let wlanLoading = false; let clientFilter = '';
@@ -121,7 +123,7 @@ function select_(d: number, i: number, tab?: DevTab): void {
   if (d !== prevDev) { devTab = 'overview'; graphZoom = null; resZoom = null; quality = null; }
   if (tab) devTab = tab;
   devId = d; ifIndex = i; series = null; quality = null; streams = []; streamsTotal = 0; seriesError = ''; hostsRes = null; hostsError = ''; readMsg = '';
-  if (d !== prevDev) { arpRes = null; arpQ = ''; void loadArp(); nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); ifCpu = null; void loadResHist(); healthRes = null; void loadHealth(); }
+  if (d !== prevDev) { arpRes = null; arpQ = ''; void loadArp(); vrfRes = null; void loadVrfs(); nbRes = null; nbError = ''; void loadNeighbors(); wlan = null; wlanError = ''; clientFilter = ''; void loadWlan(); resHists.clear(); ifCpu = null; void loadResHist(); healthRes = null; void loadHealth(); }
   prevDev = d;
   void loadSeries(); void loadStreams(); void loadHosts();
   redraw();
@@ -215,6 +217,13 @@ async function loadStreams(): Promise<void> {
   streamsLoading = false; redraw();
 }
 
+let vseq = 0;
+async function loadVrfs(): Promise<void> {
+  if (!devId) return;
+  const my = ++vseq, d = devId;
+  try { const r = await get<{ vrfs: VrfView[] }>('/api/links/vrfs' + qs({ dev: d })); if (my === vseq && d === devId) vrfRes = r.vrfs; } catch { if (my === vseq) vrfRes = null; }
+  if (my === vseq) redraw();
+}
 let aseq = 0;
 async function loadArp(): Promise<void> {
   if (!devId) return;
@@ -426,8 +435,8 @@ function arpPanel(dev: Dev): VNode | null {
   const rows = arpRes?.rows ?? [];
   if (!rows.length && dev.role !== 'router' && dev.role !== 'firewall') return null;
   const q = arpQ.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const shown = rows.filter(r => !q.length || q.every(t => `${r.ip} ${r.mac} ${r.ifName}`.toLowerCase().includes(t)));
-  const cols = 'minmax(150px,1.2fr) 150px minmax(110px,1fr) 110px';
+  const shown = rows.filter(r => !q.length || q.every(t => `${r.ip} ${r.mac} ${r.ifName} ${r.vrf ?? ''}`.toLowerCase().includes(t)));
+  const anyVrf = rows.some(r => r.vrf), cols = anyVrf ? 'minmax(150px,1.2fr) 150px minmax(110px,1fr) 110px 110px' : 'minmax(150px,1.2fr) 150px minmax(110px,1fr) 110px';
   return h('div', { class: 'col', style: 'gap:8px' },
     h('div', { class: 'row', style: 'justify-content:space-between' },
       h('div', { class: 'col', style: 'gap:2px' }, h('b', null, 'ARP and neighbour cache'),
@@ -435,12 +444,32 @@ function arpPanel(dev: Dev): VNode | null {
           : `${dev.name} has not returned any ARP entries. Use "Read tables now", or "Check what this device publishes" on the SNMP devices tab to see whether it publishes IP-MIB.`)),
       rows.length > 8 ? textInput(arpQ, v => { arpQ = v; redraw(); }, { placeholder: 'Search address, MAC or interface', aria: 'Search the ARP cache', width: '260px' }) : null),
     rows.length ? h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:560px` },
-      h('div', { class: 'tr head' }, ...['IP address', 'MAC address', 'Interface', 'Last seen'].map(t => h('span', null, t))),
-      h('div', { class: 'scroll', style: 'max-height:360px' }, shown.map(r => h('div', { key: r.ip + r.mac + r.ifIndex, class: 'tr' },
+      h('div', { class: 'tr head' }, ...['IP address', 'MAC address', 'Interface', ...(anyVrf ? ['VRF'] : []), 'Last seen'].map(t => h('span', null, t))),
+      h('div', { class: 'scroll', style: 'max-height:360px' }, shown.map(r => h('div', { key: (r.vrf ?? '') + r.ip + r.mac + r.ifIndex, class: 'tr' },
         h('span', { class: 'mono', style: 'font-size:12px' }, r.ip), h('span', { class: 'mono', style: 'font-size:12px' }, r.mac),
         r.ifName ? h('button', { type: 'button', class: 'lnk', style: 'text-align:left', onclick: () => select_(dev.id, r.ifIndex, 'interfaces') }, r.ifName) : h('span', { class: 'dim' }, '—'),
+        ...(anyVrf ? [r.vrf ? h('span', { class: 'mono', style: 'font-size:12px' }, r.vrf) : h('span', { class: 'dim', title: 'The default VRF' }, 'default')] : []),
         h('span', { class: 'muted' }, ago(r.lastSeen))))),
       !shown.length ? empty('No entry matches that search.') : null)) : null);
+}
+
+/** The VRFs a device has: what is in each, and the way into its multicast table. Each is read in its own SNMP context (vrf-<name>). */
+function vrfPanel(dev: Dev): VNode | null {
+  const v = vrfRes ?? [];
+  if (!v.length) return null;
+  const cols = 'minmax(110px,0.8fr) minmax(200px,2fr) 90px minmax(170px,1.4fr)';
+  return h('div', { class: 'col', style: 'gap:8px' },
+    h('div', { class: 'col', style: 'gap:2px' }, h('b', null, `VRFs on ${dev.name}`),
+      h('span', { class: 'muted', style: 'font-size:12px' }, `${num(v.length)} VRF${v.length === 1 ? '' : 's'} (MPLS-L3VPN-STD-MIB). Hosts and multicast of a VRF are read in the SNMP context named vrf-<name>; a VRF with no multicast shown has no context set up for this credential, or no multicast routing.`)),
+    h('div', { class: 'tbl' }, h('div', { class: 'inner', style: `--cols:${cols};--w:620px` },
+      h('div', { class: 'tr head' }, ...['VRF', 'Interfaces', 'Hosts (ARP)', 'Multicast'].map(t => h('span', null, t))),
+      v.map(x => h('div', { key: x.name, class: 'tr' },
+        h('span', { class: 'mono', style: 'font-size:12.5px', title: `SNMP context ${x.context}` }, x.name),
+        h('span', { class: 'row', style: 'gap:4px 8px;flex-wrap:wrap' }, x.interfaces.slice(0, 8).map(i => h('button', { type: 'button', class: 'lnk mono', style: 'font-size:12px', title: `Open ${i.name}`, onclick: () => select_(dev.id, i.ifIndex, 'interfaces') }, i.name)),
+          x.interfaces.length > 8 ? h('span', { class: 'dim', style: 'font-size:12px' }, `+${num(x.interfaces.length - 8)} more`) : null),
+        h('span', { class: x.hosts ? 'mono' : 'dim' }, x.hosts ? num(x.hosts) : 'none read'),
+        x.multicast ? h('button', { type: 'button', class: 'lnk', style: 'text-align:left', title: `Open the multicast table of VRF ${x.name}`, onclick: () => go('multicast', { dev: dev.id, vrf: x.name }) }, `${num(x.multicast.groups)} ${x.multicast.groups === 1 ? 'group' : 'groups'}, ${num(x.multicast.forwarding)} forwarding`)
+          : h('span', { class: 'dim' }, 'not read'))))));
 }
 
 function neighborsPanel(dev: Dev): VNode {
@@ -896,7 +925,7 @@ function tabBody(dev: Dev, tab: DevTab): VNode {
   const body = tab === 'overview' ? overviewPanel(dev)
     : tab === 'interfaces' ? ifTable(dev)
     : tab === 'hardware' ? hardwareTab(dev)
-    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes, ifName: i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? '' }), arpPanel(dev), neighborsPanel(dev))
+    : tab === 'network' ? h('div', { class: 'col', style: 'gap:18px' }, protocolsPanel({ data: healthRes, ifName: i => dev.interfaces.find(x => x.ifIndex === i)?.name ?? '' }), vrfPanel(dev), arpPanel(dev), neighborsPanel(dev))
     : wlanPanel(dev);
   return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:14px' }, body);
 }

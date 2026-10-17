@@ -10,7 +10,7 @@ import { ago, bps, num, stamp } from '../util.js';
  * interfaces a group is sent out of, and the hosts that asked for it, come from the router's own multicast table read over SNMP.
  */
 
-interface DevSummary { id: number; name: string; ip: string; role: string; readAt: number; stale: boolean; source: 'cisco' | 'standard'; routes: number; groups: number; receivers: number; forwarding: number; truncated: boolean }
+interface DevSummary { id: number; name: string; ip: string; role: string; readAt: number; stale: boolean; source: 'cisco' | 'standard'; routes: number; groups: number; receivers: number; forwarding: number; truncated: boolean; vrfs?: { name: string; readAt: number; routes: number; groups: number; forwarding: number }[] }
 interface HostAt { dev: string; devId?: number; ifIndex?: number; port: string; vlan: number; confidence: string; neighbor: string | null }
 interface Join { reporter: string | null; expirySec: number | null; self: boolean }
 interface IgmpHint { vendor: string; platform: string; command: string | null }
@@ -23,11 +23,18 @@ interface RpfPeer { id: number; name: string; ifIndex: number; ifName: string; f
 interface Rpf { peer?: RpfPeer | null; loss?: boolean; inIfIndex?: number | null; inIf: string | null; neighbor: string | null; who: string | null; route: string | null; proto: string | null; failures: number | null; failuresNew?: number | null; failuresShare?: number | null; failuresMajor?: boolean; paths?: number | null }
 interface IgmpIf { name: string; querier: string | null; who: string | null; self: boolean; version: number | null; intervalSec: number | null; upSec: number | null; expirySec: number | null; hosts: number }
 interface RpMap { range: string; rp: string; who: string | null; self: boolean; holdSec: number | null; expirySec: number | null }
+interface Under { group: string; sources: { source: string; pkts: number | null }[]; exact: boolean }
+interface Overlay { vrf: string; group: string }
 interface Route {
   rpf?: Rpf | null;
+  /** SD-Access: the underlay group this overlay group is carried in (read in a VRF) */
+  underlay?: Under | null;
+  /** SD-Access: the overlay groups an underlay group carries (read in the default VRF) */
+  overlay?: Overlay[] | null;
   group: string; source: string; sharedTree: boolean; inIf: string | null; upstream: string | null; rp: string | null; bps: number | null; pkts: number | null; flags: string[]; protocol: number | null; mode?: 'sparse' | 'dense' | null; expirySec: number | null; out: Out[];
 }
 interface Detail {
+  vrf?: string; vrfs?: { name: string; routes: number | null }[];
   igmpHint?: IgmpHint;
   device: { id: number; name: string; ip: string; role: string; model?: string }; readAt: number; stale: boolean; source: 'cisco' | 'standard'; truncated: boolean; routes: Route[];
   rpfHistory?: { ts: number; perMin: number; routes: number }[];
@@ -42,6 +49,7 @@ interface Detail {
 }
 
 let devs: DevSummary[] | null = null; let devError = '';
+let vrf = '';                             // '' is the default VRF (the SD-Access underlay)
 let devId = 0; let detail: Detail | null = null; let detailError = ''; let loading = false;
 let query = ''; let onlyForwarding = false; let hideIdle = false;
 const open = new Set<string>();            // routes whose details are shown (group|source)
@@ -70,7 +78,8 @@ let seq = 0;
 export function enter(p: URLSearchParams): void {
   page = 0;
   const d = Number(p.get('dev'));
-  if (Number.isInteger(d) && d > 0 && d !== devId) { devId = d; detail = null; }
+  if (Number.isInteger(d) && d > 0 && d !== devId) { devId = d; detail = null; vrf = ''; }
+  if (p.has('vrf')) { const v = p.get('vrf') ?? ''; if (v !== vrf) { vrf = v; detail = null; } }
   const t = p.get('t'); if (t === 'routes' || t === 'load' || t === 'rpf' || t === 'igmp') tab = t;
   if (p.has('q')) query = p.get('q') ?? '';
   const g = p.get('g'); if (g) { openGroups.add(g); query = g; tab = 'routes'; }
@@ -88,11 +97,18 @@ async function loadDevices(): Promise<void> {
 async function loadDetail(): Promise<void> {
   if (!devId) return;
   const my = ++seq; loading = true; detailError = ''; redraw();
-  try { const d = await get<Detail>('/api/multicast/device' + qs({ id: devId })); if (my === seq) detail = d; } catch (e) { if (my === seq) { detail = null; detailError = (e as Error).message; } }
+  try { const d = await get<Detail>('/api/multicast/device' + qs({ id: devId, vrf: vrf || undefined })); if (my === seq) detail = d; } catch (e) { if (my === seq) { detail = null; detailError = (e as Error).message; } }
   if (my === seq) { loading = false; redraw(); }
 }
 
-function pickDevice(v: string): void { page = 0; devId = Number(v); detail = null; open.clear(); openGroups.clear(); openHosts.clear(); closedWhileSearching.clear(); void loadDetail(); }
+function pickDevice(v: string): void { page = 0; devId = Number(v); vrf = ''; detail = null; open.clear(); openGroups.clear(); openHosts.clear(); closedWhileSearching.clear(); void loadDetail(); }
+
+/** Switches to a VRF ('' is the default one), optionally searching for a group in it. */
+function pickVrf(v: string, group?: string): void {
+  page = 0; vrf = v; detail = null; open.clear(); openGroups.clear(); openHosts.clear(); closedWhileSearching.clear(); openLoad.clear();
+  if (group) { query = group; openGroups.add(group); tab = 'routes'; }
+  void loadDetail();
+}
 
 const rate = (r: Route): string => (r.bps === null ? '—' : r.bps === 0 ? '0' : bps(r.bps));
 const sec = (s: number | null): string => (s === null ? '—' : s < 90 ? `${s}s` : `${Math.round(s / 60)}m`);
@@ -209,6 +225,25 @@ function oilRow(r: Route, o: Out): VNode {
     many && on ? hostList(members, o.name, r.group, !!o.neighbor) : null);
 }
 
+/** SD-Access: the underlay group (in the default VRF) an overlay group is carried in. The switch names it on the routes it encapsulates itself. */
+function underlayLine(u: Under): VNode {
+  const rlocs = u.sources.filter(x => x.source !== '0.0.0.0').map(x => x.source);
+  return h('span', { class: 'row', style: 'gap:6px;align-items:center;flex-wrap:wrap' },
+    chip('SD-Access', 'default', 'This VRF is an overlay. The fabric carries each overlay multicast group in an underlay group (232.x) in the default VRF, sent between the switches\' RLOCs.'),
+    h('span', null, 'carried in underlay group ', h('b', { class: 'mono' }, u.group)),
+    u.exact ? null : h('span', { class: 'dim', title: 'The switch names the underlay group on the streams it encapsulates itself. This stream comes from elsewhere, so the group is the one the same overlay group uses on this switch.' }, '(from another source of this group)'),
+    rlocs.length ? h('span', { class: 'dim' }, `sent by ${rlocs.join(', ')}`) : null,
+    btn('Underlay', { small: true, kind: 'ghost', title: `Open ${u.group} in the default VRF`, aria: `Open underlay group ${u.group}`, onclick: () => pickVrf('', u.group) }));
+}
+/** SD-Access: the overlay groups (in VRFs) an underlay group carries. */
+function overlayLine(o: Overlay[]): VNode {
+  return h('span', { class: 'row', style: 'gap:6px;align-items:center;flex-wrap:wrap' },
+    chip('SD-Access', 'default', 'This is an underlay group. The fabric uses it to carry the overlay group named here between the switches.'),
+    h('span', null, 'carries'),
+    ...o.map(x => h('span', { class: 'row', style: 'gap:4px;align-items:center' }, h('b', { class: 'mono' }, `${x.group}`), h('span', { class: 'dim' }, `in VRF ${x.vrf}`),
+      btn('Overlay', { small: true, kind: 'ghost', title: `Open ${x.group} in VRF ${x.vrf}`, aria: `Open ${x.group} in VRF ${x.vrf}`, onclick: () => pickVrf(x.vrf, x.group) }))));
+}
+
 function expanded(r: Route): VNode {
   const cols = 'minmax(140px,1fr) 110px minmax(150px,1.2fr) minmax(200px,2fr) 90px';
   return h('div', { class: 'mcdetail', style: 'padding:6px 12px 14px' },
@@ -218,6 +253,8 @@ function expanded(r: Route): VNode {
       r.inIf ? h('span', null, 'Arrives on ', h('b', { class: 'mono' }, r.inIf)) : null,
       r.rpf ? rpfLine(r.rpf, r.group) : r.upstream ? h('span', null, 'Upstream ', h('b', { class: 'mono' }, r.upstream)) : null,
       r.rp ? h('span', null, 'Rendezvous point ', h('b', { class: 'mono' }, r.rp)) : null,
+      r.underlay ? underlayLine(r.underlay) : null,
+      r.overlay?.length ? overlayLine(r.overlay) : null,
       r.pkts !== null ? h('span', null, `${num(r.pkts)} packets`) : null,
       r.expirySec !== null ? h('span', null, r.expirySec === 0 ? 'route does not age out' : `route expires in ${sec(r.expirySec)}`) : null,
       r.flags.length ? h('span', null, 'Flags: ', r.flags.join(', ')) : null),
@@ -351,11 +388,13 @@ export function render(): VNode {
     devs && devs.length ? h('section', { class: 'panel col', style: 'gap:14px' },
       h('div', { class: 'row', style: 'gap:12px;align-items:center;flex-wrap:wrap' },
         devs.length > 1 ? select(String(devId), devs.map(d => [String(d.id), `${d.name} (${num(d.groups)} groups)`] as [string, string]), pickDevice, { aria: 'Device', width: '280px' }) : h('b', null, cur?.name ?? ''),
-        cur ? h('span', { class: 'dim', title: stamp(cur.readAt) }, `read ${ago(cur.readAt)}`) : null,
+        cur?.vrfs?.length ? select(vrf, [['', 'Default VRF (underlay)'] as [string, string], ...cur.vrfs.map(v => [v.name, `VRF ${v.name} (${num(v.groups)} ${v.groups === 1 ? 'group' : 'groups'})`] as [string, string])], v => pickVrf(v), { aria: 'VRF', width: '240px' }) : null,
+        cur ? h('span', { class: 'dim', title: stamp((vrf && detail ? detail.readAt : cur.readAt)) }, `read ${ago(vrf && detail ? detail.readAt : cur.readAt)}`) : null,
         cur?.stale ? statusEl('warn', 'out of date') : null,
         cur ? chip(cur.source === 'cisco' ? 'IPMROUTE + Cisco rates' : 'IPMROUTE standard', 'default', cur.source === 'cisco' ? 'Rates and route flags come from CISCO-IPMROUTE-MIB' : 'The device does not publish rates; only the standard table was read') : null,
         btn('Refresh', { small: true, onclick: () => { void loadDevices().then(() => loadDetail()); } })),
-      cur ? summary(cur) : null,
+      cur && !vrf ? summary(cur) : null,
+      vrf && detail ? note(`VRF ${vrf}: ${num(new Set(detail.routes.map(r => r.group)).size)} group${new Set(detail.routes.map(r => r.group)).size === 1 ? '' : 's'}, read in the SNMP context vrf-${vrf}. IGMP hosts are collected the same way, every few minutes.`, 'info') : null,
       detail ? pimSummary(detail) : null,
       ...(detail?.pimIssues ?? []).map(i => note(i.text, i.level === 'warn' ? 'warn' : 'info')),
       detail?.netflowIgmp !== undefined ? netflowNote(detail.netflowIgmp) : null,

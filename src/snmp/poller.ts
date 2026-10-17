@@ -9,6 +9,7 @@ import type { SnmpClient } from './client.js';
 import { readResources } from './resources.js';
 import { readMulticast, readIgmpReporters, withLoadRates } from './multicast.js';
 import { readFib } from './fib.js';
+import { readVrfs, contextOf } from './vrf.js';
 import { readEntity } from './entity.js';
 
 /** The slow optional readers. `run` returns whether the device had the table. */
@@ -19,6 +20,38 @@ const SLOW: SlowReader[] = [
   { name: 'igmp', cisco: false, every: 30_000, emptyEvery: 600_000, errorEvery: 600_000, run: async (c, d, devs, now) => { if (!devs.multicast(d.id)) return false; const rows = await readIgmpReporters(c); devs.noteIgmp(d.id, rows, now); return rows.length > 0; } },
   // the hardware model (chassis and modules) hardly ever changes
   { name: 'entity', cisco: false, every: 6 * 3600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readEntity(c, now); devs.saveData(d.id, 'entity', x, now); return !!x; } },
+  // The VRFs a device has (MPLS-L3VPN-STD-MIB). Each is read for multicast in its own SNMP context, below.
+  { name: 'vrfs', cisco: true, every: 3600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => {
+    const v = await readVrfs(c);
+    for (const old of devs.vrfs(d.id)) if (!v?.some(x => x.name === old.name)) { devs.saveVrfMulticast(d.id, old.name, null); devs.saveData(d.id, 'fib:' + old.name, null); }
+    devs.saveData(d.id, 'vrfs', v, now); return !!v;
+  } },
+  // Multicast routing inside each VRF. Needs `snmp-server context vrf-<NAME>` and `snmp context vrf-<NAME>` under the VRF's address family, and a v3 group that may read the context.
+  { name: 'vrfmc', cisco: true, every: 295_000, emptyEvery: 3600_000, errorEvery: 600_000, run: async (c, d, devs, now, cisco) => {
+    const dflt = devs.multicast(d.id); let any = false;
+    for (const v of devs.vrfs(d.id)) {
+      const cc = c.forContext(contextOf(v.name));
+      try {
+        const m0 = await readMulticast(cc, now, cisco);
+        if (!m0 || !m0.routes.length) { devs.saveVrfMulticast(d.id, v.name, null); continue; }
+        // the VRF's own context does not publish the names of VLAN and tunnel interfaces; they are the same on the whole device
+        m0.names = { ...(dflt?.names ?? {}), ...(m0.names ?? {}) }; m0.down = [...new Set([...(dflt?.down ?? []), ...(m0.down ?? [])])];
+        const m = withLoadRates(m0, devs.vrfMulticast(d.id, v.name));
+        devs.saveVrfMulticast(d.id, v.name, m); any = true;
+        devs.noteIgmp(d.id, m.receivers.filter(r => r.lastReporter && !r.self).map(r => ({ group: r.group, ifIndex: r.ifIndex, reporter: r.lastReporter as string })), now, !m.truncated, v.name);
+      } catch { /* a VRF whose context is not set up is skipped */ } finally { cc.close(); }
+    }
+    return any;
+  } },
+  // The forwarding table of each VRF, for the equal-cost path counts on its multicast routes
+  { name: 'vrffib', cisco: true, every: 600_000, emptyEvery: 3600_000, errorEvery: 3600_000, run: async (c, d, devs) => {
+    let any = false;
+    for (const v of devs.vrfs(d.id)) {
+      const cc = c.forContext(contextOf(v.name));
+      try { const f = await readFib(cc); devs.saveData(d.id, 'fib:' + v.name, f, f?.readAt); if (f) any = true; } catch { /* context not set up */ } finally { cc.close(); }
+    }
+    return any;
+  } },
   { name: 'fib', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs) => { const f = await readFib(c); devs.saveData(d.id, 'fib', f, f?.readAt); return !!f; } },
   // Cisco extras: the busiest processes, stack health, ARP inspection drops and the applications NBAR2 recognised
   { name: 'procs', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readProcesses(c, now); devs.saveData(d.id, 'procs', x, now); return !!x; } },

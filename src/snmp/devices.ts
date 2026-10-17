@@ -1,5 +1,7 @@
 import net from 'node:net';
 import type { Multicast } from './multicast.js';
+import type { Vrf } from './vrf.js';
+import { VRF_MC } from './vrf.js';
 import { diffExtra, linkOptics, type Health, type IfExtra } from './health.js';
 import { forgetIfExtra, ifExtraSeries, pruneIfExtra, recordIfExtra, type IfExtraSeries } from './iface_history.js';
 import { forgetResources, pruneResources, recordResources, resourceSeries, type ResSeries } from './resource_history.js';
@@ -215,21 +217,21 @@ export class DeviceService {
    * whoever reported last. A group that has left the cache drops all its hosts. A host not heard from for 30 minutes goes unless
    * host tracking still has it on the network (ARP), and none is kept past 12 hours.
    */
-  noteIgmp(devId: number, rows: { group: string; ifIndex: number; reporter: string }[], now: number, complete = true): void {
+  noteIgmp(devId: number, rows: { group: string; ifIndex: number; reporter: string }[], now: number, complete = true, vrf = ''): void {
     const db = this.cdb.db;
     this.cdb.tx(() => {
-      const up = db.prepare('INSERT INTO mcast_members(dev_id, grp, if_index, ip, first_seen, last_seen) VALUES (?,?,?,?,?,?) ON CONFLICT(dev_id, grp, if_index, ip) DO UPDATE SET last_seen = excluded.last_seen');
+      const up = db.prepare('INSERT INTO mcast_members(dev_id, grp, if_index, ip, first_seen, last_seen, vrf) VALUES (?,?,?,?,?,?,?) ON CONFLICT(dev_id, grp, if_index, ip) DO UPDATE SET last_seen = excluded.last_seen');
       const mine = new Set(((db.prepare('SELECT ip FROM device_ips WHERE dev_id = ?').all(devId) as unknown as { ip: string }[]).map(r => r.ip)));
       const live = new Set<string>();
-      for (const r of rows) { live.add(r.group + '|' + r.ifIndex); if (!mine.has(r.reporter)) up.run(devId, r.group, r.ifIndex, r.reporter, now, now); }
-      if (complete) for (const m of db.prepare('SELECT DISTINCT grp, if_index FROM mcast_members WHERE dev_id = ?').all(devId) as unknown as { grp: string; if_index: number }[]) {
+      for (const r of rows) { live.add(r.group + '|' + r.ifIndex); if (!mine.has(r.reporter)) up.run(devId, r.group, r.ifIndex, r.reporter, now, now, vrf); }
+      if (complete) for (const m of db.prepare('SELECT DISTINCT grp, if_index FROM mcast_members WHERE dev_id = ? AND vrf = ?').all(devId, vrf) as unknown as { grp: string; if_index: number }[]) {
         if (!live.has(m.grp + '|' + m.if_index)) db.prepare('DELETE FROM mcast_members WHERE dev_id = ? AND grp = ? AND if_index = ?').run(devId, m.grp, m.if_index);
       }
       db.prepare('DELETE FROM mcast_members WHERE dev_id = ? AND (last_seen < ? OR (last_seen < ? AND ip NOT IN (SELECT ip FROM arp WHERE last_seen >= ?)))').run(devId, now - 12 * 3600_000, now - 30 * 60_000, now - 30 * 60_000);
     });
   }
-  mcastMembers(devId: number): { group: string; ifIndex: number; ip: string; firstSeen: number; lastSeen: number }[] {
-    return (this.cdb.db.prepare('SELECT grp, if_index, ip, first_seen, last_seen FROM mcast_members WHERE dev_id = ? ORDER BY last_seen DESC').all(devId) as unknown as { grp: string; if_index: number; ip: string; first_seen: number; last_seen: number }[])
+  mcastMembers(devId: number, vrf = ''): { group: string; ifIndex: number; ip: string; firstSeen: number; lastSeen: number }[] {
+    return (this.cdb.db.prepare('SELECT grp, if_index, ip, first_seen, last_seen FROM mcast_members WHERE dev_id = ? AND vrf = ? ORDER BY last_seen DESC').all(devId, vrf) as unknown as { grp: string; if_index: number; ip: string; first_seen: number; last_seen: number }[])
       .map(r => ({ group: r.grp, ifIndex: r.if_index, ip: r.ip, firstSeen: r.first_seen, lastSeen: r.last_seen }));
   }
 
@@ -246,6 +248,11 @@ export class DeviceService {
     const r = this.cdb.db.prepare('SELECT data FROM device_mcast WHERE dev_id = ?').get(id) as { data: string } | undefined;
     return r ? JSON.parse(r.data) as Multicast : null;
   }
+
+  /** The VRFs a device has, as last read, and the multicast state of one of them (read in its own SNMP context). */
+  vrfs(id: number): Vrf[] { return this.data<Vrf[]>(id, 'vrfs') ?? []; }
+  vrfMulticast(id: number, vrf: string): Multicast | null { return this.data<Multicast>(id, VRF_MC + vrf); }
+  saveVrfMulticast(id: number, vrf: string, m: Multicast | null): void { this.saveData(id, VRF_MC + vrf, m, m?.readAt); }
 
   /** The latest health of a device, with optic sensors tied to the interface they belong to. */
   health(id: number): Health | null {

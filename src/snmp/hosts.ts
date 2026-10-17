@@ -1,4 +1,5 @@
 import type { ConfigDb } from '../db/configdb.js';
+import { contextOf } from './vrf.js';
 import type { AppLog } from '../logger.js';
 import type { DeviceRow, DeviceService } from './devices.js';
 import type { SnmpClient } from './client.js';
@@ -69,7 +70,13 @@ export class HostTracker {
     for (const n of nbs) if (n.kind !== 'infra' && (known.has(shortName(n.name)) || (n.ip && knownIps.has(n.ip)))) n.kind = 'infra';
 
     let arpRows = 0;
-    const arp = await readArp(c).catch(e => { notes.push(`ARP not read: ${(e as Error).message}`); return []; });
+    const arp: (Awaited<ReturnType<typeof readArp>>[number] & { vrf: string })[] = (await readArp(c).catch(e => { notes.push(`ARP not read: ${(e as Error).message}`); return []; })).map(a => ({ ...a, vrf: '' }));
+    // The hosts of a VRF (every end host on an SD-Access edge) are in that VRF's ARP table, which only its SNMP context shows
+    let vrfArp = 0;
+    for (const v of this.devs.vrfs(d.id)) {
+      const cc = c.forContext(contextOf(v.name));
+      try { const rows = await readArp(cc); arp.push(...rows.map(a => ({ ...a, vrf: v.name }))); vrfArp += rows.length; } catch { /* the context is not set up for this credential */ } finally { cc.close(); }
+    }
 
     const cisco = (d.sys_object_id ?? '').startsWith('1.3.6.1.4.1.9.');
     let binds: DhcpBinding[] = [];
@@ -93,17 +100,17 @@ export class HostTracker {
       const up = this.db.prepare(`INSERT INTO fdb(dev_id, mac, vlan, if_index, first_seen, last_seen, since) VALUES (?,?,?,?,?,?,?)
         ON CONFLICT(dev_id, mac, vlan) DO UPDATE SET last_seen = excluded.last_seen, since = CASE WHEN fdb.if_index = excluded.if_index THEN fdb.since ELSE excluded.since END, if_index = excluded.if_index`);
       for (const e of fdb.entries) up.run(d.id, e.mac, e.vlan, e.ifIndex, now, now, now);
-      const ua = this.db.prepare(`INSERT INTO arp(dev_id, ip, mac, if_index, last_seen) VALUES (?,?,?,?,?)
-        ON CONFLICT(dev_id, ip, mac) DO UPDATE SET last_seen = excluded.last_seen, if_index = excluded.if_index`);
-      for (const a of arp) { ua.run(d.id, a.ip, a.mac, a.ifIndex, now); arpRows++; }
+      const ua = this.db.prepare(`INSERT INTO arp(dev_id, ip, mac, if_index, last_seen, vrf) VALUES (?,?,?,?,?,?)
+        ON CONFLICT(dev_id, ip, mac) DO UPDATE SET last_seen = excluded.last_seen, if_index = excluded.if_index, vrf = excluded.vrf`);
+      for (const a of arp) { ua.run(d.id, a.ip, a.mac, a.ifIndex, now, a.vrf); arpRows++; }
       // a lease the switch has seen also tells which IP address a MAC address uses; the bindings of a device are replaced as a whole, since an ended lease is gone from the table
       this.db.prepare('DELETE FROM dhcp_bindings WHERE dev_id = ?').run(d.id);
       const ub = this.db.prepare('INSERT OR REPLACE INTO dhcp_bindings(dev_id, mac, vlan, ip, if_index, lease_sec, last_seen) VALUES (?,?,?,?,?,?,?)');
-      for (const b of binds) { ub.run(d.id, b.mac, b.vlan, b.ip, b.ifIndex, b.leaseSec, now); ua.run(d.id, b.ip, b.mac, b.ifIndex, now); }
+      for (const b of binds) { ub.run(d.id, b.mac, b.vlan, b.ip, b.ifIndex, b.leaseSec, now); ua.run(d.id, b.ip, b.mac, b.ifIndex, now, ''); }
       this.db.prepare('DELETE FROM neighbors WHERE dev_id = ?').run(d.id);
       const un = this.db.prepare('INSERT OR REPLACE INTO neighbors(dev_id, if_index, proto, rem_key, rem_name, rem_port, rem_ip, kind, caps, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
       for (const n of nbs) un.run(d.id, n.ifIndex, n.proto, n.key, n.name, n.port, n.ip, n.kind, n.caps.join(','), now);
-      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries`, ...(binds.length ? [`${binds.length} DHCP snooping bindings`] : []), `${nbs.length} neighbours`, ...(wlan ? [`${wlan.clients.length} wireless clients`] : []), ...notes];
+      const parts = [`${fdb.entries.length} MAC addresses (${fdb.method})`, `${arpRows} ARP entries${vrfArp ? ` (${vrfArp} in VRFs)` : ''}`, ...(binds.length ? [`${binds.length} DHCP snooping bindings`] : []), `${nbs.length} neighbours`, ...(wlan ? [`${wlan.clients.length} wireless clients`] : []), ...notes];
       this.db.prepare('UPDATE devices SET hosts_at = ?, hosts_note = ? WHERE id = ?').run(now, parts.join('; '), d.id);
     });
     return { macs: fdb.entries.length, arp: arpRows, neighbors: nbs.length, wifiClients: wlan?.clients.length ?? 0, note: notes.join('; ') };
@@ -185,8 +192,8 @@ export class HostTracker {
 
   /** Hosts learned on one port, with the IP addresses their MACs have in any ARP table. */
   /** The ARP and IPv6 neighbour cache last read from one device (a router or firewall holds the addresses of everything on its networks). */
-  arpOf(devId: number, limit = 2000): { ip: string; mac: string; ifIndex: number; lastSeen: number }[] {
-    return (this.db.prepare('SELECT ip, mac, if_index AS ifIndex, MAX(last_seen) AS lastSeen FROM arp WHERE dev_id = ? GROUP BY ip, mac, if_index ORDER BY if_index, ip LIMIT ?').all(devId, limit) as unknown as { ip: string; mac: string; ifIndex: number; lastSeen: number }[]);
+  arpOf(devId: number, limit = 2000): { ip: string; mac: string; ifIndex: number; lastSeen: number; vrf: string }[] {
+    return (this.db.prepare('SELECT ip, mac, if_index AS ifIndex, MAX(last_seen) AS lastSeen, vrf FROM arp WHERE dev_id = ? GROUP BY ip, mac, if_index, vrf ORDER BY vrf, if_index, ip LIMIT ?').all(devId, limit) as unknown as { ip: string; mac: string; ifIndex: number; lastSeen: number; vrf: string }[]);
   }
 
   portHosts(devId: number, ifIndex: number, limit = 200): PortHost[] {

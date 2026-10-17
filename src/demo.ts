@@ -552,6 +552,18 @@ function seedHealth(app: App, id: number, d: Dev, net: Net, twice = false): void
     app.devices.saveMulticast(id, { readAt: now, source: 'cisco', routes, receivers, pimInterfaces: [{ ifIndex: e7, mode: 'sparse', dr: '10.255.1.1' }, { ifIndex: e9, mode: 'sparse-dense', dr: '10.255.1.1' }], neighbors: [{ address: '10.255.1.7', ifIndex: e7 }], igmpInterfaces: [{ ifIndex: e9, querier: '10.255.1.11', version: 2, queryIntervalSec: 125, querierUpSec: 5 * 86400, querierExpirySec: 240 }, { ifIndex: e7, querier: null, version: 2, queryIntervalSec: 125, querierUpSec: null, querierExpirySec: null }], rpGroups: [...new Set(routes.map((r: any) => r.group))].map((g: any, i: number) => ({ group: g, rp: i % 9 === 0 ? '10.255.1.7' : '10.255.0.1', up: true, sinceSec: 86400 })), rpSet: [], candidateRps: [], truncated: false, interfaces: [{ ifIndex: e9, inOctets: 91_000_000_000, outOctets: 1_820_000_000_000, inBps: 1_200_000_000, outBps: 24_000_000_000, ttl: null, rateLimit: null }, { ifIndex: e7, inOctets: 1_900_000_000_000, outOctets: 70_000_000_000, inBps: 25_000_000_000, outBps: 900_000_000, ttl: null, rateLimit: null }] });
     // hosts collected over time from the IGMP cache: several per group on the downlink
     for (const r of receivers) app.devices.noteIgmp(id, Array.from({ length: 6 }, (_, k) => ({ group: r.group, ifIndex: r.ifIndex, reporter: `10.1.4.${20 + ((Number(r.group.split('.')[3]) + k * 7) % 40)}` })), now, false);
+    // an SD-Access style overlay VRF: one stream sent into the fabric (underlay group 232.0.2.19) and two arriving from it
+    const lisp = 9001; const mrt = (group: string, source: string, inIfIndex: number, oifs: any[], pkts: number, bps: number) => ({ group, source, inIfIndex, upstream: null, protocol: 8, pkts, bps, expirySec: 180, flags: ['sparse'], rp: null, rpf: null, oifs });
+    const vm = { readAt: now, source: 'cisco', receivers: [{ group: '239.202.29.2', ifIndex: e9, lastReporter: '10.133.47.77', expirySec: 200, self: false }], pimInterfaces: [], neighbors: [], names: { [lisp]: 'LISP0.4102' }, truncated: false,
+      routes: [mrt('239.202.29.2', '10.133.47.240', e9, [{ ifIndex: lisp, forwarding: true, pkts: 185_142, underlay: '232.0.2.19' }], 185_142, 2_400_000),
+        mrt('239.202.29.2', '10.245.201.253', lisp, [{ ifIndex: e9, forwarding: true, pkts: 90_000 }], 90_000, 1_100_000),
+        mrt('239.202.29.2', '10.245.84.248', lisp, [{ ifIndex: e9, forwarding: true, pkts: 88_000 }], 88_000, 1_000_000)] };
+    app.devices.saveData(id, 'vrfs', [{ name: 'MEDIA', ifIndexes: [e9, lisp] }], now);
+    app.devices.saveVrfMulticast(id, 'MEDIA', vm as any);
+    app.devices.noteIgmp(id, [{ group: '239.202.29.2', ifIndex: e9, reporter: '10.133.47.77' }], now, false, 'MEDIA');
+    // the underlay side: the same stream as a (local RLOC, 232.0.2.19) route in the default VRF
+    routes.push(mrt('232.0.2.19', '10.255.1.1', e7, [{ ifIndex: e7, forwarding: true, pkts: 185_142 }], 185_142, 2_400_000), mrt('232.0.2.19', '10.255.1.7', e7, [{ ifIndex: e9, forwarding: true, pkts: 90_000 }], 90_000, 1_100_000));
+    const m0 = app.devices.multicast(id)!; m0.routes = routes; app.devices.saveMulticast(id, m0);
   }
   if (d.name === 'dc-spine-01') {
     const m = (n: number, role: string) => ({ index: n * 1000, number: n, role, state: 'ready', level: 'ok', mac: `00:1c:73:01:0${n}:00` });
@@ -571,6 +583,8 @@ function seedHosts(app: App, net: Net): void {
   const fdb = db.prepare(`INSERT INTO fdb(dev_id, mac, vlan, if_index, first_seen, last_seen, since) VALUES (?,?,?,?,?,?,?)
     ON CONFLICT(dev_id, mac, vlan) DO UPDATE SET last_seen = excluded.last_seen, if_index = excluded.if_index`);
   const arp = db.prepare(`INSERT INTO arp(dev_id, ip, mac, if_index, last_seen) VALUES (?,?,?,?,?) ON CONFLICT(dev_id, ip, mac) DO UPDATE SET last_seen = excluded.last_seen`);
+  // the hosts of the demo overlay VRF, read from its own ARP table
+  { const sp = net.ids.get('dc-spine-01'); if (sp) for (const [ip, m] of [['10.133.47.77', '00:50:56:aa:00:01'], ['10.133.47.240', '00:50:56:aa:00:02'], ['10.133.47.241', '00:50:56:aa:00:03']] as const) db.prepare('INSERT OR REPLACE INTO arp(dev_id, ip, mac, if_index, last_seen, vrf) VALUES (?,?,?,?,?,?)').run(sp, ip, m, net.idx('dc-spine-01', 'Eth1/9'), now, 'MEDIA'); }
   const nb = db.prepare(`INSERT OR REPLACE INTO neighbors(dev_id, if_index, proto, rem_key, rem_name, rem_port, rem_ip, kind, caps, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?)`);
   const ix = (dev: string, port: string) => net.idx(dev, port);
   app.cdb.tx(() => {

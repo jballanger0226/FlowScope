@@ -1,4 +1,5 @@
 import { rpfSignificant } from '../snmp/multicast.js';
+import { contextOf } from '../snmp/vrf.js';
 import { neighborViews } from '../analysis/path.js';
 import { pathEnv } from './pathenv.js';
 import type { App } from '../app.js';
@@ -141,7 +142,29 @@ export function registerLinks(app: App): void {
     const d = app.devices.row(dev);
     if (!d) throw new HttpError(404, 'No such device');
     const names = new Map(app.devices.interfaces(dev).map(i => [i.ifIndex, i.name]));
-    c.json({ rows: app.hosts.arpOf(dev).map(r => ({ ...r, ifName: names.get(r.ifIndex) ?? '' })), readAt: d.hosts_at });
+    c.json({ rows: app.hosts.arpOf(dev).map(r => ({ ...r, ifName: names.get(r.ifIndex) || app.devices.ifNameById(dev, r.ifIndex) || '' })), readAt: d.hosts_at });
+  });
+
+  // The VRFs of a device: their interfaces, the hosts in their ARP tables and their multicast state, each read in the VRF's own SNMP context
+  w.get('/api/links/vrfs', 'ro', c => {
+    const dev = int(c.query.get('dev'), 0, 0, 1e9);
+    const d = app.devices.row(dev);
+    if (!d) throw new HttpError(404, 'No such device');
+    const mcNames = app.devices.multicast(dev)?.names ?? {};
+    const nameOf = (ix: number): string => app.devices.interfaces(dev).find(i => i.ifIndex === ix)?.name || app.devices.ifNameById(dev, ix) || mcNames[ix] || `if${ix}`;
+    const arp = app.hosts.arpOf(dev, 20_000), now = Date.now();
+    c.json({
+      vrfs: app.devices.vrfs(dev).map(v => {
+        const mc = app.devices.vrfMulticast(dev, v.name);
+        const hosts = arp.filter(a => a.vrf === v.name);
+        return {
+          name: v.name, context: contextOf(v.name),
+          interfaces: v.ifIndexes.map(ix => ({ ifIndex: ix, name: mc?.names?.[ix] ?? nameOf(ix) })),
+          hosts: hosts.length, hostsReadAt: hosts.length ? Math.max(...hosts.map(h => h.lastSeen)) : null,
+          multicast: mc ? { routes: mc.routes.length, groups: new Set(mc.routes.map(r => r.group)).size, forwarding: mc.routes.filter(r => r.oifs.some(o => o.forwarding)).length, readAt: mc.readAt, stale: now - mc.readAt > 10 * 60_000 } : null
+        };
+      })
+    });
   });
 
   // Wi-Fi state of an access point: the AP itself, its radios, its SSIDs and the clients connected to it
