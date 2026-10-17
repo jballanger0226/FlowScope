@@ -17,7 +17,7 @@ export interface Sensor {
   /** The interface an optic belongs to, filled in from the device's interface list when served */
   ifIndex?: number;
 }
-export interface Poe { group: number; budgetW: number | null; usedW: number | null; usedPct: number | null; status: 'on' | 'off' | 'faulty' | 'unknown'; portsDelivering: number; portsFault: number; portsTotal: number }
+export interface Poe { group: number; budgetW: number | null; usedW: number | null; usedPct: number | null; allocW: number | null; remainingW: number | null; allocPct: number | null; status: 'on' | 'off' | 'faulty' | 'unknown'; portsDelivering: number; portsFault: number; portsTotal: number }
 export interface Stp { rootId: string; isRoot: boolean; rootPort: number; rootCost: number; topChanges: number | null; sinceChangeSec: number | null; blockingPorts: number; ports: number }
 export interface OspfNeighbor { id: string; address: string; state: string; level: Level }
 export interface BgpPeer { address: string; as: number | null; state: string; level: Level; admin: string; upSec: number | null; updatesIn: number | null; updatesOut: number | null }
@@ -202,18 +202,24 @@ export function linkOptics(sensors: Sensor[], ifaces: { index: number; name: str
 
 /* ------------------------------------------------------------------ PoE (POWER-ETHERNET-MIB, RFC 3621) */
 
+/** CISCO-POWER-ETHERNET-EXT-MIB cpeExtMainPseTable, in milliwatts: .4 the power reserved for the devices on the ports, .5 what is left of the budget. */
+const CPE = { alloc: '1.3.6.1.4.1.9.9.402.1.3.1.4', remaining: '1.3.6.1.4.1.9.9.402.1.3.1.5' };
 const PETH = { power: '1.3.6.1.2.1.105.1.3.1.1.2', oper: '1.3.6.1.2.1.105.1.3.1.1.3', used: '1.3.6.1.2.1.105.1.3.1.1.4', portStatus: '1.3.6.1.2.1.105.1.1.1.6' };
 
 export async function readPoe(c: SnmpClient): Promise<Poe[]> {
   const col = colsOf(c);
-  const [power, oper, used, ports] = await Promise.all([col(PETH.power), col(PETH.oper), col(PETH.used), col(PETH.portStatus)]);
+  const [power, oper, used, ports, alloc, left] = await Promise.all([col(PETH.power), col(PETH.oper), col(PETH.used), col(PETH.portStatus), col(CPE.alloc), col(CPE.remaining)]);
   const groups = new Set<string>([...power.keys(), ...oper.keys()]);
   const out: Poe[] = [];
   for (const g of [...groups].sort((a, b) => Number(a) - Number(b))) {
     const mine = [...ports].filter(([k]) => k.split('.')[0] === g).map(([, v]) => num(v));
     const budget = num(power.get(g)), usedW = num(used.get(g)), st = num(oper.get(g));
+    // what the switch has set aside for the devices on its ports. A device is refused when this, not what it draws, reaches the budget.
+    const mw = (v: SnmpValue | undefined): number | null => { const n = num(v); return n === null ? null : Math.round(n / 100) / 10; };
+    const allocW = mw(alloc.get(g)), remainingW = mw(left.get(g));
     out.push({
       group: Number(g), budgetW: budget, usedW, usedPct: budget && budget > 0 && usedW !== null ? Math.round((usedW / budget) * 1000) / 10 : null,
+      allocW, remainingW, allocPct: budget && budget > 0 && allocW !== null ? Math.round((allocW / budget) * 1000) / 10 : null,
       status: st === 1 ? 'on' : st === 2 ? 'off' : st === 3 ? 'faulty' : 'unknown',
       portsDelivering: mine.filter(x => x === 3).length, portsFault: mine.filter(x => x === 4 || x === 6).length, portsTotal: mine.length
     });

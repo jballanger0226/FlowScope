@@ -236,7 +236,7 @@ export async function runChecks(c: Walker & Partial<Pick<SnmpClient, 'get'>>, f:
       : { id: 'sensors', title: 'Temperature, fans and power', group: 'hardware', state: ex.sensors === 'must' ? 'warn' : 'na', count: 0, detail: sens.error ?? (ex.sensors === 'must' ? 'No sensors were returned.' : 'No sensor tables. Not every device publishes them.'), hint: SENSOR_HINT[ex.vendor] });
     if (op.length) { const n = new Set(op.map(x => x.name.replace(/\s*(transmit|receive|tx|rx|temperature|bias|power|sensor|lane \d+).*$/i, '').trim() || x.name)).size; out.push({ id: 'optics', title: 'Optic light levels', group: 'hardware', state: 'ok', count: n, detail: `${plural(n, 'optic')} with transmit and receive light levels and module temperature.` }); }
   }
-  if (ex.poe) out.push(poe.v.length ? { id: 'poe', title: 'Power over Ethernet', group: 'hardware', state: 'ok', count: poe.v.length, detail: `${plural(poe.v.length, 'power source')}${poe.v[0].usedW !== null && poe.v[0].budgetW ? `: ${poe.v[0].usedW} of ${poe.v[0].budgetW} W in use` : ''}.` }
+  if (ex.poe) out.push(poe.v.length ? { id: 'poe', title: 'Power over Ethernet', group: 'hardware', state: 'ok', count: poe.v.length, detail: `${plural(poe.v.length, 'power source')}${poe.v[0].usedW !== null && poe.v[0].budgetW ? `: ${poe.v[0].usedW} W drawn${poe.v[0].allocW !== null ? `, ${poe.v[0].allocW} W reserved` : ' (this device does not report reserved power)'} of a ${poe.v[0].budgetW} W budget` : ''}.` }
     : { id: 'poe', title: 'Power over Ethernet', group: 'hardware', state: 'na', count: 0, detail: poe.error ?? 'No PoE information (POWER-ETHERNET-MIB). Normal for a switch without PoE ports.' });
 
   // Spanning tree and routing neighbours

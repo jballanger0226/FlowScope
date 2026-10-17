@@ -13,6 +13,7 @@ import { DEFAULTS } from '../settings.js';
 import { linkWarnings } from '../snmp/health.js';
 import { modelText, type Entity } from '../snmp/entity.js';
 import { authMethods, type AuthPort } from '../snmp/authsetup.js';
+import type { PoePort } from '../snmp/poeports.js';
 import type { Aaa } from '../snmp/aaa.js';
 import type { Lisp } from '../snmp/lisp.js';
 import { byRloc, conversations, registrationCheck } from '../analysis/lispcheck.js';
@@ -67,6 +68,7 @@ export async function linkDevices(app: App, minutes: number) {
   const counts = app.hosts.portCounts();
   const opVl = new Map(app.devices.list().map(d => [d.id, app.hosts.operatingVlans(d.id)] as const));
   const vmaps = new Map(app.devices.list().map(d => [d.id, app.devices.vrfMaps(d.id)] as const));
+  const poeBy = new Map(app.devices.list().map(d => [d.id, new Map((app.devices.data<PoePort[]>(d.id, 'poeports') ?? []).map(p => [p.ifIndex, p]))] as const));
   const setups = new Map(app.devices.list().map(d => [d.id, new Map((app.devices.data<AuthPort[]>(d.id, 'authsetup') ?? []).map(p => [p.ifIndex, p]))] as const));
   const devices = app.devices.list().map(d => ({
     id: d.id, name: d.name, ip: d.ip, role: d.role, status: d.status, lastOk: d.lastOk, lastError: d.lastError, profile: d.profile,
@@ -89,6 +91,7 @@ export async function linkDevices(app: App, minutes: number) {
         ifIndex: i.ifIndex, name: i.name, alias: i.alias, mac: i.mac, addresses: i.addresses, speedMbps: i.speedMbps, oper: i.oper === 1 ? 'up' : i.oper === 2 ? 'down' : 'other', policy: i.policy, policyIn: i.policyIn,
         portMode: i.portMode, vlan: i.vlan || null, vlanName: i.vlan ? app.vlanName(i.vlan) : '', voiceVlan: i.voiceVlan || null, voiceVlanName: i.voiceVlan ? app.vlanName(i.voiceVlan) : '', vlanList: i.vlanList, ...(dynamic.length ? { opVlans: dynamic.map(v => ({ vlan: v, name: app.vlanName(v), hosts: seen.find(x => x.vlan === v)?.hosts ?? 0 })) } : {}),
         ...((): { authSetup: { methods: string; mode: string; open: boolean; control: string } } | Record<string, never> => { const a = setups.get(d.id)?.get(i.ifIndex); return a && (a.dot1x || a.mab) ? { authSetup: { methods: authMethods(a), mode: a.mode, open: a.open, control: a.control } } : {}; })(),
+        ...((): { poe: PoePort } | Record<string, never> => { const x = poeBy.get(d.id)?.get(i.ifIndex); return x && (x.detected || x.drawnW > 0 || x.allocW > 0) ? { poe: x } : {}; })(),
         isVlanIf: vlanIf, hosts: counts.get(`${d.id}/${i.ifIndex}`) ?? 0, ...((): { vrf: string; vrfVia: string } | Record<string, never> => { const vm = vmaps.get(d.id); const x = vm ? ifaceVrf(dynamic.length ? { ...i, vlan: dynamic[0]! } : i, vm.direct, vm.byVlan) : null; return x ? { vrf: x.vrf, vrfVia: x.via } : {}; })(),
         utilIn: l?.utilIn ?? null, utilOut: l?.utilOut ?? null, inBps: l?.inBps ?? null, outBps: l?.outBps ?? null, disc: l?.disc ?? 0, err: l?.err ?? 0,
         classes: i.classes.map(def => {

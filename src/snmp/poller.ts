@@ -13,6 +13,7 @@ import { readVrfs, contextOf } from './vrf.js';
 import { readEntity } from './entity.js';
 import { readAaa, type Aaa } from './aaa.js';
 import { readAuthSetup } from './authsetup.js';
+import { readPoePorts } from './poeports.js';
 import { readConfigState } from './confighist.js';
 import { readLisp, type Lisp } from './lisp.js';
 
@@ -49,6 +50,7 @@ const SLOW: SlowReader[] = [
   } },
   // Authentication servers (RADIUS / TACACS+) as the device sees them, the way each port is set up to authenticate, and whether the running configuration was saved
   { name: 'aaa', cisco: true, every: 60_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readAaa(c, devs.data<Aaa>(d.id, 'aaa'), now); devs.saveData(d.id, 'aaa', x, now); return !!x?.servers.length; } },
+  { name: 'poeports', cisco: true, every: 120_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readPoePorts(c); devs.saveData(d.id, 'poeports', x.length ? x : null, now); return x.length > 0; } },
   { name: 'authsetup', cisco: true, every: 600_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readAuthSetup(c); devs.saveData(d.id, 'authsetup', x.length ? x : null, now); return x.length > 0; } },
   { name: 'config', cisco: true, every: 300_000, emptyEvery: 86_400_000, errorEvery: 3600_000, run: async (c, d, devs, now) => { const x = await readConfigState(c, now); devs.saveData(d.id, 'config', x, now); return !!x; } },
   // LISP map cache, registrations and map servers of an SD-Access node. Each read is compared with the last to see what entered and left the cache.

@@ -5,7 +5,7 @@ interface OvHealth {
   ifExtra: { ifIndex: number; warnings: { level: Level; text: string }[] }[];
   health: null | {
     sensors: { kind: string; name: string; state: Level; stateText: string; ifIndex?: number }[];
-    poe: { status: string; portsFault: number; usedPct: number | null }[];
+    poe: { status: string; portsFault: number; usedPct: number | null; allocPct?: number | null; allocW?: number | null; budgetW?: number | null }[];
     stp: null | { sinceChangeSec: number | null; topChanges: number | null };
     ospf: { id: string; address: string; state: string; level: Level }[];
     bgp: { address: string; as: number | null; state: string; level: Level }[];
@@ -74,7 +74,8 @@ export function issues(o: OvInput): Issue[] {
     }
     for (const p of hl.poe) {
       if (p.status === 'faulty' || p.portsFault) out.push({ level: 'bad', title: 'PoE fault', detail: p.status === 'faulty' ? 'The power source is faulty.' : plural(p.portsFault, 'port') + ' in fault.', target: { tab: 'hardware' } });
-      if (p.usedPct !== null && p.usedPct >= 90) out.push({ level: 'warn', title: `PoE budget ${p.usedPct}% used`, detail: 'New powered devices may be refused.', target: { tab: 'hardware' } });
+      if (p.allocPct != null && p.allocPct >= 90) out.push({ level: p.allocPct >= 100 ? 'bad' : 'warn', title: `PoE budget ${p.allocPct}% reserved`, detail: `${p.allocW} of ${p.budgetW} W is set aside for connected devices${p.usedPct != null ? `, ${p.usedPct}% is being drawn` : ''}. New powered devices may be refused.`, target: { tab: 'hardware' } });
+      else if (p.usedPct !== null && p.usedPct >= 90) out.push({ level: 'warn', title: `PoE budget ${p.usedPct}% used`, detail: 'New powered devices may be refused.', target: { tab: 'hardware' } });
     }
     for (const n of hl.ospf) if (n.level !== 'ok' && n.level !== 'off') out.push({ level: n.level === 'bad' ? 'bad' : 'warn', title: `OSPF neighbour ${n.id || n.address} is ${n.state}`, detail: n.address, target: { tab: 'network' } });
     for (const p of hl.bgp) if (p.level === 'bad' || p.level === 'warn') out.push({ level: p.level, title: `BGP peer ${p.address} is ${p.state}`, detail: p.as !== null ? `AS ${p.as}` : '', target: { tab: 'network' } });

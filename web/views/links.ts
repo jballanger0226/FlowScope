@@ -17,7 +17,7 @@ interface Resources { uptimeSec: number | null; cpuPct: number | null; cores: nu
 interface Iface {
   mac: string; addresses: string[];
   ifIndex: number; name: string; alias: string; speedMbps: number | null; oper: string; policy: string | null; policyIn: string | null;
-  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[]; authSetup?: { methods: string; mode: string; open: boolean; control: string };
+  portMode: string; vlan: number | null; vlanName: string; voiceVlan: number | null; voiceVlanName: string; vlanList: string; isVlanIf: boolean; hosts: number; vrf?: string; vrfVia?: 'interface' | 'vlan' | 'vlans'; opVlans?: { vlan: number; name: string; hosts: number }[]; authSetup?: { methods: string; mode: string; open: boolean; control: string }; poe?: { allocW: number; drawnW: number; maxW: number | null; detected: boolean };
   utilIn: number | null; utilOut: number | null; inBps: number | null; outBps: number | null; disc: number; err: number;
   classes: Cls[]; worstDropPct: number | null; priorityPct?: number | null; mcastPct?: number | null; flagged: boolean;
 }
@@ -353,7 +353,8 @@ const vrfNote = (i: Iface): VNode | null => (i.vrf ? h('span', { class: 'dim', s
 function vlanCell(i: Iface): VNode {
   const base = vlanCellBase(i), v = vrfNote(i), a = i.authSetup;
   const au = a ? h('span', { class: 'dim', style: 'font-size:11px', title: `This port authenticates its clients: ${a.methods}, host mode ${a.mode}, port control ${a.control}${a.open ? '. Open mode: clients get network access before they authenticate.' : ''}` }, `${a.methods} · ${a.mode}${a.open ? ' · open' : ''}`) : null;
-  return v || au ? h('span', { class: 'col', style: 'gap:1px' }, base, v, au) : base;
+  const pw = i.poe && i.poe.detected ? h('span', { class: 'dim', style: 'font-size:11px', title: `Power over Ethernet. Drawn is what the device uses now; reserved is what the switch has set aside for it and counts against the PoE budget${i.poe.maxW ? `. Port limit ${i.poe.maxW} W` : ''}` }, `PoE ${i.poe.drawnW} W drawn · ${i.poe.allocW} W reserved`) : null;
+  return v || au || pw ? h('span', { class: 'col', style: 'gap:1px' }, base, v, au, pw) : base;
 }
 function vlanCellBase(i: Iface): VNode {
   if (i.isVlanIf || i.portMode === 'svi') return h('span', { class: 'muted' }, i.vlan ? `SVI for VLAN ${vlanLabel(i.vlan, i.vlanName)}` : 'SVI');
@@ -913,6 +914,14 @@ function ifTabs(dev: Dev, itf: Iface): VNode {
   const now = ifTabNow(dev, itf);
   return tabs('Interface sections', ifTabList(dev, itf).map(t => ({ id: t.id, label: t.label, on: t.id === now })), id => { ifTab = id as IfTab; redraw(); });
 }
+/** Power over Ethernet on the selected port: what the device draws now and what the switch has reserved for it. */
+function poeLine(itf: Iface): VNode | null {
+  const x = itf.poe; if (!x || !x.detected) return null;
+  const idle = x.allocW > 0 && x.drawnW < x.allocW * 0.25;
+  return h('div', { class: 'row', style: 'gap:12px;flex-wrap:wrap', role: 'status' }, h('b', null, 'Power over Ethernet'),
+    h('span', null, `${x.drawnW} W drawn`), h('span', null, `${x.allocW} W reserved`), x.maxW ? h('span', { class: 'dim' }, `port limit ${x.maxW} W`) : null,
+    idle ? h('span', { class: 'dim', style: 'font-size:12px' }, 'The device draws far less than the switch reserved for it. Reserved power is what counts against the budget.') : null);
+}
 function ifBody(dev: Dev, itf: Iface): VNode {
   const tab = ifTabNow(dev, itf);
   const body = tab === 'quality' ? [
@@ -922,7 +931,7 @@ function ifBody(dev: Dev, itf: Iface): VNode {
     : [classTable(itf), nbarPanel(healthRes?.extras?.nbar, itf.ifIndex),
       seriesLoading && !series ? spinner('Loading the graphs…') : seriesError ? note(seriesError, 'bad', true) : series ? graphs(series, itf) : null,
       streamsPanel(dev, itf)];
-  return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:16px' }, body);
+  return h('div', { key: tab, role: 'tabpanel', class: 'col', style: 'gap:16px' }, tab === 'traffic' ? [poeLine(itf), ...body] : body);
 }
 
 /** The sub-tabs of the selected device. Only those with something to show are listed. */
